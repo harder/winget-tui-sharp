@@ -13,6 +13,15 @@ public sealed class App : Runnable
     /// <remarks>One row of breathing room below the wordmark before the list/search start.</remarks>
     private const int HeaderHeight = Logo.LogoHeight + 1;
 
+    // Debounce before an uncached detail fetch fires. Scrolling the list changes the selection
+    // rapidly; without this, every row the cursor passes over issues a full backend detail
+    // request (for COM: ConnectAsync + FindByIdAsync + GetCatalogPackageMetadata). Bursts of
+    // those throttle/wedge the WinGet out-of-proc COM server, causing the detail panel to stall
+    // for tens of seconds while it recovers. Holding the fetch until the selection settles for
+    // this interval collapses a fast scroll to a single request (the row landed on). Each
+    // selection change cancels the pending delay, so passed-over rows never hit the backend.
+    private const int DetailLoadDebounceMs = 200;
+
     private readonly AppState _state;
     private readonly TabBar _tabBar;
     private readonly Logo _logo;
@@ -452,10 +461,13 @@ public sealed class App : Runnable
                         _ => Theme.TextSecondary
                     };
 
+                    // Color-code only the unselected (Normal) cells. The selected row's
+                    // background is Theme.Accent, so an Accent foreground (msstore) would be
+                    // invisible (Accent-on-Accent); leaving Focus/Active as the row defaults
+                    // keeps the highlighted Source cell readable (dark-on-gold).
                     return new Scheme (args.RowScheme)
                     {
-                        Normal = new (fg, args.RowScheme.Normal.Background),
-                        Focus = new (fg, args.RowScheme.Focus.Background)
+                        Normal = new (fg, args.RowScheme.Normal.Background)
                     };
                 };
             }
@@ -564,6 +576,11 @@ public sealed class App : Runnable
                   {
                       try
                       {
+                          // Debounce: a fast scroll cancels `ct` (via CancelPendingDetailLoad on
+                          // the next selection change) before this delay elapses, so we only fetch
+                          // for the row the cursor settles on — not every row it passes over.
+                          await Task.Delay (DetailLoadDebounceMs, ct);
+
                           PackageDetail? detail = await _state.Backend.ShowAsync (p.Id, ct);
 
                           if (ct.IsCancellationRequested || gen != _state.DetailGeneration)
