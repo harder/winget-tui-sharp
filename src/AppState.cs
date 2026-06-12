@@ -6,6 +6,13 @@ namespace WingetTuiSharp;
 /// </summary>
 public sealed class AppState
 {
+    /// <summary>
+    /// Upper bound on rows a single search returns, so a pathologically broad query can't flood
+    /// the table. Lives here (not in the WINGET_COM-gated ComBackend) so the cross-platform App
+    /// build can reference it too. The COM backend applies it via FindPackagesOptions.ResultLimit.
+    /// </summary>
+    public const int SearchResultLimit = 1000;
+
     public AppState (IBackend backend) => Backend = backend;
 
     public IBackend Backend { get; }
@@ -23,7 +30,17 @@ public sealed class AppState
 
     public string SearchQuery { get; set; } = string.Empty;
     public string LocalFilter { get; set; } = string.Empty;
-    public SourceFilter SourceFilter { get; set; } = SourceFilter.All;
+
+    /// <summary>The catalog the source filter is scoped to, or null for "All". Cycled by <see cref="CycleSourceFilter"/>.</summary>
+    public string? SourceFilter { get; set; }
+
+    /// <summary>
+    /// Configured source names the filter cycles through (besides "All"). Seeded with the two
+    /// predefined sources and replaced once <see cref="IBackend.ListSourcesAsync"/> resolves at
+    /// startup, so custom/enterprise REST sources become filterable too.
+    /// </summary>
+    public IReadOnlyList<string> AvailableSources { get; set; } = ["winget", "msstore"];
+
     public PinFilter PinFilter { get; set; } = PinFilter.All;
     public SortField SortField { get; set; } = SortField.None;
     public SortDir SortDir { get; set; } = SortDir.Asc;
@@ -31,6 +48,9 @@ public sealed class AppState
     public bool DetailLoading { get; set; }
     public string StatusMessage { get; set; } = string.Empty;
     public bool StatusIsError { get; set; }
+
+    /// <summary>Which backend is live + its winget version (e.g. "COM · winget 1.11.400"), for the header badge and help. Empty until resolved at startup.</summary>
+    public string BackendDescription { get; set; } = string.Empty;
 
     /// <summary>Progress of the in-flight install/upgrade/uninstall, or null when none is running.</summary>
     public OpProgress? OpProgress { get; set; }
@@ -117,14 +137,40 @@ public sealed class AppState
         };
     }
 
+    /// <summary>
+    /// Cycle All → each configured source in order → All. Resilient to the available-source list
+    /// changing under it (a now-missing current source just restarts the cycle at All).
+    /// </summary>
     public void CycleSourceFilter ()
     {
-        SourceFilter = SourceFilter switch
+        if (AvailableSources.Count == 0)
         {
-            SourceFilter.All => SourceFilter.Winget,
-            SourceFilter.Winget => SourceFilter.MsStore,
-            _ => SourceFilter.All
-        };
+            SourceFilter = null;
+
+            return;
+        }
+
+        if (SourceFilter is null)
+        {
+            SourceFilter = AvailableSources [0];
+
+            return;
+        }
+
+        int idx = -1;
+
+        for (int i = 0; i < AvailableSources.Count; i++)
+        {
+            if (string.Equals (AvailableSources [i], SourceFilter, StringComparison.OrdinalIgnoreCase))
+            {
+                idx = i;
+
+                break;
+            }
+        }
+
+        // null = "All" once we step past the last source (or if the current one vanished).
+        SourceFilter = idx >= 0 && idx + 1 < AvailableSources.Count ? AvailableSources [idx + 1] : null;
     }
 
     public void CyclePinFilter ()
@@ -154,12 +200,14 @@ public sealed class AppState
                    };
     }
 
-    public static string SourceLabel (SourceFilter f)
+    /// <summary>Status-bar badge text for a source filter: null → "All", else the source name (capitalized for the two predefined ones).</summary>
+    public static string SourceLabel (string? f)
         => f switch
         {
-            SourceFilter.Winget => " Winget ",
-            SourceFilter.MsStore => " MsStore ",
-            _ => " All "
+            null => " All ",
+            "winget" => " Winget ",
+            "msstore" => " MsStore ",
+            _ => $" {f} "
         };
 
     public static string PinLabel (PinFilter f)

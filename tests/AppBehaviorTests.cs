@@ -162,6 +162,34 @@ public class AppBehaviorTests
         }
     }
 
+    [Fact]
+    public async Task MockBackend_Repair_ReportsRepairingProgressAndSucceeds ()
+    {
+        CollectingProgress progress = new ();
+
+        OpResult result = await new MockBackend ().RepairAsync ("Git.Git", progress, CancellationToken.None);
+
+        Assert.True (result.Success);
+        Assert.Equal (OperationKind.Repair, result.Operation.Kind);
+        Assert.Contains (progress.Samples, s => s.Phase == OpPhase.Repairing);
+        Assert.Contains (progress.Samples, s => s.Phase == OpPhase.Done);
+    }
+
+    [Fact]
+    public void CanRepair_IsTrueForMock_AndFalseForCli ()
+    {
+        // Repair is COM-only: the mock fakes it for dev iteration; the CLI reports it unavailable.
+        Assert.True (new MockBackend ().CanRepair);
+        Assert.False (new CliBackend ().CanRepair);
+    }
+
+    private sealed class CollectingProgress : IProgress<OpProgress>
+    {
+        public List<OpProgress> Samples { get; } = [];
+
+        public void Report (OpProgress value) => Samples.Add (value);
+    }
+
     private static DetailPanel CreateDetailPanel ()
     {
         DetailPanel panel = new ()

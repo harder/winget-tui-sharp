@@ -32,6 +32,7 @@ public sealed class App : Runnable
     private readonly DetailPanel _detailPanel;
     private readonly StatusBar _statusBar;
     private readonly Label _searchHint;
+    private readonly Label _backendLabel;
     private CancellationTokenSource _viewCts = new ();
     private CancellationTokenSource _detailCts = new ();
 
@@ -57,6 +58,19 @@ public sealed class App : Runnable
         // pushes the list/detail panes down one row while active. ---
         _logo = new () { X = 1, Y = 0 };
         _tabBar = new () { X = Pos.Right (_logo) + 4, Y = (Logo.LogoHeight - 1) / 2, Width = Dim.Fill (1) };
+
+        // Which backend is live + its winget version, dim in the top-right of the header. Empty
+        // until DescribeAsync resolves at startup (see OnIsRunningChanged). Anchored to the last
+        // logo row so it never collides with the tab row above it.
+        _backendLabel = new ()
+        {
+            X = Pos.AnchorEnd (),
+            Y = Logo.LogoHeight - 1,
+            Height = 1,
+            Width = Dim.Auto (),
+            Text = string.Empty,
+            SchemeName = Theme.AccentDimSchemeName
+        };
 
         // --- Search / filter input (hidden until needed). Lives immediately below the
         // header chrome; the list shifts down another row when search is shown. ---
@@ -118,7 +132,7 @@ public sealed class App : Runnable
             Width = Dim.Fill ()
         };
 
-        Add (_logo, _tabBar, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar);
+        Add (_logo, _tabBar, _backendLabel, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar);
 
         // --- Version input dialog field (lives inside MessageBox-like popover; we use a separate field) ---
         _versionInput = new ();
@@ -202,11 +216,82 @@ public sealed class App : Runnable
             _initialLoadDone = true;
             TriggerRefresh ();
             StartSpinner ();
+            LoadBackendDescription ();
+            LoadSources ();
         }
         else if (!newIsRunning)
         {
             StopSpinner ();
         }
+    }
+
+    /// <summary>
+    /// Resolve which backend is live + its winget version once at startup and show it in the
+    /// header badge. Best-effort: a failure just leaves the badge empty (the app works regardless).
+    /// </summary>
+    private void LoadBackendDescription ()
+    {
+        Task.Run (async () =>
+                  {
+                      string description;
+
+                      try
+                      {
+                          description = await _state.Backend.DescribeAsync (CancellationToken.None);
+                      }
+                      catch
+                      {
+                          return;
+                      }
+
+                      App?.Invoke (() =>
+                                   {
+                                       _state.BackendDescription = description;
+                                       _backendLabel.Text = description;
+                                       _backendLabel.SetNeedsLayout ();
+                                       _backendLabel.SetNeedsDraw ();
+                                   });
+                  });
+    }
+
+    /// <summary>
+    /// Discover the configured package sources once at startup so the <c>f</c> source filter cycles
+    /// through the real source list (including custom/enterprise REST sources) instead of just the
+    /// two predefined ones. Best-effort: on failure the seeded ["winget","msstore"] defaults stand.
+    /// A currently-selected source that's absent from the discovered list is reset to "All".
+    /// </summary>
+    private void LoadSources ()
+    {
+        Task.Run (async () =>
+                  {
+                      IReadOnlyList<string> sources;
+
+                      try
+                      {
+                          sources = await _state.Backend.ListSourcesAsync (CancellationToken.None);
+                      }
+                      catch
+                      {
+                          return;
+                      }
+
+                      if (sources.Count == 0)
+                      {
+                          return;
+                      }
+
+                      App?.Invoke (() =>
+                                   {
+                                       _state.AvailableSources = sources;
+
+                                       if (_state.SourceFilter is { } current
+                                           && !sources.Any (s => string.Equals (s, current, StringComparison.OrdinalIgnoreCase)))
+                                       {
+                                           _state.SourceFilter = null;
+                                           RefreshStatusBar ();
+                                       }
+                                   });
+                  });
     }
 
     private void StartSpinner ()
@@ -245,7 +330,7 @@ public sealed class App : Runnable
         CancellationToken ct = _viewCts.Token;
         int gen = _state.BumpViewGeneration ();
         AppMode mode = _state.Mode;
-        SourceFilter src = _state.SourceFilter;
+        string? src = _state.SourceFilter;
         string query = _state.SearchQuery;
 
         // Remember the currently-selected package id so we can re-position the cursor on the
@@ -298,6 +383,13 @@ public sealed class App : Runnable
                                            _state.Loading = false;
                                            int n = _state.Filtered.Count;
                                            _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
+
+                                           // A search that hit the result cap means there's more the user can't see;
+                                           // nudge them to narrow it (only the COM backend actually caps).
+                                           if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
+                                           {
+                                               _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
+                                           }
                                            RefreshTable ();
                                            RefreshStatusBar ();
                                            RestoreCursorOrSelectFirst (previousSelectedId);
@@ -961,6 +1053,14 @@ public sealed class App : Runnable
                     key.Handled = true;
 
                     return;
+                case 'R':
+                    if (_state.Mode != AppMode.Search)
+                    {
+                        AskRepair (CurrentPackage ());
+                        key.Handled = true;
+                    }
+
+                    return;
                 case 'u':
                     AskUpgrade (CurrentPackage ());
                     key.Handled = true;
@@ -1271,7 +1371,64 @@ public sealed class App : Runnable
             sb.AppendLine ($"{(c.Ok ? "✓" : "✗")} {c.Label}{detail}");
         }
 
-        MessageBox.Query (App, $"Verify: {p.Name}", sb.ToString ().TrimEnd (), "_OK");
+        string body = sb.ToString ().TrimEnd ();
+
+        // When the install is damaged, offer to repair it right from the result dialog. Choosing
+        // Repair runs it directly (no second confirm — clicking Repair here is the confirmation,
+        // and this path is COM-only since Verify is). Other outcomes are informational only.
+        if (v.Outcome == VerifyOutcome.Issues)
+        {
+            if (MessageBox.Query (App, $"Verify: {p.Name}", body, "_Repair", "_Close") == 0)
+            {
+                RunRepair (p);
+            }
+
+            return;
+        }
+
+        MessageBox.Query (App, $"Verify: {p.Name}", body, "_OK");
+    }
+
+    /// <summary>
+    /// Repair an installed package (re-run the installer in repair mode). Gated on the backend
+    /// supporting repair — degrades to a neutral message like Verify does on the CLI backend.
+    /// </summary>
+    private void AskRepair (Package? p)
+    {
+        if (p is null || App is null)
+        {
+            return;
+        }
+
+        if (!_state.Backend.CanRepair)
+        {
+            _state.StatusMessage = "Repair is only available on the COM backend.";
+            _state.StatusIsError = false;
+            RefreshStatusBar ();
+
+            return;
+        }
+
+        if (!Confirm ("Repair", $"Repair {p.Name}? This re-runs the installer's repair to fix a damaged install."))
+        {
+            return;
+        }
+
+        RunRepair (p);
+    }
+
+    /// <summary>
+    /// Execute the repair (guard + run). Shared by the standalone action (which confirms first via
+    /// <see cref="AskRepair"/>) and the Verify→Repair offer (which treats the button click as the confirm).
+    /// </summary>
+    private void RunRepair (Package p)
+    {
+        if (App is null || GuardTruncatedId (p, "repair"))
+        {
+            return;
+        }
+
+        RunOperation ($"Repairing {p.Name}", (prog, ct) => _state.Backend.RepairAsync (p.Id, prog, ct));
     }
 
     private InstallSettings? PromptAdvancedOptions (Package p)
@@ -1716,7 +1873,7 @@ public sealed class App : Runnable
             return;
         }
 
-        HelpDialog dlg = new ();
+        HelpDialog dlg = new (_state.BackendDescription);
         App.Run (dlg);
         dlg.Dispose ();
     }

@@ -12,33 +12,44 @@ namespace WingetTuiSharp;
 /// </summary>
 public sealed partial class CliBackend : IBackend
 {
-    private static string SourceArg (SourceFilter f)
-        => f switch
-        {
-            SourceFilter.Winget => "winget",
-            SourceFilter.MsStore => "msstore",
-            _ => string.Empty
-        };
-
-    public async Task<IReadOnlyList<Package>> SearchAsync (string query, SourceFilter source, CancellationToken ct)
+    public async Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
     {
         string output = await RunAsync (SearchArgs (query, source), ct);
 
         return ParseTable (output, hasAvailable: false);
     }
 
-    public async Task<IReadOnlyList<Package>> ListInstalledAsync (SourceFilter source, CancellationToken ct)
+    public async Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
     {
         string output = await RunAsync (ListInstalledArgs (source), ct);
 
         return ParseTable (output, hasAvailable: false);
     }
 
-    public async Task<IReadOnlyList<Package>> ListUpgradesAsync (SourceFilter source, CancellationToken ct)
+    public async Task<IReadOnlyList<Package>> ListUpgradesAsync (string? source, CancellationToken ct)
     {
         string output = await RunAsync (ListUpgradesArgs (source), ct);
 
         return ParseTable (output, hasAvailable: true);
+    }
+
+    /// <summary>
+    /// The configured source names from `winget source list`, e.g. ["winget", "msstore"].
+    /// Falls back to the two predefined sources if the command fails or parses empty.
+    /// </summary>
+    public async Task<IReadOnlyList<string>> ListSourcesAsync (CancellationToken ct)
+    {
+        try
+        {
+            string output = await RunAsync (["source", "list"], ct);
+            IReadOnlyList<string> names = ParseSourceNames (output);
+
+            return names.Count > 0 ? names : ["winget", "msstore"];
+        }
+        catch
+        {
+            return ["winget", "msstore"];
+        }
     }
 
     public async Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
@@ -61,6 +72,18 @@ public sealed partial class CliBackend : IBackend
     // No CLI equivalent to CheckInstalledStatus — null signals "verify unavailable on this backend".
     public Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct)
         => Task.FromResult<InstallVerification?> (null);
+
+    // Repair is COM-only by design (see the Repair spec). The UI gates on CanRepair, so this
+    // safety-net failure is never reached through the app.
+    public bool CanRepair => false;
+
+    public Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+        => Task.FromResult (new OpResult
+        {
+            Operation = new () { Kind = OperationKind.Repair, PackageId = id },
+            Success = false,
+            Message = "Repair is only available on the COM backend."
+        });
 
     // progress is unused: winget.exe only emits an ANSI progress bar to stdout, which we
     // capture as a whole rather than scrape. The COM backend is the one that reports progress.
@@ -140,43 +163,38 @@ public sealed partial class CliBackend : IBackend
     // catch any drift.
     // ──────────────────────────────────────────────────────────────────────
 
-    internal static string [] SearchArgs (string query, SourceFilter source)
+    internal static string [] SearchArgs (string query, string? source)
     {
         List<string> args = ["search", query, "--accept-source-agreements"];
-
-        if (source != SourceFilter.All)
-        {
-            args.Add ("--source");
-            args.Add (SourceArg (source));
-        }
+        AppendSource (args, source);
 
         return [.. args];
     }
 
-    internal static string [] ListInstalledArgs (SourceFilter source)
+    internal static string [] ListInstalledArgs (string? source)
     {
         List<string> args = ["list", "--accept-source-agreements"];
-
-        if (source != SourceFilter.All)
-        {
-            args.Add ("--source");
-            args.Add (SourceArg (source));
-        }
+        AppendSource (args, source);
 
         return [.. args];
     }
 
-    internal static string [] ListUpgradesArgs (SourceFilter source)
+    internal static string [] ListUpgradesArgs (string? source)
     {
         List<string> args = ["upgrade", "--accept-source-agreements", "--include-pinned"];
-
-        if (source != SourceFilter.All)
-        {
-            args.Add ("--source");
-            args.Add (SourceArg (source));
-        }
+        AppendSource (args, source);
 
         return [.. args];
+    }
+
+    /// <summary>Append `--source &lt;name&gt;` when a specific source is selected; nothing for "All" (null/empty).</summary>
+    private static void AppendSource (List<string> args, string? source)
+    {
+        if (!string.IsNullOrEmpty (source))
+        {
+            args.Add ("--source");
+            args.Add (source);
+        }
     }
 
     internal static string [] ShowArgs (string id) =>
@@ -295,6 +313,21 @@ public sealed partial class CliBackend : IBackend
         string output = await RunAsync (["pin", "list"], ct);
 
         return ParsePins (output);
+    }
+
+    public async Task<string> DescribeAsync (CancellationToken ct)
+    {
+        try
+        {
+            (int code, string output) = await RunWithCodeAsync (["--version"], ct);
+            string version = code == 0 ? output.Trim ().TrimStart ('v', 'V') : string.Empty;
+
+            return string.IsNullOrEmpty (version) ? "CLI · winget" : $"CLI · winget {version}";
+        }
+        catch
+        {
+            return "CLI · winget";
+        }
     }
 
     /// <summary>
@@ -429,6 +462,69 @@ public sealed partial class CliBackend : IBackend
         (int _, string output) = await RunWithCodeAsync (args, ct);
 
         return output;
+    }
+
+    /// <summary>
+    /// Parse the Name column out of `winget source list`'s table (Name / Argument columns), reusing
+    /// the same dash-separator + column-slice machinery as the package table. Falls back to the
+    /// first whitespace-delimited token per row if the Name column can't be located.
+    /// </summary>
+    internal static IReadOnlyList<string> ParseSourceNames (string output)
+    {
+        output = StripAnsi (output);
+        string [] lines = SplitLines (output);
+        int sepIdx = -1;
+
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string line = StripControl (lines [i]).TrimEnd ();
+
+            if (line.Length >= 4 && line.All (c => c is '-' or '─'))
+            {
+                sepIdx = i;
+
+                break;
+            }
+        }
+
+        if (sepIdx <= 0)
+        {
+            return [];
+        }
+
+        List<(string Name, int Start)> columns = ParseHeader (StripControl (lines [sepIdx - 1]));
+        int nameIdx = ColIndex (columns, "name", "nom", "nombre", "nome");
+
+        if (nameIdx < 0)
+        {
+            nameIdx = 0;
+        }
+
+        List<string> names = [];
+
+        for (int i = sepIdx + 1; i < lines.Length; i++)
+        {
+            if (string.IsNullOrWhiteSpace (lines [i]))
+            {
+                continue;
+            }
+
+            string sanitized = StripControl (lines [i]);
+            string name = SliceColumn (sanitized, columns, nameIdx).Trim ();
+
+            if (string.IsNullOrEmpty (name))
+            {
+                string [] parts = sanitized.Trim ().Split (' ', StringSplitOptions.RemoveEmptyEntries);
+                name = parts.Length > 0 ? parts [0] : string.Empty;
+            }
+
+            if (!string.IsNullOrWhiteSpace (name))
+            {
+                names.Add (name);
+            }
+        }
+
+        return names;
     }
 
     public static async Task<(int Code, string Output)> RunWithCodeAsync (IReadOnlyList<string> args, CancellationToken ct)

@@ -121,7 +121,7 @@ public sealed class StatusBar : View
 
     public AppMode Mode { get; set; } = AppMode.Installed;
     public InputMode InputMode { get; set; } = InputMode.Normal;
-    public SourceFilter SourceFilter { get; set; } = SourceFilter.All;
+    public string? SourceFilter { get; set; }
     public PinFilter PinFilter { get; set; } = PinFilter.All;
     public string Message { get; set; } = string.Empty;
     public bool IsError { get; set; }
@@ -160,8 +160,10 @@ public sealed class StatusBar : View
         string srcLabel = AppState.SourceLabel (SourceFilter);
         Attribute srcAttr = SourceFilter switch
         {
-            SourceFilter.Winget => new (Theme.TextOnAccent, Theme.Info, TextStyle.Bold),
-            SourceFilter.MsStore => new (Theme.TextOnAccent, Theme.Accent, TextStyle.Bold),
+            "winget" => new (Theme.TextOnAccent, Theme.Info, TextStyle.Bold),
+            "msstore" => new (Theme.TextOnAccent, Theme.Accent, TextStyle.Bold),
+
+            // null = "All", and any custom source, share the neutral badge.
             _ => new (Theme.TextOnAccent, Theme.TextSecondary, TextStyle.Bold)
         };
         SetAttribute (srcAttr);
@@ -492,7 +494,7 @@ public sealed class AdvancedInstallDialog : Runnable<InstallSettings?>
 /// </summary>
 public sealed class HelpDialog : Runnable
 {
-    public HelpDialog ()
+    public HelpDialog (string backendDescription = "")
     {
         Title = " Help ";
         BorderStyle = LineStyle.Rounded;
@@ -503,13 +505,19 @@ public sealed class HelpDialog : Runnable
         SchemeName = Theme.SurfaceSchemeName;
         Arrangement = ViewArrangement.Movable;
 
+        // Lead with which backend is live so it's discoverable that the COM build can fall back
+        // to the CLI (see WINDOWS-TESTING.md). Empty until resolved → omit the line entirely.
+        string header = string.IsNullOrEmpty (backendDescription)
+                            ? string.Empty
+                            : $"Backend: {backendDescription}\n\n";
+
         Code content = new ()
         {
             X = 1,
             Y = 0,
             Width = Dim.Fill (1),
             Height = Dim.Fill (1),
-            Text = HelpText
+            Text = header + HelpText
         };
         Add (content);
 
@@ -560,6 +568,7 @@ public sealed class HelpDialog : Runnable
           u             Upgrade
           x             Uninstall
           V             Verify install (check files / registration)
+          R             Repair install (re-run the installer's repair)
           p             Pin / Unpin
           Space         Toggle batch select (Upgrades only)
           a             Select / deselect all (Upgrades only)

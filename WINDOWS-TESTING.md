@@ -101,10 +101,36 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 - [ ] Deliberately break an install (e.g. delete a file from the install dir) and confirm `V` reports the **Issues** outcome with the failing check.
 - [ ] (CLI backend, `--cli`) `V` reports "Verify is only available on the COM backend" rather than erroring.
 
+**Repair** (`R` — COM-only, via `RepairPackageAsync`):
+
+- [ ] `R` on a healthy installed package (Installed/Upgrades) confirms, then repairs: the status bar shows a determinate bar advancing through a **Repairing** phase, ending "Done" (or "(reboot required)").
+- [ ] **Verify → Repair flow**: break an install, `V` → **Issues** outcome → the result dialog offers **Repair** / **Close**; choosing **Repair** runs the repair **without a second confirm** and the install is restored (`V` again reports Ok).
+- [ ] A package whose installer has no repair behavior reports the friendly **"{name} doesn't support repair."** (`NoApplicableRepairer`), not a raw HRESULT.
+- [ ] **Esc during a repair** cancels cooperatively ("Cancelled"); the one-op-at-a-time gate blocks starting a second op mid-repair.
+- [ ] (CLI backend, `--cli`) `R` shows the neutral **"Repair is only available on the COM backend."** (not a red error), and the detail-panel `R Repair install` action is still listed.
+- [ ] `R` is **not** offered in Search mode (the selected package may not be installed).
+
 **Richer detail panel** (COM):
 
 - [ ] ⚠️ **Not a bug — symptom of the AOT COM-activation failure.** The extra manifest fields (**Tags**, **Product code**, **Family name**, **Support**, **Documentation**) never render because the app is running on the **CLI** backend (COM didn't activate — see the critical-finding banner), and these fields are COM-only (`null` on CLI by design, per `Models.cs`). The spike proved the COM data exists and is readable via the backend's indexed pattern, so once COM activation is fixed this should work. Re-test after the COM-on-AOT issue is resolved.
 - [x] Packages without these fields don't render empty rows (the lines are omitted when absent). *(Confirmed — absent fields cleanly omitted.)*
+- [ ] **New enrichment fields (COM, all conditional).** Once COM activates, confirm these render when present and are omitted when blank: **Author**, **Copyright**, **Privacy** (link), **Purchase** (link), **Installation notes** (paragraph section after Description), and for installed packages **Scope** + **Installed to** (location). These come from `CatalogPackageMetadata` (Author/Copyright/PrivacyUrl/PurchaseUrl/InstallationNotes) and `PackageVersionInfo.GetMetadata(InstalledScope/InstalledLocation)`. A package with none of them should look exactly as before.
+
+**Dynamic sources** (`f`) — COM via `GetPackageCatalogs()`, CLI via `winget source list`:
+
+- [ ] On a stock machine, `f` still cycles **All → Winget → MsStore → All** (the discovered list matches the two predefined sources).
+- [ ] **Add a custom source** (`winget source add -n contoso <url>`), relaunch, and confirm `f` now includes **contoso** in the cycle and filtering to it scopes the list/search to that source. (This is the whole point of going dynamic — verify it on both COM and `--cli`.)
+- [ ] With a source selected that no longer exists (remove it while the app holds it selected, then refresh), the filter resets to **All** rather than erroring.
+
+**Backend badge + version** (`PackageManager.Version`):
+
+- [ ] The top-right header shows the live backend + winget version, e.g. **`COM · winget 1.x`** (or `CLI · winget 1.x` / `Mock backend`). On the AOT build this is the quickest confirmation of whether COM actually activated or silently fell back to CLI.
+- [ ] The **Help** dialog (`?`) leads with a matching `Backend: …` line.
+
+**Search match hint + result cap** (COM):
+
+- [ ] Search a term that matches a package by **tag/moniker/command** (not its name) — the detail panel shows a dim `↳ matched on tag` footnote. A normal name/id match shows **no** such line.
+- [ ] A very broad search (e.g. a single common letter) caps at **1000** rows and the status reads `1000+ matches — refine your search to narrow` instead of flooding the table.
 
 **Live progress bar** (the headline feature — also tests `.Progress` delegate marshaling under AOT, the one CCW-callback unknown):
 
@@ -129,6 +155,7 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 - [ ] **CLI-backend cancel** (`--cli`, then Esc mid-install): confirm it stops watching but does **not** kill `winget.exe` (the install continues) — documented, lower priority.
 - [ ] **Measure the AOT binary size** of the COM (Windows) build and compare to the CLI/mock build, to budget the COM backend's cost. *(Open spike question.)*
 - [ ] **(Optional) win-arm64**: repeat the P0 smoke on an arm64 host or arm64 cross-target.
+- [ ] **Terminal.Gui bump `2.4.3-develop.9` → `2.4.7-develop.1`.** Spot-check the Windows-only input/render fixes that landed in the 2.4.4 release line (can't be verified from Linux): (a) type a **non-ASCII search query** (e.g. accented chars / IME) into `/` search and confirm it renders correctly (Windows VT input encoding fix #5453); (b) **paste** a Unicode string into search via bracketed paste and confirm no mojibake (clipboard fixes #5449/#5451); (c) **resize the terminal** mid-use and confirm no garbled frame at the wrong dimensions (#5461). No app code changed — these are upstream fixes the bump picks up for free.
 
 ---
 

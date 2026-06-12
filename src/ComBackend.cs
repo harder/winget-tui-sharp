@@ -52,7 +52,7 @@ public sealed class ComBackend : IBackend
     // Reads
     // ------------------------------------------------------------------------
 
-    public async Task<IReadOnlyList<Package>> SearchAsync (string query, SourceFilter source, CancellationToken ct)
+    public async Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace (query))
         {
@@ -74,6 +74,11 @@ public sealed class ComBackend : IBackend
             Value = query
         });
 
+        // Cap a pathologically broad query (e.g. a one-letter term) so it can't materialize tens
+        // of thousands of rows. The app already blocks empty queries; this guards the merely-broad
+        // ones. result.WasLimitExceeded below tells the UI to nudge the user to refine.
+        opts.ResultLimit = AppState.SearchResultLimit;
+
         FindPackagesResult result = await catalog.FindPackagesAsync (opts).AsTask (ct);
 
         List<Package> packages = [];
@@ -90,7 +95,8 @@ public sealed class ComBackend : IBackend
                     Id = pkg.Id,
                     Name = pkg.Name,
                     Version = version,
-                    Source = SourceOf (pkg)
+                    Source = SourceOf (pkg),
+                    MatchField = NotableMatchField (m)
                 });
             }
             catch
@@ -103,10 +109,36 @@ public sealed class ComBackend : IBackend
         return packages;
     }
 
-    public Task<IReadOnlyList<Package>> ListInstalledAsync (SourceFilter source, CancellationToken ct)
+    /// <summary>
+    /// The field this result matched on, but only when it's a non-obvious one. A match on Name,
+    /// Id, or the catalog default (free-text) is expected and needs no annotation; a match on a
+    /// Moniker, Tag, Command, family name, or product code explains why an otherwise-unexpected
+    /// package surfaced, so we surface those as a "Matched on" hint. Returns null otherwise.
+    /// </summary>
+    private static string? NotableMatchField (MatchResult m)
+    {
+        try
+        {
+            return m.MatchCriteria?.Field switch
+            {
+                PackageMatchField.Moniker => "moniker",
+                PackageMatchField.Tag => "tag",
+                PackageMatchField.Command => "command",
+                PackageMatchField.PackageFamilyName => "family name",
+                PackageMatchField.ProductCode => "product code",
+                _ => null
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
         => ListLocalAsync (source, upgradesOnly: false, ct);
 
-    public Task<IReadOnlyList<Package>> ListUpgradesAsync (SourceFilter source, CancellationToken ct)
+    public Task<IReadOnlyList<Package>> ListUpgradesAsync (string? source, CancellationToken ct)
         => ListLocalAsync (source, upgradesOnly: true, ct);
 
     /// <summary>
@@ -115,7 +147,7 @@ public sealed class ComBackend : IBackend
     /// from the implicit local "installed" catalog, correlated against the supplied remote
     /// catalog(s) so each row knows its available version / update status.
     /// </summary>
-    private async Task<IReadOnlyList<Package>> ListLocalAsync (SourceFilter source, bool upgradesOnly, CancellationToken ct)
+    private async Task<IReadOnlyList<Package>> ListLocalAsync (string? source, bool upgradesOnly, CancellationToken ct)
     {
         PackageCatalog catalog = await ConnectAsync (
             CompositeRef (RemoteRefs (source), CompositeSearchBehavior.LocalCatalogs),
@@ -161,7 +193,7 @@ public sealed class ComBackend : IBackend
 
     public async Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -189,6 +221,10 @@ public sealed class ComBackend : IBackend
 
         string? description = Coalesce (meta?.Description, meta?.ShortDescription);
 
+        // Installed-only metadata (location/scope) comes from the installed version's metadata
+        // bag, not the manifest — so resolve it from the installed version specifically.
+        PackageVersionInfo? installed = SafeInstalledVersion (pkg);
+
         try
         {
             return new ()
@@ -199,11 +235,18 @@ public sealed class ComBackend : IBackend
                 AvailableVersion = LatestAvailableVersion (pkg),
                 Source = SourceOf (pkg),
                 Publisher = NullIfEmpty (meta?.Publisher),
+                Author = NullIfEmpty (meta?.Author),
+                Copyright = NullIfEmpty (meta?.Copyright),
                 Description = description,
                 Homepage = NullIfEmpty (meta?.PackageUrl),
                 License = NullIfEmpty (meta?.License),
                 ReleaseNotesUrl = NullIfEmpty (meta?.ReleaseNotesUrl),
                 SupportUrl = NullIfEmpty (meta?.PublisherSupportUrl),
+                PrivacyUrl = NullIfEmpty (meta?.PrivacyUrl),
+                PurchaseUrl = NullIfEmpty (meta?.PurchaseUrl),
+                InstallationNotes = NullIfEmpty (meta?.InstallationNotes),
+                InstalledLocation = SafeMetadata (installed, PackageVersionMetadataField.InstalledLocation),
+                InstalledScope = SafeMetadata (installed, PackageVersionMetadataField.InstalledScope),
                 Tags = meta is null ? null : StringVector (() => meta.Tags),
                 Documentation = DocLinks (meta),
                 ProductCodes = StringVector (() => versionInfo.ProductCodes),
@@ -225,7 +268,7 @@ public sealed class ComBackend : IBackend
 
     public async Task<IReadOnlyList<string>> ListVersionsAsync (string id, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -258,7 +301,7 @@ public sealed class ComBackend : IBackend
 
     public async Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -380,7 +423,7 @@ public sealed class ComBackend : IBackend
     public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Install, PackageId = id, Version = version };
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -425,7 +468,7 @@ public sealed class ComBackend : IBackend
 
         // Installed context so the package carries both its installed version and the
         // correlated remote available versions that the upgrade resolves against.
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -450,7 +493,7 @@ public sealed class ComBackend : IBackend
     public async Task<OpResult> UninstallAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Uninstall, PackageId = id };
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -470,7 +513,7 @@ public sealed class ComBackend : IBackend
     public async Task<OpResult> DownloadAsync (string id, string? version, IProgress<OpProgress>? progress, CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Download, PackageId = id, Version = version };
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -515,9 +558,37 @@ public sealed class ComBackend : IBackend
                    : Fail (op, $"Download failed: {result.Status} (hr 0x{HResultOf (result.ExtendedErrorCode):X8})");
     }
 
+    public bool CanRepair => true;
+
+    public async Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    {
+        Operation op = new () { Kind = OperationKind.Repair, PackageId = id };
+
+        // Installed context so the package carries the installed version that repair targets.
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
+
+        if (pkg is null)
+        {
+            return Fail (op, $"Installed package '{id}' not found.");
+        }
+
+        RepairOptions options = new () { PackageRepairMode = PackageRepairMode.Silent };
+
+        var asyncOp = _pm.RepairPackageAsync (pkg, options);
+        asyncOp.Progress = (_, p) => progress?.Report (MapRepair (p));
+        RepairResult result = await asyncOp.AsTask (ct);
+
+        return result.Status switch
+        {
+            RepairResultStatus.Ok => Ok (op, $"Repaired {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}"),
+            RepairResultStatus.NoApplicableRepairer => Fail (op, $"{pkg.Name} doesn't support repair."),
+            _ => Fail (op, $"Repair failed: {result.Status} (repairer {result.RepairerErrorCode}, hr 0x{HResultOf (result.ExtendedErrorCode):X8})")
+        };
+    }
+
     public async Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, SourceFilter.All, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -740,25 +811,41 @@ public sealed class ComBackend : IBackend
 
     public Task<IReadOnlyDictionary<string, PinState>> ListPinsAsync (CancellationToken ct) => _cliForPins.ListPinsAsync (ct);
 
+    public Task<string> DescribeAsync (CancellationToken ct)
+    {
+        string version;
+
+        try
+        {
+            // PackageManager.Version (contract 13) — the running WinGet COM server version.
+            version = NullIfEmpty (_pm.Version) ?? "unknown version";
+        }
+        catch
+        {
+            // Older COM servers don't expose Version; the backend still works.
+            version = "unknown version";
+        }
+
+        return Task.FromResult ($"COM · winget {version}");
+    }
+
     // ------------------------------------------------------------------------
     // Catalog plumbing
     // ------------------------------------------------------------------------
 
-    /// <summary>Resolve the configured remote catalog reference(s) for a source filter.</summary>
-    private List<PackageCatalogReference> RemoteRefs (SourceFilter source)
+    /// <summary>
+    /// Resolve the configured remote catalog reference(s) for a source filter. A specific
+    /// <paramref name="source"/> name resolves just that catalog; null ("All") expands to every
+    /// configured source (winget, msstore, and any custom REST sources) via GetPackageCatalogs,
+    /// rather than the hard-coded pair — so enterprise/custom sources are included automatically.
+    /// </summary>
+    private List<PackageCatalogReference> RemoteRefs (string? source)
     {
-        string [] names = source switch
-        {
-            SourceFilter.Winget => ["winget"],
-            SourceFilter.MsStore => ["msstore"],
-            _ => ["winget", "msstore"]
-        };
-
         List<PackageCatalogReference> refs = [];
 
-        foreach (string name in names)
+        if (!string.IsNullOrEmpty (source))
         {
-            PackageCatalogReference? r = _pm.GetPackageCatalogByName (name);
+            PackageCatalogReference? r = _pm.GetPackageCatalogByName (source);
 
             if (r is not null)
             {
@@ -767,9 +854,68 @@ public sealed class ComBackend : IBackend
                 r.AcceptSourceAgreements = true;
                 refs.Add (r);
             }
+
+            return refs;
+        }
+
+        // All configured sources. GetPackageCatalogs() returns the source list (excludes the
+        // implicit local "installed" catalog, which the composite adds on its own).
+        try
+        {
+            foreach (PackageCatalogReference r in Materialize (_pm.GetPackageCatalogs ()))
+            {
+                r.AcceptSourceAgreements = true;
+                refs.Add (r);
+            }
+        }
+        catch
+        {
+            // GetPackageCatalogs failed (unusual); fall back to the two predefined sources so the
+            // common case still works.
+            foreach (string name in (string [])["winget", "msstore"])
+            {
+                PackageCatalogReference? r = _pm.GetPackageCatalogByName (name);
+
+                if (r is not null)
+                {
+                    r.AcceptSourceAgreements = true;
+                    refs.Add (r);
+                }
+            }
         }
 
         return refs;
+    }
+
+    public Task<IReadOnlyList<string>> ListSourcesAsync (CancellationToken ct)
+    {
+        List<string> names = [];
+
+        try
+        {
+            foreach (PackageCatalogReference r in Materialize (_pm.GetPackageCatalogs ()))
+            {
+                try
+                {
+                    string? name = NullIfEmpty (r.Info?.Name);
+
+                    if (name is not null)
+                    {
+                        names.Add (name);
+                    }
+                }
+                catch
+                {
+                    // Skip a catalog whose Info/Name read threw rather than dropping the whole list.
+                }
+            }
+        }
+        catch
+        {
+            // GetPackageCatalogs threw — return empty; the app keeps its seeded defaults.
+        }
+
+        return Task.FromResult<IReadOnlyList<string>> (names);
     }
 
     /// <summary>
@@ -803,7 +949,7 @@ public sealed class ComBackend : IBackend
     }
 
     /// <summary>Find a single package by exact (case-insensitive) id.</summary>
-    private async Task<CatalogPackage?> FindByIdAsync (string id, SourceFilter source, bool installedContext, CancellationToken ct)
+    private async Task<CatalogPackage?> FindByIdAsync (string id, string? source, bool installedContext, CancellationToken ct)
     {
         PackageCatalog catalog = await ConnectAsync (
             CompositeRef (
@@ -920,6 +1066,24 @@ public sealed class ComBackend : IBackend
         }
     }
 
+    /// <summary>Read a single PackageVersionMetadata field, returning null if absent/empty/unreadable.</summary>
+    private static string? SafeMetadata (PackageVersionInfo? info, PackageVersionMetadataField field)
+    {
+        if (info is null)
+        {
+            return null;
+        }
+
+        try
+        {
+            return NullIfEmpty (info.GetMetadata (field));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>Latest available version string (AvailableVersions is newest-first), else the default-install version.</summary>
     private static string? LatestAvailableVersion (CatalogPackage pkg)
     {
@@ -1010,6 +1174,20 @@ public sealed class ComBackend : IBackend
         };
 
         return new (phase, p.State == PackageDownloadProgressState.Finished ? 1.0 : p.DownloadProgress);
+    }
+
+    private static OpProgress MapRepair (RepairProgress p)
+    {
+        OpPhase phase = p.State switch
+        {
+            PackageRepairProgressState.Queued => OpPhase.Queued,
+            PackageRepairProgressState.Repairing => OpPhase.Repairing,
+            PackageRepairProgressState.PostRepair => OpPhase.Finalizing,
+            PackageRepairProgressState.Finished => OpPhase.Done,
+            _ => OpPhase.Repairing
+        };
+
+        return new (phase, p.State == PackageRepairProgressState.Finished ? 1.0 : p.RepairCompletionProgress);
     }
 
     private static string DescribeInstall (string verb, InstallResult result)
