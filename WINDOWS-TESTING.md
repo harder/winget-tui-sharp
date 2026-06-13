@@ -1,8 +1,17 @@
-# Windows verification checklist — `feat/com-backend`
+# Windows verification checklist — COM backend (merged to `main`)
+
+The COM backend work has landed on **`main`** (PR #10, merge `c7f3593`) — there's no longer a
+separate `feat/com-backend` branch to check out. Pull `main` into a native-Windows folder and
+verify there.
 
 Everything below can only be confirmed on a real Windows host (Native AOT codegen
 can't cross-compile from Linux, and the WinGet COM server + installs need Windows).
 Work top-down; **P0** gates everything else.
+
+> **Quickest COM-vs-CLI check:** the **top-right header badge** shows the live backend + winget
+> version from `PackageManager.Version` — `COM · winget 1.x` if COM activated, `CLI · winget 1.x`
+> if it silently fell back to the CLI, or `Mock backend`. **Glance there first on every launch**
+> before trusting any other result below; it's the obvious tell for whether COM is actually live.
 
 ## Build & run
 
@@ -30,8 +39,9 @@ For quick iteration without AOT: `dotnet run -f net10.0-windows10.0.26100.0`.
 > **`new PackageManager()` throws `0x80073D54` (`APPMODEL_ERROR_NO_PACKAGE`) in the Native-AOT
 > build**, so `SelectBackend` catches it and **silently falls back to the CLI backend** (the
 > "COM backend unavailable…" stderr note is painted over by the TUI redraw, so it's invisible).
-> Confirmed by the COM-only `V` (Verify) action reporting *"Verify is only available on the COM
-> backend"* in the default launch.
+> The **top-right backend badge now makes this visible at a glance** — on the AOT default launch it
+> reads `CLI · winget 1.x`, not `COM · winget 1.x`. (Originally confirmed the harder way, via the
+> COM-only `V` action reporting *"Verify is only available on the COM backend"*.)
 >
 > - The **same source built non-AOT (JIT, self-contained x64) activates COM fine** (3 catalogs),
 >   even with the server warmed by JIT moments earlier. So the failure is **AOT-specific**, not
@@ -52,7 +62,7 @@ For quick iteration without AOT: `dotnet run -f net10.0-windows10.0.26100.0`.
 
 - [x] **AOT publish succeeds** and produces a native exe; `coreclr.dll` is absent (true AOT, not self-contained). *(23.3 MB exe; verified coreclr.dll absent. On an ARM64 host the publish must run inside `Enter-VsDevShell -DevCmdArguments "-arch=x64 -host_arch=arm64"` with the VS Installer dir on PATH — ILC 10.0.8 calls bare `vswhere.exe`.)*
 - [x] **No `InvalidCastException` anywhere at runtime.** The whole backend uses indexed `Materialize<T>` instead of `foreach` over projected collections (the spike's AOT rule). Exercise search/list/upgrades/show and confirm none throw the spike's original cast error. *(Clean across search, installed, upgrades, and details. Spike re-confirmed the indexed pattern on this host.)*
-- [ ] ❌ **FAILS — Default backend is NOT COM.** The AOT build can't activate `PackageManager`, so the default silently runs the **CLI** backend (proven: `V` reports "only available on the COM backend"). See the critical-finding banner above. *(The fast/structured search and full IDs we saw are the CLI backend's output, which also looks structured — they did not prove COM was active.)*
+- [ ] ❓ **RE-CHECK on the freshly-pulled `main` build — does the default launch use COM?** **Look at the top-right badge first:** `COM · winget` = COM activated (the earlier AOT failure is resolved — re-run every ❌/❓ item below on COM); `CLI · winget` = it still silently fell back (the AOT-COM bug stands — see the critical-finding banner and run the decisive `--comdiag` experiment). On the last Windows session this **FAILED** (`CLI`; `V` reported "only available on the COM backend"). See the critical-finding banner above. *(The fast/structured search and full IDs seen on CLI also look structured — they do not by themselves prove COM is active; trust the badge.)*
 - [x] **Flag selection** works: `--cli`, `--com`, `--mock` pick the right backend; **`--cli` wins when both `--cli` and `--com` are passed** (precedence `--mock > --cli > --com > default`). *(`--mock --cli --com` → 10 mock pkgs; `--cli --com` → CLI backend, V reports COM-only on real packages.)*
 - [x] **Search** (Search tab `1`, then `/`) returns real catalog results with version + source columns. *(18 results for "powertoys" across winget + msstore.)*
 - [x] **Installed** tab lists installed packages with correct installed versions. *(248 packages; PowerToys 0.98.1 etc., correlated via COM LocalCatalogs composite.)*
