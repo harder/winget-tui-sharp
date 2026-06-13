@@ -82,9 +82,78 @@ int Run (string query)
             Console.WriteLine ($"      · {pkg.Id}  name={pkg.Name}  installed={installedV}  latest={latestV}");
         });
 
+    // Step 5: metadata field extraction — the richer-detail-panel fields. The real
+    // backend's ShowAsync funnels these through StringVector/DocLinks, which SWALLOW
+    // exceptions and return null. So if a richer field silently never appears in the
+    // UI, the cause is hidden. Here we probe each field with no swallowing, to see
+    // whether the AOT trap extends to IReadOnlyList<string>/<Documentation> and to
+    // the PublisherSupportUrl getter.
+    Console.WriteLine ();
+    Console.WriteLine ("[spike] === metadata probe (richer detail fields) ===");
+
+    if (result.Matches.Count > 0)
+    {
+        CatalogPackage pkg = result.Matches [0].CatalogPackage;
+        Console.WriteLine ($"[spike] probing metadata for: {pkg.Id}");
+
+        PackageVersionInfo? vi = pkg.DefaultInstallVersion;
+
+        if (vi is null)
+        {
+            Console.WriteLine ("[spike] DefaultInstallVersion is null — cannot fetch metadata");
+        }
+        else
+        {
+            CatalogPackageMetadata? meta = null;
+
+            try
+            {
+                meta = vi.GetCatalogPackageMetadata ();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine ($"[spike] GetCatalogPackageMetadata threw {ex.GetType ().Name}: {ex.Message}");
+            }
+
+            if (meta is not null)
+            {
+                ProbeString ("meta.Publisher (simple getter, known-good)", () => meta.Publisher);
+                ProbeString ("meta.PublisherSupportUrl (simple getter, suspect)", () => meta.PublisherSupportUrl);
+                Probe ("meta.Tags (IReadOnlyList<string>)", meta.Tags, t => Console.WriteLine ($"      · tag={t}"));
+                Probe ("meta.Documentations (IReadOnlyList<Documentation>)", meta.Documentations, d => Console.WriteLine ($"      · {d.DocumentLabel}={d.DocumentUrl}"));
+            }
+
+            Probe ("vi.ProductCodes (IReadOnlyList<string>)", vi.ProductCodes, c => Console.WriteLine ($"      · pc={c}"));
+            Probe ("vi.PackageFamilyNames (IReadOnlyList<string>)", vi.PackageFamilyNames, f => Console.WriteLine ($"      · pfn={f}"));
+        }
+    }
+
+    // NOTE: a composite-catalog metadata probe (mirroring the backend's ShowAsync, which uses
+    // CreateCompositePackageCatalog over winget+msstore) was attempted here but threw
+    // E_ILLEGAL_STATE_CHANGE because this process already connected the 'winget' catalog
+    // DIRECTLY in Step 2 — re-referencing an already-connected source for a composite on the
+    // same process is illegal. To test the composite path cleanly, do it in a FRESH process
+    // that never does a direct single-catalog connect (or use the app's --comshow diagnostic;
+    // see HANDOFF.md). This matters: ShowAsync uses the composite path and is the suspect for
+    // the richer-detail-fields-missing bug, even though this single-catalog Step 5 returns them.
+
     Console.WriteLine ("[spike] done.");
 
     return 0;
+}
+
+// Probe a simple (non-collection) string getter: does it throw, or return empty?
+void ProbeString (string label, Func<string?> get)
+{
+    try
+    {
+        string? v = get ();
+        Console.WriteLine ($"[spike] {label}: {(string.IsNullOrEmpty (v) ? "<empty>" : v)}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine ($"[spike] {label}: ✗ threw {ex.GetType ().Name}: {ex.Message}");
+    }
 }
 
 // Read the first element of a projected list via indexing only (IVectorView.GetAt),

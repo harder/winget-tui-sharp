@@ -793,7 +793,7 @@ public class ParserTests
     [Fact]
     public void ListUpgradesArgs_IncludePinnedFlagIsPresent ()
     {
-        string [] args = CliBackend.ListUpgradesArgs (SourceFilter.All);
+        string [] args = CliBackend.ListUpgradesArgs (null);
 
         Assert.Contains ("--include-pinned", args);
     }
@@ -802,7 +802,7 @@ public class ParserTests
     public void ListInstalledArgs_DoNotInclude_IncludePinned ()
     {
         // `--include-pinned` is upgrade-only and would error on `list`.
-        string [] args = CliBackend.ListInstalledArgs (SourceFilter.All);
+        string [] args = CliBackend.ListInstalledArgs (null);
 
         Assert.DoesNotContain ("--include-pinned", args);
     }
@@ -832,14 +832,40 @@ public class ParserTests
     [Fact]
     public void SourceFilterArgs_AppendedWhenNotAll ()
     {
-        string [] withAll = CliBackend.ListInstalledArgs (SourceFilter.All);
-        string [] withWinget = CliBackend.ListInstalledArgs (SourceFilter.Winget);
-        string [] withMsStore = CliBackend.ListInstalledArgs (SourceFilter.MsStore);
+        string [] withAll = CliBackend.ListInstalledArgs (null);
+        string [] withWinget = CliBackend.ListInstalledArgs ("winget");
+        string [] withMsStore = CliBackend.ListInstalledArgs ("msstore");
+        string [] withCustom = CliBackend.ListInstalledArgs ("contoso");
 
         Assert.DoesNotContain ("--source", withAll);
         Assert.Contains ("--source", withWinget);
         Assert.Equal ("winget", withWinget [Array.IndexOf (withWinget, "--source") + 1]);
         Assert.Equal ("msstore", withMsStore [Array.IndexOf (withMsStore, "--source") + 1]);
+
+        // A custom/enterprise source name passes straight through (no enum mapping).
+        Assert.Equal ("contoso", withCustom [Array.IndexOf (withCustom, "--source") + 1]);
+    }
+
+    [Fact]
+    public void ParseSourceNames_ExtractsNameColumnIncludingCustomSources ()
+    {
+        // Representative `winget source list` output with the two predefined sources plus a custom one.
+        string output =
+            "Name     Argument\n"
+            + "------------------------------------------------\n"
+            + "winget   https://cdn.winget.microsoft.com/cache\n"
+            + "msstore  https://storeedgefd.dsx.mp.microsoft.com/v9.0\n"
+            + "contoso  https://pkgmgr-int.azureedge.net/cache\n";
+
+        IReadOnlyList<string> names = CliBackend.ParseSourceNames (output);
+
+        Assert.Equal (["winget", "msstore", "contoso"], names);
+    }
+
+    [Fact]
+    public void ParseSourceNames_ReturnsEmptyWhenNoTable ()
+    {
+        Assert.Empty (CliBackend.ParseSourceNames ("no sources configured\n"));
     }
 
     [Fact]

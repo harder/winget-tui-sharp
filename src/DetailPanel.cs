@@ -73,6 +73,11 @@ public sealed class DetailPanel : FrameView
             AddKv ("Publisher", detail.Publisher);
         }
 
+        if (!string.IsNullOrEmpty (detail.Author))
+        {
+            AddKv ("Author", detail.Author);
+        }
+
         // Skip the Source line when both the show output and the list-row context lacked it
         // (rare — typically only ARP/MSIX-only packages with no manifest source).
         if (!string.IsNullOrEmpty (detail.Source))
@@ -85,9 +90,31 @@ public sealed class DetailPanel : FrameView
             });
         }
 
+        // Search-only: explain a non-obvious match (e.g. the package matched on a tag, not its
+        // name) so the user understands why it surfaced. Dim so it reads as a footnote.
+        if (Mode == AppMode.Search && !string.IsNullOrEmpty (detail.MatchField))
+        {
+            AddSingle ($"↳ matched on {detail.MatchField}", Theme.TextSecondary, TextStyle.Italic);
+        }
+
+        if (!string.IsNullOrEmpty (detail.InstalledScope))
+        {
+            AddKv ("Scope", detail.InstalledScope);
+        }
+
+        if (!string.IsNullOrEmpty (detail.InstalledLocation))
+        {
+            AddKv ("Installed to", detail.InstalledLocation);
+        }
+
         if (!string.IsNullOrEmpty (detail.License))
         {
             AddKv ("License", detail.License);
+        }
+
+        if (!string.IsNullOrEmpty (detail.Copyright))
+        {
+            AddKv ("Copyright", detail.Copyright);
         }
 
         if (detail.Tags is { Count: > 0 } tags)
@@ -126,6 +153,16 @@ public sealed class DetailPanel : FrameView
             AddMarkdownLinkRow ("Support", detail.SupportUrl);
         }
 
+        if (!string.IsNullOrEmpty (detail.PrivacyUrl))
+        {
+            AddMarkdownLinkRow ("Privacy", detail.PrivacyUrl);
+        }
+
+        if (!string.IsNullOrEmpty (detail.PurchaseUrl))
+        {
+            AddMarkdownLinkRow ("Purchase", detail.PurchaseUrl);
+        }
+
         if (detail.Documentation is { Count: > 0 } docs)
         {
             foreach (DocLink doc in docs)
@@ -151,6 +188,13 @@ public sealed class DetailPanel : FrameView
             }
         }
 
+        if (!string.IsNullOrEmpty (detail.InstallationNotes))
+        {
+            AddBlank ();
+            AddSingle ("Installation notes:", Theme.Accent, TextStyle.Bold);
+            AddParagraph (detail.InstallationNotes);
+        }
+
         AddBlank ();
         AddSingle ("Actions:", Theme.Accent, TextStyle.Bold);
 
@@ -170,12 +214,14 @@ public sealed class DetailPanel : FrameView
                 AddAction ("x", "Uninstall");
                 AddAction ("p", "Pin/Unpin");
                 AddAction ("V", "Verify install");
+                AddAction ("R", "Repair install");
 
                 break;
             case AppMode.Upgrades:
                 AddAction ("u", "Upgrade");
                 AddAction ("x", "Uninstall");
                 AddAction ("V", "Verify install");
+                AddAction ("R", "Repair install");
                 AddAction ("Spc", "Select");
                 AddAction ("a", "Toggle All");
                 AddAction ("U", "Upgrade selected");

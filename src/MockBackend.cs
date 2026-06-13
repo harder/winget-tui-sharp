@@ -31,7 +31,7 @@ public sealed class MockBackend : IBackend
 
     private readonly Dictionary<string, PinState> _pins = new (StringComparer.OrdinalIgnoreCase);
 
-    public Task<IReadOnlyList<Package>> SearchAsync (string query, SourceFilter source, CancellationToken ct)
+    public Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
     {
         IEnumerable<Package> q = _searchResults
                                  .Concat (_installed)
@@ -39,24 +39,19 @@ public sealed class MockBackend : IBackend
                                               || p.Name.Contains (query, StringComparison.OrdinalIgnoreCase)
                                               || p.Id.Contains (query, StringComparison.OrdinalIgnoreCase));
 
-        q = source switch
+        if (!string.IsNullOrEmpty (source))
         {
-            SourceFilter.Winget => q.Where (p => p.Source == "winget"),
-            SourceFilter.MsStore => q.Where (p => p.Source == "msstore"),
-            _ => q
-        };
+            q = q.Where (p => p.Source == source);
+        }
 
         return Task.FromResult<IReadOnlyList<Package>> (q.ToArray ());
     }
 
-    public Task<IReadOnlyList<Package>> ListInstalledAsync (SourceFilter source, CancellationToken ct)
+    public Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
     {
-        Package [] q = source switch
-        {
-            SourceFilter.Winget => _installed.Where (p => p.Source == "winget").ToArray (),
-            SourceFilter.MsStore => _installed.Where (p => p.Source == "msstore").ToArray (),
-            _ => _installed
-        };
+        Package [] q = string.IsNullOrEmpty (source)
+                           ? _installed
+                           : _installed.Where (p => p.Source == source).ToArray ();
 
         foreach (Package p in q)
         {
@@ -69,16 +64,14 @@ public sealed class MockBackend : IBackend
         return Task.FromResult<IReadOnlyList<Package>> (q);
     }
 
-    public Task<IReadOnlyList<Package>> ListUpgradesAsync (SourceFilter source, CancellationToken ct)
+    public Task<IReadOnlyList<Package>> ListUpgradesAsync (string? source, CancellationToken ct)
     {
         Package [] q = _installed.Where (p => p.AvailableVersion is not null).ToArray ();
 
-        q = source switch
+        if (!string.IsNullOrEmpty (source))
         {
-            SourceFilter.Winget => q.Where (p => p.Source == "winget").ToArray (),
-            SourceFilter.MsStore => q.Where (p => p.Source == "msstore").ToArray (),
-            _ => q
-        };
+            q = q.Where (p => p.Source == source).ToArray ();
+        }
 
         foreach (Package p in q)
         {
@@ -90,6 +83,9 @@ public sealed class MockBackend : IBackend
 
         return Task.FromResult<IReadOnlyList<Package>> (q);
     }
+
+    public Task<IReadOnlyList<string>> ListSourcesAsync (CancellationToken ct)
+        => Task.FromResult<IReadOnlyList<string>> (["winget", "msstore"]);
 
     public Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
     {
@@ -172,6 +168,31 @@ public sealed class MockBackend : IBackend
         };
 
         return Task.FromResult<InstallVerification?> (v);
+    }
+
+    public bool CanRepair => true;
+
+    public async Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    {
+        // Synthesize a repair ramp so the flow is exercisable on Linux (mirrors how the mock's
+        // Verify fakes a result). No download phase — repair re-runs the local installer.
+        if (progress is not null)
+        {
+            for (int i = 0; i <= 10; i++)
+            {
+                progress.Report (new (OpPhase.Repairing, i / 10.0));
+                await Task.Delay (45, ct);
+            }
+
+            progress.Report (new (OpPhase.Done, 1.0));
+        }
+
+        return new ()
+        {
+            Operation = new () { Kind = OperationKind.Repair, PackageId = id },
+            Success = true,
+            Message = $"[mock] Repaired {id}"
+        };
     }
 
     public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
@@ -292,4 +313,6 @@ public sealed class MockBackend : IBackend
 
     public Task<IReadOnlyDictionary<string, PinState>> ListPinsAsync (CancellationToken ct)
         => Task.FromResult<IReadOnlyDictionary<string, PinState>> (_pins);
+
+    public Task<string> DescribeAsync (CancellationToken ct) => Task.FromResult ("Mock backend");
 }

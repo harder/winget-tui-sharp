@@ -35,13 +35,6 @@ public enum SortDir
     Desc
 }
 
-public enum SourceFilter
-{
-    All,
-    Winget,
-    MsStore
-}
-
 public enum PinFilter
 {
     All,
@@ -82,6 +75,14 @@ public sealed class Package
     public string? AvailableVersion { get; init; }
     public PinState PinState { get; set; } = PinState.Unpinned;
 
+    /// <summary>
+    /// For search results only: the manifest field the package matched on when it's a
+    /// non-obvious one (Tag / Moniker / Command / family name / product code) — i.e. not Name/Id.
+    /// Null for normal name/id matches and for non-search rows. Surfaced as a "Matched on" hint
+    /// in the detail panel so the user understands why an unexpected package showed up.
+    /// </summary>
+    public string? MatchField { get; init; }
+
     public bool IsTruncated => Id.EndsWith ('…') || Id.EndsWith ("...", StringComparison.Ordinal);
 }
 
@@ -105,6 +106,22 @@ public sealed class PackageDetail
     public IReadOnlyList<DocLink>? Documentation { get; init; }
     public IReadOnlyList<string>? ProductCodes { get; init; }
     public IReadOnlyList<string>? PackageFamilyNames { get; init; }
+
+    // Additional manifest/installed metadata surfaced by the COM backend (null elsewhere).
+    // Every one is optional and rendered only when present, so sparse packages stay clean.
+    public string? Author { get; init; }
+    public string? Copyright { get; init; }
+    public string? PrivacyUrl { get; init; }
+    public string? PurchaseUrl { get; init; }
+    public string? InstallationNotes { get; init; }
+    public string? InstalledLocation { get; init; }
+    public string? InstalledScope { get; init; }
+
+    /// <summary>
+    /// For search-result detail: the non-obvious field the package matched on (see
+    /// <see cref="Package.MatchField"/>). Carried over from the originating list row.
+    /// </summary>
+    public string? MatchField { get; set; }
 
     /// <summary>
     /// True when <see cref="Description"/> holds a synthesized "couldn't fetch / nothing available"
@@ -140,6 +157,12 @@ public sealed class PackageDetail
         if (!PinState.IsPinned && context.PinState.IsPinned)
         {
             PinState = context.PinState;
+        }
+
+        // The "matched on" hint is only known from the search row, not from `show`/FindById.
+        if (string.IsNullOrEmpty (MatchField) && !string.IsNullOrEmpty (context.MatchField))
+        {
+            MatchField = context.MatchField;
         }
     }
 
@@ -177,7 +200,8 @@ public enum OperationKind
     Pin,
     Unpin,
     BatchUpgrade,
-    Download
+    Download,
+    Repair
 }
 
 public enum InstallScopePref
@@ -282,6 +306,7 @@ public enum OpPhase
     Downloading,
     Installing,
     Uninstalling,
+    Repairing,
     Finalizing,
     Done
 }
@@ -301,6 +326,7 @@ public readonly record struct OpProgress (OpPhase Phase, double Fraction)
             OpPhase.Downloading => "Downloading",
             OpPhase.Installing => "Installing",
             OpPhase.Uninstalling => "Uninstalling",
+            OpPhase.Repairing => "Repairing",
             OpPhase.Finalizing => "Finalizing",
             OpPhase.Done => "Done",
             _ => string.Empty

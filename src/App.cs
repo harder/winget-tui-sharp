@@ -13,16 +13,26 @@ public sealed class App : Runnable
     /// <remarks>One row of breathing room below the wordmark before the list/search start.</remarks>
     private const int HeaderHeight = Logo.LogoHeight + 1;
 
+    // Debounce before an uncached detail fetch fires. Scrolling the list changes the selection
+    // rapidly; without this, every row the cursor passes over issues a full backend detail
+    // request (for COM: ConnectAsync + FindByIdAsync + GetCatalogPackageMetadata). Bursts of
+    // those throttle/wedge the WinGet out-of-proc COM server, causing the detail panel to stall
+    // for tens of seconds while it recovers. Holding the fetch until the selection settles for
+    // this interval collapses a fast scroll to a single request (the row landed on). Each
+    // selection change cancels the pending delay, so passed-over rows never hit the backend.
+    private const int DetailLoadDebounceMs = 200;
+
     private readonly AppState _state;
     private readonly TabBar _tabBar;
     private readonly Logo _logo;
     private readonly TextField _filterInput;
     private readonly TextField _versionInput;
     private readonly FrameView _listFrame;
-    private readonly TableView _packageTable;
+    private readonly SortableTableView _packageTable;
     private readonly DetailPanel _detailPanel;
     private readonly StatusBar _statusBar;
     private readonly Label _searchHint;
+    private readonly Label _backendLabel;
     private CancellationTokenSource _viewCts = new ();
     private CancellationTokenSource _detailCts = new ();
 
@@ -48,6 +58,19 @@ public sealed class App : Runnable
         // pushes the list/detail panes down one row while active. ---
         _logo = new () { X = 1, Y = 0 };
         _tabBar = new () { X = Pos.Right (_logo) + 4, Y = (Logo.LogoHeight - 1) / 2, Width = Dim.Fill (1) };
+
+        // Which backend is live + its winget version, dim in the top-right of the header. Empty
+        // until DescribeAsync resolves at startup (see OnIsRunningChanged). Anchored to the last
+        // logo row so it never collides with the tab row above it.
+        _backendLabel = new ()
+        {
+            X = Pos.AnchorEnd (),
+            Y = Logo.LogoHeight - 1,
+            Height = 1,
+            Width = Dim.Auto (),
+            Text = string.Empty,
+            SchemeName = Theme.AccentDimSchemeName
+        };
 
         // --- Search / filter input (hidden until needed). Lives immediately below the
         // header chrome; the list shifts down another row when search is shown. ---
@@ -109,7 +132,7 @@ public sealed class App : Runnable
             Width = Dim.Fill ()
         };
 
-        Add (_logo, _tabBar, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar);
+        Add (_logo, _tabBar, _backendLabel, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar);
 
         // --- Version input dialog field (lives inside MessageBox-like popover; we use a separate field) ---
         _versionInput = new ();
@@ -124,6 +147,7 @@ public sealed class App : Runnable
         _tabBar.TabClicked += (_, mode) => SwitchToMode (mode);
 
         _packageTable.ValueChanged += (_, _) => OnSelectedRowChanged ();
+        _packageTable.HeaderClicked += OnHeaderClicked;
 
         _filterInput.TextChanged += (_, _) =>
                                     {
@@ -193,11 +217,82 @@ public sealed class App : Runnable
             _initialLoadDone = true;
             TriggerRefresh ();
             StartSpinner ();
+            LoadBackendDescription ();
+            LoadSources ();
         }
         else if (!newIsRunning)
         {
             StopSpinner ();
         }
+    }
+
+    /// <summary>
+    /// Resolve which backend is live + its winget version once at startup and show it in the
+    /// header badge. Best-effort: a failure just leaves the badge empty (the app works regardless).
+    /// </summary>
+    private void LoadBackendDescription ()
+    {
+        Task.Run (async () =>
+                  {
+                      string description;
+
+                      try
+                      {
+                          description = await _state.Backend.DescribeAsync (CancellationToken.None);
+                      }
+                      catch
+                      {
+                          return;
+                      }
+
+                      App?.Invoke (() =>
+                                   {
+                                       _state.BackendDescription = description;
+                                       _backendLabel.Text = description;
+                                       _backendLabel.SetNeedsLayout ();
+                                       _backendLabel.SetNeedsDraw ();
+                                   });
+                  });
+    }
+
+    /// <summary>
+    /// Discover the configured package sources once at startup so the <c>f</c> source filter cycles
+    /// through the real source list (including custom/enterprise REST sources) instead of just the
+    /// two predefined ones. Best-effort: on failure the seeded ["winget","msstore"] defaults stand.
+    /// A currently-selected source that's absent from the discovered list is reset to "All".
+    /// </summary>
+    private void LoadSources ()
+    {
+        Task.Run (async () =>
+                  {
+                      IReadOnlyList<string> sources;
+
+                      try
+                      {
+                          sources = await _state.Backend.ListSourcesAsync (CancellationToken.None);
+                      }
+                      catch
+                      {
+                          return;
+                      }
+
+                      if (sources.Count == 0)
+                      {
+                          return;
+                      }
+
+                      App?.Invoke (() =>
+                                   {
+                                       _state.AvailableSources = sources;
+
+                                       if (_state.SourceFilter is { } current
+                                           && !sources.Any (s => string.Equals (s, current, StringComparison.OrdinalIgnoreCase)))
+                                       {
+                                           _state.SourceFilter = null;
+                                           RefreshStatusBar ();
+                                       }
+                                   });
+                  });
     }
 
     private void StartSpinner ()
@@ -236,7 +331,7 @@ public sealed class App : Runnable
         CancellationToken ct = _viewCts.Token;
         int gen = _state.BumpViewGeneration ();
         AppMode mode = _state.Mode;
-        SourceFilter src = _state.SourceFilter;
+        string? src = _state.SourceFilter;
         string query = _state.SearchQuery;
 
         // Remember the currently-selected package id so we can re-position the cursor on the
@@ -289,6 +384,13 @@ public sealed class App : Runnable
                                            _state.Loading = false;
                                            int n = _state.Filtered.Count;
                                            _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
+
+                                           // A search that hit the result cap means there's more the user can't see;
+                                           // nudge them to narrow it (only the COM backend actually caps).
+                                           if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
+                                           {
+                                               _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
+                                           }
                                            RefreshTable ();
                                            RefreshStatusBar ();
                                            RestoreCursorOrSelectFirst (previousSelectedId);
@@ -332,9 +434,12 @@ public sealed class App : Runnable
             CancelPendingDetailLoad ();
             _detailPanel.SetDetail (null, false);
 
-            _packageTable.Table = new EnumerableTableSource<EmptyRow> ([], new ()
+            // Render a single message row explaining *why* the list is empty, instead of a bare
+            // headered table. The message is contextual: "All packages are up to date!" vs. a
+            // filter/pin-specific note. Mirrors upstream winget-tui's empty-state messages (#228).
+            _packageTable.Table = new EnumerableTableSource<string> ([EmptyStateMessage (_state)], new ()
             {
-                { _state.Mode == AppMode.Upgrades ? "Name" : "Name", _ => string.Empty }
+                { " ", message => message }
             });
 
             RefreshStatusBar ();
@@ -452,10 +557,13 @@ public sealed class App : Runnable
                         _ => Theme.TextSecondary
                     };
 
+                    // Color-code only the unselected (Normal) cells. The selected row's
+                    // background is Theme.Accent, so an Accent foreground (msstore) would be
+                    // invisible (Accent-on-Accent); leaving Focus/Active as the row defaults
+                    // keeps the highlighted Source cell readable (dark-on-gold).
                     return new Scheme (args.RowScheme)
                     {
-                        Normal = new (fg, args.RowScheme.Normal.Background),
-                        Focus = new (fg, args.RowScheme.Focus.Background)
+                        Normal = new (fg, args.RowScheme.Normal.Background)
                     };
                 };
             }
@@ -470,6 +578,87 @@ public sealed class App : Runnable
         }
 
         return label + (_state.SortDir == SortDir.Asc ? " ↑" : " ↓");
+    }
+
+    /// <summary>
+    /// Contextual message shown in the list when nothing matches. Distinguishes "up to date" from
+    /// a filter/pin that's hiding rows, so the user isn't misled. Mirrors upstream winget-tui's
+    /// draw_package_list empty-state arms (#228), plus a local-filter case the port adds.
+    /// </summary>
+    internal static string EmptyStateMessage (AppState state)
+    {
+        if (!string.IsNullOrEmpty (state.LocalFilter))
+        {
+            return $"No packages match “{state.LocalFilter}”.";
+        }
+
+        return state.Mode switch
+        {
+            AppMode.Search => string.IsNullOrEmpty (state.SearchQuery)
+                                  ? "Type to search for packages."
+                                  : "No packages found.",
+            AppMode.Upgrades when state.PinFilter == PinFilter.PinnedOnly => "No pinned packages with upgrades found.",
+            AppMode.Upgrades when state.PinFilter == PinFilter.UnpinnedOnly => "No unpinned packages with upgrades found.",
+            AppMode.Upgrades => "All packages are up to date!",
+            _ => "No packages found."
+        };
+    }
+
+    /// <summary>
+    /// Maps a clicked column header to the field it sorts by, or null for non-sortable columns
+    /// (the marker, Available, Source). The header text may carry a trailing sort arrow.
+    /// </summary>
+    internal static SortField? SortFieldForHeader (string columnName)
+    {
+        if (columnName.StartsWith ("Name", StringComparison.Ordinal))
+        {
+            return SortField.Name;
+        }
+
+        if (columnName.StartsWith ("Id", StringComparison.Ordinal))
+        {
+            return SortField.Id;
+        }
+
+        if (columnName.StartsWith ("Version", StringComparison.Ordinal))
+        {
+            return SortField.Version;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Sort the list when a sortable column header is clicked: first click sorts ascending, a
+    /// click on the already-active column toggles direction. Mirrors upstream winget-tui's
+    /// click-to-sort (commit 66d464c4). Clicks on non-sortable headers are a no-op.
+    /// </summary>
+    private void OnHeaderClicked (int column)
+    {
+        ITableSource? source = _packageTable.Table;
+
+        if (source is null || column < 0 || column >= source.Columns)
+        {
+            return;
+        }
+
+        if (SortFieldForHeader (source.ColumnNames [column]) is not { } field)
+        {
+            return;
+        }
+
+        if (_state.SortField == field)
+        {
+            _state.SortDir = _state.SortDir == SortDir.Asc ? SortDir.Desc : SortDir.Asc;
+        }
+        else
+        {
+            _state.SortField = field;
+            _state.SortDir = SortDir.Asc;
+        }
+
+        _state.ApplyFilter ();
+        RefreshTable ();
     }
 
     private void SyncTabBar () => _tabBar.Active = _state.Mode;
@@ -564,6 +753,11 @@ public sealed class App : Runnable
                   {
                       try
                       {
+                          // Debounce: a fast scroll cancels `ct` (via CancelPendingDetailLoad on
+                          // the next selection change) before this delay elapses, so we only fetch
+                          // for the row the cursor settles on — not every row it passes over.
+                          await Task.Delay (DetailLoadDebounceMs, ct);
+
                           PackageDetail? detail = await _state.Backend.ShowAsync (p.Id, ct);
 
                           if (ct.IsCancellationRequested || gen != _state.DetailGeneration)
@@ -944,6 +1138,14 @@ public sealed class App : Runnable
                     key.Handled = true;
 
                     return;
+                case 'R':
+                    if (_state.Mode != AppMode.Search)
+                    {
+                        AskRepair (CurrentPackage ());
+                        key.Handled = true;
+                    }
+
+                    return;
                 case 'u':
                     AskUpgrade (CurrentPackage ());
                     key.Handled = true;
@@ -1254,7 +1456,64 @@ public sealed class App : Runnable
             sb.AppendLine ($"{(c.Ok ? "✓" : "✗")} {c.Label}{detail}");
         }
 
-        MessageBox.Query (App, $"Verify: {p.Name}", sb.ToString ().TrimEnd (), "_OK");
+        string body = sb.ToString ().TrimEnd ();
+
+        // When the install is damaged, offer to repair it right from the result dialog. Choosing
+        // Repair runs it directly (no second confirm — clicking Repair here is the confirmation,
+        // and this path is COM-only since Verify is). Other outcomes are informational only.
+        if (v.Outcome == VerifyOutcome.Issues)
+        {
+            if (MessageBox.Query (App, $"Verify: {p.Name}", body, "_Repair", "_Close") == 0)
+            {
+                RunRepair (p);
+            }
+
+            return;
+        }
+
+        MessageBox.Query (App, $"Verify: {p.Name}", body, "_OK");
+    }
+
+    /// <summary>
+    /// Repair an installed package (re-run the installer in repair mode). Gated on the backend
+    /// supporting repair — degrades to a neutral message like Verify does on the CLI backend.
+    /// </summary>
+    private void AskRepair (Package? p)
+    {
+        if (p is null || App is null)
+        {
+            return;
+        }
+
+        if (!_state.Backend.CanRepair)
+        {
+            _state.StatusMessage = "Repair is only available on the COM backend.";
+            _state.StatusIsError = false;
+            RefreshStatusBar ();
+
+            return;
+        }
+
+        if (!Confirm ("Repair", $"Repair {p.Name}? This re-runs the installer's repair to fix a damaged install."))
+        {
+            return;
+        }
+
+        RunRepair (p);
+    }
+
+    /// <summary>
+    /// Execute the repair (guard + run). Shared by the standalone action (which confirms first via
+    /// <see cref="AskRepair"/>) and the Verify→Repair offer (which treats the button click as the confirm).
+    /// </summary>
+    private void RunRepair (Package p)
+    {
+        if (App is null || GuardTruncatedId (p, "repair"))
+        {
+            return;
+        }
+
+        RunOperation ($"Repairing {p.Name}", (prog, ct) => _state.Backend.RepairAsync (p.Id, prog, ct));
     }
 
     private InstallSettings? PromptAdvancedOptions (Package p)
@@ -1383,18 +1642,34 @@ public sealed class App : Runnable
 
     private void AskUpgrade (Package? p)
     {
-        if (p is null || App is null || GuardTruncatedId (p, "upgrade"))
+        if (p is null || App is null)
         {
             return;
         }
 
-        if (!Confirm ("Upgrade", $"Upgrade {p.Name}?"))
+        // Unlike install/uninstall/pin, a truncated id doesn't block an upgrade: the CLI backend's
+        // UpgradeAsync tries `--id` then falls back to `--name --exact`, so handing it the name
+        // resolves the row winget truncated. Mirrors upstream winget-tui (commit fd9e9dbe).
+        // Truncation only arises from the CLI tabular parse; the COM backend always has full ids.
+        string query = UpgradeQueryFor (p);
+        string prompt = p.IsTruncated
+                            ? $"Upgrade {p.Name}? (id was truncated by winget — matching by name)"
+                            : $"Upgrade {p.Name}?";
+
+        if (!Confirm ("Upgrade", prompt))
         {
             return;
         }
 
-        RunOperation ($"Upgrading {p.Name}", (prog, ct) => _state.Backend.UpgradeAsync (p.Id, prog, ct));
+        RunOperation ($"Upgrading {p.Name}", (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct));
     }
+
+    /// <summary>
+    /// The query to hand <see cref="IBackend.UpgradeAsync"/> for a row: its id normally, but its
+    /// exact name when winget truncated the id (an `--id` match against the literal `…` can't
+    /// succeed; the CLI backend then resolves it via `--name --exact`).
+    /// </summary>
+    internal static string UpgradeQueryFor (Package p) => p.IsTruncated ? p.Name : p.Id;
 
     private void AskUninstall (Package? p)
     {
@@ -1699,7 +1974,7 @@ public sealed class App : Runnable
             return;
         }
 
-        HelpDialog dlg = new ();
+        HelpDialog dlg = new (_state.BackendDescription);
         App.Run (dlg);
         dlg.Dispose ();
     }
@@ -1819,6 +2094,36 @@ public sealed class App : Runnable
     /// Nested here because it has no consumer outside <see cref="App"/>; pulling
     /// it out as a public top-level type would just clutter the public surface.
     /// </summary>
+    /// <summary>
+    /// A <see cref="TableView"/> that reports clicks on a column header (raising
+    /// <see cref="HeaderClicked"/> with the column index) so the app can sort by that column,
+    /// matching upstream winget-tui's click-to-sort. Clicks on body rows keep the base behaviour.
+    /// </summary>
+    private sealed class SortableTableView : TableView
+    {
+        /// <summary>Raised with the clicked header's column index (the marker column is 0).</summary>
+        public event Action<int>? HeaderClicked;
+
+        /// <inheritdoc />
+        protected override bool OnMouseEvent (Mouse mouse)
+        {
+            if (mouse.IsSingleClicked == true && mouse.Position is { } pos)
+            {
+                _ = ScreenToCell (pos.X, pos.Y, out int? headerColumn);
+
+                if (headerColumn is { } column)
+                {
+                    HeaderClicked?.Invoke (column);
+                    mouse.Handled = true;
+
+                    return true;
+                }
+            }
+
+            return base.OnMouseEvent (mouse);
+        }
+    }
+
     private sealed class MarkedTableSource : IEnumerableTableSource<Package>
     {
         private readonly EnumerableTableSource<Package> _inner;

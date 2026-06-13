@@ -130,6 +130,74 @@ public class AppBehaviorTests
         Assert.Equal (["10.0.0", "2.0.0", "1.9.0"], state.Filtered.Select (p => p.Version));
     }
 
+    [Fact]
+    public void UpgradeQueryFor_TruncatedId_FallsBackToName ()
+    {
+        // winget truncates long ids in tabular output with `…`; an --id match can't succeed, so
+        // the upgrade query must be the exact name instead. Mirrors upstream winget-tui fd9e9dbe.
+        Package p = new () { Id = "Microsoft.Azure.Function…", Name = "Azure Functions Core Tools", Source = "winget" };
+
+        Assert.Equal ("Azure Functions Core Tools", App.UpgradeQueryFor (p));
+    }
+
+    [Fact]
+    public void UpgradeQueryFor_FullId_UsesId ()
+    {
+        Package p = new () { Id = "7zip.7zip", Name = "7-Zip", Source = "winget" };
+
+        Assert.Equal ("7zip.7zip", App.UpgradeQueryFor (p));
+    }
+
+    [Theory]
+    [InlineData (AppMode.Upgrades, PinFilter.All, "", "All packages are up to date!")]
+    [InlineData (AppMode.Upgrades, PinFilter.PinnedOnly, "", "No pinned packages with upgrades found.")]
+    [InlineData (AppMode.Upgrades, PinFilter.UnpinnedOnly, "", "No unpinned packages with upgrades found.")]
+    [InlineData (AppMode.Installed, PinFilter.All, "", "No packages found.")]
+    public void EmptyStateMessage_ReflectsModeAndPinFilter (AppMode mode, PinFilter pin, string filter, string expected)
+    {
+        AppState state = new (new MockBackend ())
+        {
+            Mode = mode,
+            PinFilter = pin,
+            LocalFilter = filter
+        };
+
+        Assert.Equal (expected, App.EmptyStateMessage (state));
+    }
+
+    [Fact]
+    public void EmptyStateMessage_WithActiveLocalFilter_ExplainsTheFilter ()
+    {
+        // An active filter that hides everything must not read "All packages are up to date!".
+        AppState state = new (new MockBackend ())
+        {
+            Mode = AppMode.Upgrades,
+            PinFilter = PinFilter.All,
+            LocalFilter = "nonesuch"
+        };
+
+        Assert.Contains ("nonesuch", App.EmptyStateMessage (state), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData ("Name", SortField.Name)]
+    [InlineData ("Name ↑", SortField.Name)]
+    [InlineData ("Id", SortField.Id)]
+    [InlineData ("Version ↓", SortField.Version)]
+    public void SortFieldForHeader_MapsSortableColumns (string header, SortField expected)
+    {
+        Assert.Equal (expected, App.SortFieldForHeader (header));
+    }
+
+    [Theory]
+    [InlineData (" ")]
+    [InlineData ("Available")]
+    [InlineData ("Source")]
+    public void SortFieldForHeader_ReturnsNullForNonSortableColumns (string header)
+    {
+        Assert.Null (App.SortFieldForHeader (header));
+    }
+
     [Theory]
     [InlineData ("=2+5", "'=2+5")]
     [InlineData (" -hidden formula", "' -hidden formula")]
@@ -160,6 +228,34 @@ public class AppBehaviorTests
         {
             Assert.Equal (string.Empty, normalized);
         }
+    }
+
+    [Fact]
+    public async Task MockBackend_Repair_ReportsRepairingProgressAndSucceeds ()
+    {
+        CollectingProgress progress = new ();
+
+        OpResult result = await new MockBackend ().RepairAsync ("Git.Git", progress, CancellationToken.None);
+
+        Assert.True (result.Success);
+        Assert.Equal (OperationKind.Repair, result.Operation.Kind);
+        Assert.Contains (progress.Samples, s => s.Phase == OpPhase.Repairing);
+        Assert.Contains (progress.Samples, s => s.Phase == OpPhase.Done);
+    }
+
+    [Fact]
+    public void CanRepair_IsTrueForMock_AndFalseForCli ()
+    {
+        // Repair is COM-only: the mock fakes it for dev iteration; the CLI reports it unavailable.
+        Assert.True (new MockBackend ().CanRepair);
+        Assert.False (new CliBackend ().CanRepair);
+    }
+
+    private sealed class CollectingProgress : IProgress<OpProgress>
+    {
+        public List<OpProgress> Samples { get; } = [];
+
+        public void Report (OpProgress value) => Samples.Add (value);
     }
 
     private static DetailPanel CreateDetailPanel ()
