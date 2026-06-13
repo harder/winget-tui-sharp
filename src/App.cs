@@ -28,7 +28,7 @@ public sealed class App : Runnable
     private readonly TextField _filterInput;
     private readonly TextField _versionInput;
     private readonly FrameView _listFrame;
-    private readonly TableView _packageTable;
+    private readonly SortableTableView _packageTable;
     private readonly DetailPanel _detailPanel;
     private readonly StatusBar _statusBar;
     private readonly Label _searchHint;
@@ -147,6 +147,7 @@ public sealed class App : Runnable
         _tabBar.TabClicked += (_, mode) => SwitchToMode (mode);
 
         _packageTable.ValueChanged += (_, _) => OnSelectedRowChanged ();
+        _packageTable.HeaderClicked += OnHeaderClicked;
 
         _filterInput.TextChanged += (_, _) =>
                                     {
@@ -433,9 +434,12 @@ public sealed class App : Runnable
             CancelPendingDetailLoad ();
             _detailPanel.SetDetail (null, false);
 
-            _packageTable.Table = new EnumerableTableSource<EmptyRow> ([], new ()
+            // Render a single message row explaining *why* the list is empty, instead of a bare
+            // headered table. The message is contextual: "All packages are up to date!" vs. a
+            // filter/pin-specific note. Mirrors upstream winget-tui's empty-state messages (#228).
+            _packageTable.Table = new EnumerableTableSource<string> ([EmptyStateMessage (_state)], new ()
             {
-                { _state.Mode == AppMode.Upgrades ? "Name" : "Name", _ => string.Empty }
+                { " ", message => message }
             });
 
             RefreshStatusBar ();
@@ -574,6 +578,87 @@ public sealed class App : Runnable
         }
 
         return label + (_state.SortDir == SortDir.Asc ? " ↑" : " ↓");
+    }
+
+    /// <summary>
+    /// Contextual message shown in the list when nothing matches. Distinguishes "up to date" from
+    /// a filter/pin that's hiding rows, so the user isn't misled. Mirrors upstream winget-tui's
+    /// draw_package_list empty-state arms (#228), plus a local-filter case the port adds.
+    /// </summary>
+    internal static string EmptyStateMessage (AppState state)
+    {
+        if (!string.IsNullOrEmpty (state.LocalFilter))
+        {
+            return $"No packages match “{state.LocalFilter}”.";
+        }
+
+        return state.Mode switch
+        {
+            AppMode.Search => string.IsNullOrEmpty (state.SearchQuery)
+                                  ? "Type to search for packages."
+                                  : "No packages found.",
+            AppMode.Upgrades when state.PinFilter == PinFilter.PinnedOnly => "No pinned packages with upgrades found.",
+            AppMode.Upgrades when state.PinFilter == PinFilter.UnpinnedOnly => "No unpinned packages with upgrades found.",
+            AppMode.Upgrades => "All packages are up to date!",
+            _ => "No packages found."
+        };
+    }
+
+    /// <summary>
+    /// Maps a clicked column header to the field it sorts by, or null for non-sortable columns
+    /// (the marker, Available, Source). The header text may carry a trailing sort arrow.
+    /// </summary>
+    internal static SortField? SortFieldForHeader (string columnName)
+    {
+        if (columnName.StartsWith ("Name", StringComparison.Ordinal))
+        {
+            return SortField.Name;
+        }
+
+        if (columnName.StartsWith ("Id", StringComparison.Ordinal))
+        {
+            return SortField.Id;
+        }
+
+        if (columnName.StartsWith ("Version", StringComparison.Ordinal))
+        {
+            return SortField.Version;
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Sort the list when a sortable column header is clicked: first click sorts ascending, a
+    /// click on the already-active column toggles direction. Mirrors upstream winget-tui's
+    /// click-to-sort (commit 66d464c4). Clicks on non-sortable headers are a no-op.
+    /// </summary>
+    private void OnHeaderClicked (int column)
+    {
+        ITableSource? source = _packageTable.Table;
+
+        if (source is null || column < 0 || column >= source.Columns)
+        {
+            return;
+        }
+
+        if (SortFieldForHeader (source.ColumnNames [column]) is not { } field)
+        {
+            return;
+        }
+
+        if (_state.SortField == field)
+        {
+            _state.SortDir = _state.SortDir == SortDir.Asc ? SortDir.Desc : SortDir.Asc;
+        }
+        else
+        {
+            _state.SortField = field;
+            _state.SortDir = SortDir.Asc;
+        }
+
+        _state.ApplyFilter ();
+        RefreshTable ();
     }
 
     private void SyncTabBar () => _tabBar.Active = _state.Mode;
@@ -1557,18 +1642,34 @@ public sealed class App : Runnable
 
     private void AskUpgrade (Package? p)
     {
-        if (p is null || App is null || GuardTruncatedId (p, "upgrade"))
+        if (p is null || App is null)
         {
             return;
         }
 
-        if (!Confirm ("Upgrade", $"Upgrade {p.Name}?"))
+        // Unlike install/uninstall/pin, a truncated id doesn't block an upgrade: the CLI backend's
+        // UpgradeAsync tries `--id` then falls back to `--name --exact`, so handing it the name
+        // resolves the row winget truncated. Mirrors upstream winget-tui (commit fd9e9dbe).
+        // Truncation only arises from the CLI tabular parse; the COM backend always has full ids.
+        string query = UpgradeQueryFor (p);
+        string prompt = p.IsTruncated
+                            ? $"Upgrade {p.Name}? (id was truncated by winget — matching by name)"
+                            : $"Upgrade {p.Name}?";
+
+        if (!Confirm ("Upgrade", prompt))
         {
             return;
         }
 
-        RunOperation ($"Upgrading {p.Name}", (prog, ct) => _state.Backend.UpgradeAsync (p.Id, prog, ct));
+        RunOperation ($"Upgrading {p.Name}", (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct));
     }
+
+    /// <summary>
+    /// The query to hand <see cref="IBackend.UpgradeAsync"/> for a row: its id normally, but its
+    /// exact name when winget truncated the id (an `--id` match against the literal `…` can't
+    /// succeed; the CLI backend then resolves it via `--name --exact`).
+    /// </summary>
+    internal static string UpgradeQueryFor (Package p) => p.IsTruncated ? p.Name : p.Id;
 
     private void AskUninstall (Package? p)
     {
@@ -1993,6 +2094,36 @@ public sealed class App : Runnable
     /// Nested here because it has no consumer outside <see cref="App"/>; pulling
     /// it out as a public top-level type would just clutter the public surface.
     /// </summary>
+    /// <summary>
+    /// A <see cref="TableView"/> that reports clicks on a column header (raising
+    /// <see cref="HeaderClicked"/> with the column index) so the app can sort by that column,
+    /// matching upstream winget-tui's click-to-sort. Clicks on body rows keep the base behaviour.
+    /// </summary>
+    private sealed class SortableTableView : TableView
+    {
+        /// <summary>Raised with the clicked header's column index (the marker column is 0).</summary>
+        public event Action<int>? HeaderClicked;
+
+        /// <inheritdoc />
+        protected override bool OnMouseEvent (Mouse mouse)
+        {
+            if (mouse.IsSingleClicked == true && mouse.Position is { } pos)
+            {
+                _ = ScreenToCell (pos.X, pos.Y, out int? headerColumn);
+
+                if (headerColumn is { } column)
+                {
+                    HeaderClicked?.Invoke (column);
+                    mouse.Handled = true;
+
+                    return true;
+                }
+            }
+
+            return base.OnMouseEvent (mouse);
+        }
+    }
+
     private sealed class MarkedTableSource : IEnumerableTableSource<Package>
     {
         private readonly EnumerableTableSource<Package> _inner;
