@@ -27,6 +27,7 @@ Test-Path ".\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\coreclr.dll
 & $exe --cli      # force the CLI backend
 & $exe --mock     # force the mock backend
 & $exe --com      # force COM explicitly
+& $exe --comdiag  # COM-activation probe only (no TUI) — run FIRST after a clean reboot, see P0
 ```
 
 For quick iteration without AOT: `dotnet run -f net10.0-windows10.0.26100.0`.
@@ -53,9 +54,13 @@ For quick iteration without AOT: `dotnet run -f net10.0-windows10.0.26100.0`.
 >   impossible here — the current deterministic failure may be entangled with COM-server/AppModel
 >   state, OR a genuine AOT activation bug the early run avoided. Machine state is compromised.
 > - **DECISIVE NEXT EXPERIMENT (clean state):** fresh reboot → as the *very first* COM activity,
->   run the AOT build's `--comdiag` (binary in the publish dir still has it). Activates → transient
->   state, redo the real verification on COM. Still fails → genuine AOT bug → CsWinRT 3.x / upstream
->   issue / `InProcCom` / ship the COM build non-AOT (JIT confirmed working).
+>   run the AOT build's `--comdiag` (**now restored to `Program.cs`** — gated `#if WINGET_COM`, so any
+>   fresh Windows build has it; no need to re-add the snippet). Activates → transient state, redo the
+>   real verification on COM. Still fails → genuine AOT bug → CsWinRT 3.x / upstream issue / `InProcCom`
+>   / ship the COM build non-AOT (JIT confirmed working).
+> - **The silent CLI fallback is now also self-explaining:** when COM activation throws, the reason
+>   (HRESULT + message) is stashed and shown in the **`?` Help dialog** as `COM unavailable: 0x… — using CLI`,
+>   so you can see *why* the badge reads `CLI` without rebuilding a diagnostic.
 > - **Consequence for the results below:** items marked ✅ that "passed on COM" were almost
 >   certainly exercising the **CLI** backend (which also yields structured search/list/details, so
 >   it was indistinguishable). They validate the UI + CLI path, NOT the COM backend. See HANDOFF.md.

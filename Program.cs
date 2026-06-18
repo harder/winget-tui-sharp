@@ -65,6 +65,45 @@ if (args.Length > 0 && args [0] is "--dump")
     return;
 }
 
+#if WINGET_COM
+// Apartment + COM-activation probe. This is the decisive "is the COM server actually reachable?"
+// diagnostic — run it as the FIRST COM activity after a clean reboot to separate a genuine
+// AOT-activation bug from a wedged WinGet OOP server (both surface as 0x80073D54
+// APPMODEL_ERROR_NO_PACKAGE). See WINDOWS-TESTING.md (P0 critical-finding) and HANDOFF.md.
+//   winget-tui-sharp.exe --comdiag
+if (args.Length > 0 && args [0] is "--comdiag")
+{
+    Console.WriteLine ($"main thread apartment = {Thread.CurrentThread.GetApartmentState ()}");
+
+    try
+    {
+        Microsoft.Management.Deployment.PackageManager pm = new ();
+        Console.WriteLine ($"main-thread activation OK; catalogs = {pm.GetPackageCatalogs ().Count}");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine ($"main-thread activation FAILED: 0x{(uint) ex.HResult:X8} {ex.Message}");
+    }
+
+    await Task.Run (() =>
+                    {
+                        Console.WriteLine ($"threadpool apartment = {Thread.CurrentThread.GetApartmentState ()}");
+
+                        try
+                        {
+                            Microsoft.Management.Deployment.PackageManager pm = new ();
+                            Console.WriteLine ($"threadpool activation OK; catalogs = {pm.GetPackageCatalogs ().Count}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine ($"threadpool activation FAILED: 0x{(uint) ex.HResult:X8} {ex.Message}");
+                        }
+                    });
+
+    return;
+}
+#endif
+
 // Backend selection (precedence: --mock > --cli > --com > default):
 //   --mock / -m   the in-memory mock (cross-platform dev/parity)
 //   --cli         the winget.exe CLI parser
@@ -109,6 +148,9 @@ static IBackend SelectBackend (string [] args)
         catch (Exception ex)
         {
             // COM server not registered / activation failed — degrade gracefully rather than crash.
+            // The stderr note is immediately painted over by the TUI redraw (invisible in practice),
+            // so also stash the reason for the in-app Help dialog to surface (WINDOWS-TESTING.md).
+            StartupDiagnostics.ComFallbackReason = $"0x{(uint) ex.HResult:X8} — {ex.Message}";
             Console.Error.WriteLine ($"COM backend unavailable ({ex.Message}); falling back to the CLI backend.");
         }
     }
@@ -161,5 +203,18 @@ static bool IsWingetAvailable ()
     catch
     {
         return false;
+    }
+}
+
+namespace WingetTuiSharp
+{
+    /// <summary>
+    /// Startup-time diagnostics carried into the running app. Currently just the reason a requested
+    /// COM backend fell back to CLI — the stderr note is invisible (overdrawn by the TUI), so the
+    /// Help dialog surfaces this so a Windows user can see *why* the badge reads "CLI".
+    /// </summary>
+    internal static class StartupDiagnostics
+    {
+        public static string? ComFallbackReason;
     }
 }

@@ -70,9 +70,10 @@ to re-add after a rebuild).
   Two **quality fixes applied & committed** (detail-load debounce, msstore contrast) — compile-clean,
   still need runtime verification once COM works.
 - **P2:** not started.
-- **A temporary `--comdiag` diagnostic** (apartment + activation probe) was used and reverted from
-  source; the current publish-dir AOT binary still contains it for the clean-reboot retest. Snippet
-  to re-add is in the appendix.
+- **The `--comdiag` diagnostic** (apartment + activation probe) is now **restored to `Program.cs`**
+  (gated `#if WINGET_COM`) so a fresh build always has it for the clean-reboot retest — no re-add needed.
+  Additionally, the silent COM→CLI fallback now records its HRESULT/message and surfaces it in the
+  `?` Help dialog (`COM unavailable: 0x… — using CLI`).
 
 ---
 
@@ -235,7 +236,8 @@ addresses.
 **STEP 0 — settle the headline finding FIRST (everything else depends on it).** On a **clean reboot**,
 before launching the TUI or running any winget/COM command, run the AOT diagnostic:
 `bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\winget-tui-sharp.exe --comdiag`
-(the publish-dir binary still has `--comdiag`; if you rebuilt, re-add it from the appendix).
+(`--comdiag` is now **permanently in `Program.cs`** under `#if WINGET_COM`, so a fresh build always
+has it — no need to re-add the appendix snippet. Just rebuild and run.)
 - **`activation OK; catalogs = 3`** → AOT-COM works on a clean machine; the session's failures were
   transient state from the diagnostic abuse. Proceed to re-verify P0/P1 **on COM** (prior passes were CLI).
 - **`activation FAILED … APPMODEL_ERROR_NO_PACKAGE`** → genuine AOT activation bug. Pursue, in order of
@@ -261,7 +263,8 @@ before launching the TUI or running any winget/COM command, run the AOT diagnost
    size; optional arm64.
 6. Update `WINDOWS-TESTING.md` boxes; commit; remove any `--comshow`/`--comdiag` diagnostic before final commit.
 
-### `--comdiag` (apartment + activation probe) — re-add to Program.cs after `using WingetTuiSharp;`
+### `--comdiag` (apartment + activation probe) — NOW IN `Program.cs` (kept here for reference)
+> Restored to source under `#if WINGET_COM`; no longer needs re-adding. Snippet kept for reference only.
 ```csharp
 #if WINGET_COM
 if (args.Length > 0 && args [0] is "--comdiag")

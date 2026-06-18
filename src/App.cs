@@ -1974,7 +1974,7 @@ public sealed class App : Runnable
             return;
         }
 
-        HelpDialog dlg = new (_state.BackendDescription);
+        HelpDialog dlg = new (_state.BackendDescription, StartupDiagnostics.ComFallbackReason);
         App.Run (dlg);
         dlg.Dispose ();
     }

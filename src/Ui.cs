@@ -494,7 +494,7 @@ public sealed class AdvancedInstallDialog : Runnable<InstallSettings?>
 /// </summary>
 public sealed class HelpDialog : Runnable
 {
-    public HelpDialog (string backendDescription = "")
+    public HelpDialog (string backendDescription = "", string? comFallbackReason = null)
     {
         Title = " Help ";
         BorderStyle = LineStyle.Rounded;
@@ -510,6 +510,13 @@ public sealed class HelpDialog : Runnable
         string header = string.IsNullOrEmpty (backendDescription)
                             ? string.Empty
                             : $"Backend: {backendDescription}\n\n";
+
+        // If a COM backend was requested but activation failed, the app silently fell back to CLI
+        // (the stderr note is overdrawn by the TUI). Surface the reason here so it's discoverable.
+        if (!string.IsNullOrEmpty (comFallbackReason))
+        {
+            header += $"COM unavailable: {comFallbackReason} — using CLI.\n\n";
+        }
 
         Code content = new ()
         {
