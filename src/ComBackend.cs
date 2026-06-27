@@ -90,13 +90,21 @@ public sealed class ComBackend : IBackend
                 CatalogPackage pkg = m.CatalogPackage;
                 string version = SafeVersion (SafeDefaultInstallVersion (pkg)) ?? LatestAvailableVersion (pkg) ?? string.Empty;
 
+                // The search composite (RemotePackagesFromRemoteCatalogs) correlates installed
+                // status, so a search row knows whether it's installed and whether an upgrade is
+                // available — surfaced so the UI can offer Uninstall/Upgrade rather than Install.
+                string? installedVersion = SafeVersion (SafeInstalledVersion (pkg));
+                bool updateAvailable = installedVersion is not null && SafeIsUpdateAvailable (pkg);
+
                 packages.Add (new ()
                 {
                     Id = pkg.Id,
                     Name = pkg.Name,
                     Version = version,
                     Source = SourceOf (pkg),
-                    MatchField = NotableMatchField (m)
+                    MatchField = NotableMatchField (m),
+                    InstalledVersion = installedVersion,
+                    AvailableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null
                 });
             }
             catch
@@ -233,6 +241,7 @@ public sealed class ComBackend : IBackend
                 Name = Coalesce (meta?.PackageName, pkg.Name) ?? pkg.Id,
                 Version = SafeVersion (SafeInstalledVersion (pkg)) ?? SafeVersion (versionInfo) ?? string.Empty,
                 AvailableVersion = LatestAvailableVersion (pkg),
+                InstalledVersion = SafeVersion (installed),
                 Source = SourceOf (pkg),
                 Publisher = NullIfEmpty (meta?.Publisher),
                 Author = NullIfEmpty (meta?.Author),
@@ -615,8 +624,15 @@ public sealed class ComBackend : IBackend
                 return new () { Outcome = VerifyOutcome.Error };
             }
 
-            List<VerifyCheck> checks = [];
-            bool anyFailed = false;
+            // CheckInstalledStatus returns one status block PER installer in the package's manifest
+            // (x64/arm64/x86 × user/machine, the portable variant, etc.). Only the installer that's
+            // actually present passes its checks; the others legitimately report "Apps & Features
+            // entry not found" (0x8A150201) and the like. So evaluate each installer independently
+            // and treat the package as installed correctly when ANY single installer's checks all
+            // pass — rather than flagging the package because some *other* manifest installer (which
+            // was never installed) didn't match. (The old code flattened all installers and reported
+            // Issues if any one check failed, so multi-installer packages always looked corrupt.)
+            List<List<VerifyCheck>> perInstaller = [];
             bool hadReadError = false;
 
             // Two nested projected vectors — indexed via Materialize (AOT rule).
@@ -635,6 +651,8 @@ public sealed class ComBackend : IBackend
                     continue;
                 }
 
+                List<VerifyCheck> checks = [];
+
                 foreach (InstalledStatus entry in entries)
                 {
                     try
@@ -643,30 +661,39 @@ public sealed class ComBackend : IBackend
                         bool ok = entry.Status is null;
                         string? path = NullIfEmpty (entry.Path);
                         checks.Add (new (StatusTypeName (entry.Type), ok, ok ? path : Coalesce (path, $"hr 0x{HResultOf (entry.Status):X8}")));
-
-                        if (!ok)
-                        {
-                            anyFailed = true;
-                        }
                     }
                     catch
                     {
+                        // Couldn't read this check (bad HRESULT projecting the entry). Record it as a
+                        // FAILING check, not just a flag — otherwise an installer with an unreadable
+                        // entry could still be picked as "best" and reported Ok on incomplete data.
                         hadReadError = true;
+                        checks.Add (new ("Status check", false, "could not read installed-status entry"));
                     }
+                }
+
+                if (checks.Count > 0)
+                {
+                    perInstaller.Add (checks);
                 }
             }
 
-            // A confirmed failed check → Issues. Otherwise, if any read errored we can't honestly
-            // claim the install is clean, so report Error rather than Ok/NotApplicable.
-            VerifyOutcome outcome = anyFailed
-                                        ? VerifyOutcome.Issues
-                                        : hadReadError
-                                            ? VerifyOutcome.Error
-                                            : checks.Count == 0
-                                                ? VerifyOutcome.NotApplicable
-                                                : VerifyOutcome.Ok;
+            if (perInstaller.Count == 0)
+            {
+                // No installer yielded a readable check: can't honestly verify if a read errored.
+                return new () { Outcome = hadReadError ? VerifyOutcome.Error : VerifyOutcome.NotApplicable };
+            }
 
-            return new () { Outcome = outcome, Checks = checks };
+            // Best-matching installer = the one with the fewest failing checks. If it has none, the
+            // package is installed correctly and we show that installer's clean checks; otherwise we
+            // surface the closest installer so the user sees the most relevant failures.
+            List<VerifyCheck> best = perInstaller.OrderBy (cs => cs.Count (c => !c.Ok)).First ();
+
+            return new ()
+            {
+                Outcome = best.TrueForAll (c => c.Ok) ? VerifyOutcome.Ok : VerifyOutcome.Issues,
+                Checks = best
+            };
         }
         catch
         {
@@ -937,7 +964,11 @@ public sealed class ComBackend : IBackend
 
     private static async Task<PackageCatalog> ConnectAsync (PackageCatalogReference reference, CancellationToken ct)
     {
-        reference.AcceptSourceAgreements = true;
+        // NOTE: do NOT set AcceptSourceAgreements here. Every reference passed in is a *composite*
+        // (from CompositeRef), and setting AcceptSourceAgreements on a composite reference throws
+        // E_ILLEGAL_STATE_CHANGE. The API-correct place is each *source* reference before it's
+        // composited — RemoteRefs already does that. (This only surfaced once COM actually
+        // activated; under AOT the backend silently fell back to CLI, so the path was never run.)
         ConnectResult result = await reference.ConnectAsync ().AsTask (ct);
 
         if (result.Status != ConnectResultStatus.Ok || result.PackageCatalog is null)
