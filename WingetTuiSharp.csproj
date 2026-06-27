@@ -45,6 +45,13 @@
       for those RID-less builds; an actual `-r win-arm64` publish overrides this with its RID.
     -->
     <MicrosoftManagementDeployment-Platform Condition="'$(RuntimeIdentifier)' == ''">x64</MicrosoftManagementDeployment-Platform>
+    <!--
+      Registration-free WinRT manifest routing the WinGet activatable classes to the in-process
+      server (InProcCom below), so `new PackageManager()` activates IN-PROC. The out-of-process
+      path can't be activated from a Native-AOT process (0x80073D54 APPMODEL_ERROR_NO_PACKAGE — the
+      winrtact.dll manual-activation shim was dropped from ComInterop >= 1.10.x). See app.manifest.
+    -->
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -63,6 +70,12 @@
       CsWinRT optimizer package is needed for the indexing pattern.
     -->
     <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.190-preview" />
+    <!--
+      In-process WinGet COM server (WindowsPackageManager.dll + Microsoft.Management.Deployment.InProc.dll).
+      ExcludeAssets=compile so its bundled .winmd doesn't collide with ComInterop's managed projection;
+      we only want its native runtime assets copied next to the exe. app.manifest routes activation here.
+    -->
+    <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.190-preview" ExcludeAssets="compile" NoWarn="NU1701" />
   </ItemGroup>
 
   <ItemGroup>
