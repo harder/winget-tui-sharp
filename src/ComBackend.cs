@@ -632,7 +632,10 @@ public sealed class ComBackend : IBackend
             // pass — rather than flagging the package because some *other* manifest installer (which
             // was never installed) didn't match. (The old code flattened all installers and reported
             // Issues if any one check failed, so multi-installer packages always looked corrupt.)
-            List<List<VerifyCheck>> perInstaller = [];
+            // Track each installer's checks plus whether any of its entries couldn't be read, so a
+            // "best" installer whose only failure is an unreadable entry reports Error ("couldn't
+            // verify"), not Issues ("may be corrupt").
+            List<(List<VerifyCheck> Checks, bool ReadError)> perInstaller = [];
             bool hadReadError = false;
 
             // Two nested projected vectors — indexed via Materialize (AOT rule).
@@ -652,6 +655,7 @@ public sealed class ComBackend : IBackend
                 }
 
                 List<VerifyCheck> checks = [];
+                bool readError = false;
 
                 foreach (InstalledStatus entry in entries)
                 {
@@ -665,8 +669,10 @@ public sealed class ComBackend : IBackend
                     catch
                     {
                         // Couldn't read this check (bad HRESULT projecting the entry). Record it as a
-                        // FAILING check, not just a flag — otherwise an installer with an unreadable
-                        // entry could still be picked as "best" and reported Ok on incomplete data.
+                        // FAILING check AND flag the installer's data as incomplete — so the package
+                        // isn't reported Ok on partial data, and a best installer whose failures are
+                        // *only* read errors reports Error ("couldn't verify"), not Issues.
+                        readError = true;
                         hadReadError = true;
                         checks.Add (new ("Status check", false, "could not read installed-status entry"));
                     }
@@ -674,7 +680,7 @@ public sealed class ComBackend : IBackend
 
                 if (checks.Count > 0)
                 {
-                    perInstaller.Add (checks);
+                    perInstaller.Add ((checks, readError));
                 }
             }
 
@@ -684,16 +690,16 @@ public sealed class ComBackend : IBackend
                 return new () { Outcome = hadReadError ? VerifyOutcome.Error : VerifyOutcome.NotApplicable };
             }
 
-            // Best-matching installer = the one with the fewest failing checks. If it has none, the
-            // package is installed correctly and we show that installer's clean checks; otherwise we
-            // surface the closest installer so the user sees the most relevant failures.
-            List<VerifyCheck> best = perInstaller.OrderBy (cs => cs.Count (c => !c.Ok)).First ();
+            // Best-matching installer = the one with the fewest failing checks. All pass → installed
+            // correctly (show its clean checks). Otherwise, if its data was incomplete (a read error)
+            // we can't honestly call it corrupt → Error; a genuine failing check → Issues.
+            (List<VerifyCheck> Checks, bool ReadError) best = perInstaller.OrderBy (x => x.Checks.Count (c => !c.Ok)).First ();
 
-            return new ()
-            {
-                Outcome = best.TrueForAll (c => c.Ok) ? VerifyOutcome.Ok : VerifyOutcome.Issues,
-                Checks = best
-            };
+            VerifyOutcome outcome = best.Checks.TrueForAll (c => c.Ok) ? VerifyOutcome.Ok
+                                    : best.ReadError ? VerifyOutcome.Error
+                                    : VerifyOutcome.Issues;
+
+            return new () { Outcome = outcome, Checks = best.Checks };
         }
         catch
         {

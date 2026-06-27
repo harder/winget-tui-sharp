@@ -153,7 +153,7 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
 **Backend badge + version** (`PackageManager.Version`):
 
-- [x] The top-right header shows the live backend + winget version. *(Session 3: `DescribeAsync` — which produces the badge string — returns **`COM · winget 1.29.250`** on the JIT/COM build and `CLI · winget 1.29.250` on the AOT build (ComBackend's ctor throws → CLI fallback). Confirmed at the data layer; the header render itself wants a quick TUI eyeball but the string is exactly what the badge shows.)*
+- [x] The top-right header shows the live backend + winget version. *(Session 3: `DescribeAsync` — which produces the badge string — returns **`COM · winget 1.29.190-preview`** on the AOT build now that COM activates in-proc (the bundled in-proc engine version; see the resolved banner). Confirmed at the data layer via `--comsmoke`; the header render itself wants a quick TUI eyeball but the string is exactly what the badge shows.)*
 - [ ] The **Help** dialog (`?`) leads with a matching `Backend: …` line.
 
 **Search match hint + result cap** (COM):
@@ -163,12 +163,12 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
 **Live progress bar** (the headline feature — the `.Progress` delegate marshaling concern):
 
-> **Session 3:** the `IProgress<OpProgress>` callback path **works on COM (JIT)** — `DownloadAsync(zoxide)`
+> **Session 3:** the `IProgress<OpProgress>` callback path **works on COM** — `DownloadAsync(zoxide)`
 > delivered progress samples (phase **Downloading**, fraction → 1.00) with no crash, so the managed→native
-> progress delivery is sound. The original "**under AOT**, the one CCW-callback unknown" framing is now
-> **moot**: COM doesn't activate under AOT at all (see the resolved banner), so progress under AOT never runs;
-> under JIT (the COM ship vehicle) the CCW path is standard. Install/uninstall progress *rendering* in the
-> status bar still wants an interactive recheck.
+> progress delivery is sound. With COM now running **under AOT in-proc** (see the resolved banner), the CCW
+> callback marshaling is in play on the shipped AOT build and should be confirmed there — the download
+> progress path already exercised it cleanly. Install/uninstall progress *rendering* in the status bar
+> still wants an interactive recheck.
 
 - [~] During a real COM **install**, the status bar shows a determinate bar that **advances** through **Downloading → Installing**. *(Progress plumbing confirmed via download; install execution + status-bar render still need a human at the TUI.)*
 - [ ] During an **uninstall**, the phase reads **"Uninstalling"** (not "Installing"). *(Not run — uninstalling the throwaway then needing to reinstall it was avoided; the `Uninstalling` phase label exists in `OpPhase`.)*
@@ -205,7 +205,7 @@ but these paths need a real terminal / real winget to confirm end-to-end.
 - [ ] **Pinning on the COM backend.** Pin (`p`), unpin, and pin annotations (📌) work — these delegate to `winget.exe`, so they need winget on PATH even on the COM backend. Confirm pin state shows in Installed/Upgrades and pin/unpin succeed.
 - [ ] **Same-id-across-catalogs** (rare): if a package id exists in multiple sources, operations resolve the first match. Only worth checking if you hit an odd case.
 - [ ] **CLI-backend cancel** (`--cli`, then Esc mid-install): confirm it stops watching but does **not** kill `winget.exe` (the install continues) — documented, lower priority.
-- [x] **Measure the AOT binary size** of the COM (Windows) build and compare to the CLI/mock build, to budget the COM backend's cost. *(Session 3: **AOT win-x64 single exe = 22.4 MB** (no `coreclr.dll`). The **JIT self-contained** alternative — the recommended COM ship vehicle since AOT can't activate COM — is **112.7 MB** for the whole folder (~5× the AOT exe, main exe only 0.2 MB + the shared CoreCLR/framework). So keeping COM costs the AOT size advantage regardless of which non-AOT form is chosen.)*
+- [x] **Measure the AOT binary size** of the COM (Windows) build and compare to the CLI/mock build, to budget the COM backend's cost. *(Session 3: **AOT win-x64 single exe = 22.4 MB** (no `coreclr.dll`) + the in-proc engine **`WindowsPackageManager.dll` ~7.3 MB** beside it ≈ **~30 MB deployed** — this is the **ship target** now that COM activates under AOT. For comparison, the abandoned JIT self-contained fallback was **112.7 MB** for the whole folder (~4× larger).)*
 - [ ] **(Optional) win-arm64**: repeat the P0 smoke on an arm64 host or arm64 cross-target.
 - [ ] **Terminal.Gui bump `2.4.3-develop.9` → `2.4.7-develop.1`.** Spot-check the Windows-only input/render fixes that landed in the 2.4.4 release line (can't be verified from Linux): (a) type a **non-ASCII search query** (e.g. accented chars / IME) into `/` search and confirm it renders correctly (Windows VT input encoding fix #5453); (b) **paste** a Unicode string into search via bracketed paste and confirm no mojibake (clipboard fixes #5449/#5451); (c) **resize the terminal** mid-use and confirm no garbled frame at the wrong dimensions (#5461). No app code changed — these are upstream fixes the bump picks up for free.
 

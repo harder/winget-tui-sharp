@@ -69,7 +69,8 @@ ref (the API-correct place) before compositing, making the composite set both re
   - `DownloadAsync(zoxide)` → **Success**, files actually landed in `%USERPROFILE%\Downloads\winget-tui`
     (`zoxide_0.9.9_Arm64_portable_en-US.zip` 480 KB + `.yaml`; COM resolved the **arm64** installer). The
     `IProgress<OpProgress>` callback fired (phase **Downloading**, fraction → 1.00) — **the "live progress"
-    marshaling works on COM** (the old "CCW under AOT" unknown is moot: COM doesn't run under AOT). Cleaned up.
+    marshaling works on COM**, the path that resolves the old "CCW under AOT" unknown now that COM runs
+    under AOT in-proc. Cleaned up.
   - `RepairAsync(zoxide)` → **Success=False**, `Repair failed: RepairError (repairer 0, hr 0x8A15007C)`,
     **no crash** — zoxide is a portable .zip with no repairer. NB this is the `RepairError` path, *distinct*
     from `NoApplicableRepairer`; the message leaks the raw HRESULT. Possible follow-up: map portable/no-repairer
@@ -81,8 +82,10 @@ install/uninstall/upgrade *execution* (download + repair WERE exercised — see 
 render** + cooperative **Esc cancel**; the dialog/panel *rendering* (install preview, version-picker list,
 advanced-install options, Verify→Repair-button flow); the three P1.5 ports' end-to-end terminal *interaction*
 (mouse header clicks, `u`/`P`/`/` keypresses); pinning; the P2 thread-agility / unhealthy-source probes.
-NOTE: the "live progress under **AOT**" CCW-marshaling item is **moot** — COM doesn't run under AOT; under JIT
-(the COM ship vehicle) the callback path is standard and was confirmed via `DownloadAsync`.
+NOTE: COM now runs **under AOT in-proc** (see item 1), so the CCW progress-callback marshaling is in play on
+the shipped AOT build and should be confirmed there — the `DownloadAsync` progress path already exercised it
+cleanly. (The read-only verification in item 3 was first done on JIT, then re-confirmed on the AOT build via
+`--comdiag`/`--comsmoke`.)
 
 **5. Fixes committed (session 3).** Beyond the `ConnectAsync` COM-activation fix, this pass found and fixed,
 from a real interactive COM run + the user's feedback:
