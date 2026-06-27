@@ -1,9 +1,111 @@
-# Handoff — Windows COM-backend verification (`feat/com-backend`)
+# Handoff — Windows COM-backend verification
 
-**Date:** 2026-05-29 · **Branch:** `feat/com-backend` · **Host:** Windows 11 on **ARM64**, App Installer `Microsoft.DesktopAppInstaller 1.29.140.0` (Arm64), winget `v1.29.140-preview`.
+**Latest:** session 3 · 2026-06-13 · branch `main` · Windows 11 **ARM64**, App Installer `1.29.250.0` (Arm64), winget `v1.29.250`.
+**Originally:** session 2 · 2026-05-29 · branch `feat/com-backend` · App Installer `1.29.140.0`, winget `v1.29.140-preview`.
 
-This was a human-in-the-loop Windows verification run against `WINDOWS-TESTING.md`. A human drove the
-interactive TUI; the agent handled builds, non-interactive checks, diagnosis, and fixes.
+Sessions 1–2 were human-in-the-loop (a human drove the interactive TUI; the agent handled builds,
+non-interactive checks, diagnosis, fixes). Session 3 was fully autonomous (no human at the TUI), so it
+resolved the headline question and exercised the COM backend via read-only diagnostics rather than the
+interactive flows — see the session-3 block immediately below.
+
+---
+
+## ✅ SESSION 3 (2026-06-13) — headline question RESOLVED + a second COM bug found & fixed
+
+**1. ✅✅ COM-on-AOT is SOLVED — Native AOT now activates the COM backend. AOT is the ship target.**
+First the failure was isolated (fresh AOT `--comdiag` FAILED `0x80073D54` on both MTA threads; the same source
+as a JIT self-contained build activated 3 catalogs → genuine AOT-specific bug, not machine state). Then it was
+**fixed** by switching to the **in-process** WinGet server:
+
+| Build | `coreclr.dll` | `--comdiag` |
+|-------|---------------|-------------|
+| Native AOT, OOP activation (before) | absent | FAILED `0x80073D54` |
+| JIT self-contained, OOP (control) | present | OK — 3 catalogs |
+| **Native AOT, in-proc (the fix)** | **absent** | **OK — 3 catalogs, both MTA threads** |
+
+**The fix** (`WingetTuiSharp.csproj` + new `app.manifest`, Windows TFM only):
+- Add `Microsoft.WindowsPackageManager.InProcCom` (match ComInterop's version, `1.29.190-preview`) with
+  `ExcludeAssets="compile" NoWarn="NU1701"` — native-only package shipping `WindowsPackageManager.dll` (~7 MB)
+  + `Microsoft.Management.Deployment.InProc.dll`. Keep ComInterop (managed projection).
+- `<ApplicationManifest>app.manifest</ApplicationManifest>`; `app.manifest` transplants the InProc package's
+  `<file>` comClass/`activatableClass` block so `new PackageManager()` activates **in-proc**, not OOP.
+
+**Why OOP failed under AOT:** the manual-activation shim `winrtact.dll`
+(`WinGetServerManualActivation_CreateInstance`) was **dropped from ComInterop ≥ 1.10.x**
+([winget-cli#5459](https://github.com/microsoft/winget-cli/issues/5459),
+[#4839](https://github.com/microsoft/winget-cli/issues/4839)); AOT has no CsWinRT runtime fallback to reach the
+registered OOP server (JIT does). In-proc needs neither the OOP server nor package identity → activates under AOT.
+
+Verified on the AOT build via `--comsmoke`: search / installed (299) / upgrades / versions (113) / installer-preview
+(`Burn · arm64 · user`) / COM detail (Tags=10, Support, Docs) / Verify=Ok — all in-proc. Badge reads
+**`COM · winget 1.29.190-preview`** (the bundled in-proc engine version). **Bonus:** in-proc sidesteps the OOP
+server-wedge problem entirely. **Size:** AOT single-exe stays ~22.4 MB; +7.3 MB in-proc engine beside it (vs the
+~112 MB JIT self-contained folder that was the abandoned fallback).
+
+**Leads that did NOT work (don't retry):** CsWinRT 2.2.0 optimizer; `Microsoft.Windows.CsWinRT 3.0.0-preview`
+(breaks at its own `cswinrt.exe` codegen + WinRT.Runtime conflict); bare `app.manifest` with only
+`supportedOS`/`longPathAware` (no in-proc routing); warming the OOP server.
+
+**2. 🐛 Second, independent COM bug FOUND & FIXED — `ComBackend.ConnectAsync` (`src/ComBackend.cs`).**
+`ConnectAsync` set `reference.AcceptSourceAgreements = true` on the **composite** catalog reference, which
+throws `E_ILLEGAL_STATE_CHANGE` (`set_AcceptSourceAgreements` on `IPackageCatalogReference3`). All three
+composite-connect callers (search, list, find-by-id) hit it — so **every COM search/list/detail would have
+thrown the instant COM activated.** It stayed latent because AOT always fell back to CLI, so the COM path
+never actually ran in the app. `RemoteRefs` already sets `AcceptSourceAgreements = true` on each *source*
+ref (the API-correct place) before compositing, making the composite set both redundant and illegal.
+**Fix:** removed the set from `ConnectAsync` (comment explains why). After the fix, the full COM surface works.
+
+**3. COM verification done on the JIT build (read-only, non-destructive) — all passing:**
+- Badge / `DescribeAsync` → **`COM · winget 1.29.250`** · `CanRepair` → **True**
+- `ListSourcesAsync` → **`msstore, winget, winget-font`** (dynamic; picks up the custom `winget-font` source)
+- `SearchAsync("powertoys")` → **19** results (`PowerToys [Microsoft.PowerToys] 0.100.0 winget`)
+- `ListInstalledAsync` → **299** · `ListUpgradesAsync` → **10** (`PostgreSQL 18 18.3-3 → 18.4-1`, Available populated)
+- `ListVersionsAsync(Microsoft.PowerToys)` → **112** versions, newest-first
+- `GetInstallerPreviewAsync(Microsoft.PowerToys)` → **`Burn · arm64 · user`**
+- `VerifyInstalledAsync(ajeetdsouza.zoxide)` → **Ok** after the per-installer Verify fix (item 5). *(This is the package that surfaced the bug: before the fix it reported **Issues**, `1 of 3 checks failed` (`Registry entry — hr 0x8A150201`) — a non-installed manifest installer's "ARP entry not found", not a real problem. Post-fix, zoxide/PowerShell/7-Zip all verify **Ok**.)*
+- `ShowAsync(Microsoft.PowerToys)` → **Tags (10), Support, Documentation(Wiki), Author, Copyright, Privacy** all
+  populate → **resolves the old `#17`** (ProductCode/FamilyName null is legit — PowerToys is a `burn` installer).
+- **Operation + progress paths** (`--comop ajeetdsouza.zoxide`, on COM/JIT — these had NEVER run before):
+  - `DownloadAsync(zoxide)` → **Success**, files actually landed in `%USERPROFILE%\Downloads\winget-tui`
+    (`zoxide_0.9.9_Arm64_portable_en-US.zip` 480 KB + `.yaml`; COM resolved the **arm64** installer). The
+    `IProgress<OpProgress>` callback fired (phase **Downloading**, fraction → 1.00) — **the "live progress"
+    marshaling works on COM** (the old "CCW under AOT" unknown is moot: COM doesn't run under AOT). Cleaned up.
+  - `RepairAsync(zoxide)` → **Success=False**, `Repair failed: RepairError (repairer 0, hr 0x8A15007C)`,
+    **no crash** — zoxide is a portable .zip with no repairer. NB this is the `RepairError` path, *distinct*
+    from `NoApplicableRepairer`; the message leaks the raw HRESULT. Possible follow-up: map portable/no-repairer
+    to the friendly "doesn't support repair." line. The `Verify(Issues) → Repair → Verify` sequence ran e2e.
+- `dotnet test -f net10.0` → **pass** (18 facts incl. all three P1.5 ports' logic).
+
+**4. Still NOT verified (need a human at the interactive TUI, and/or are destructive):** actual
+install/uninstall/upgrade *execution* (download + repair WERE exercised — see item 3); the **status-bar progress
+render** + cooperative **Esc cancel**; the dialog/panel *rendering* (install preview, version-picker list,
+advanced-install options, Verify→Repair-button flow); the three P1.5 ports' end-to-end terminal *interaction*
+(mouse header clicks, `u`/`P`/`/` keypresses); pinning; the P2 thread-agility / unhealthy-source probes.
+NOTE: the "live progress under **AOT**" CCW-marshaling item is **moot** — COM doesn't run under AOT; under JIT
+(the COM ship vehicle) the callback path is standard and was confirmed via `DownloadAsync`.
+
+**5. Fixes committed (session 3).** Beyond the `ConnectAsync` COM-activation fix, this pass found and fixed,
+from a real interactive COM run + the user's feedback:
+- **Verify false "Issues"** (`src/ComBackend.cs` `VerifyInstalledAsync`): `CheckInstalledStatus` returns a block
+  per *manifest installer*; the non-installed ones report "ARP entry not found" (0x8A150201). Old code flattened
+  all installers and flagged Issues on any failure → healthy multi-installer/portable packages looked corrupt.
+  Now grouped per installer: **Ok if any one installer's checks all pass**; the dialog shows that clean installer.
+- **Narrow-terminal columns** (`src/App.cs`): Name/Id/Version shrink toward minimums so **Available** stays
+  visible instead of being pushed off-screen; reflows on resize via `ViewportChanged`.
+- **Installed-in-Search** (`src/ComBackend.cs` `SearchAsync`, `DetailPanel.cs`, `Models.cs`): search rows read the
+  composite's correlated `InstalledVersion`; an installed row shows a **✓ Installed** badge and Uninstall/Upgrade
+  actions instead of a bare Install.
+- **Op result through reload** (`src/App.cs` `TriggerRefresh`): the result line ("Done"/…) persists through the
+  post-op list reload instead of being masked by "Loading Installed…".
+- **Bulk-select hint** (`src/Ui.cs`): the Upgrades status bar shows `Spc Select` / `U Upgrade sel`.
+
+The temp `#if WINGET_COM` diagnostics (`--comdiag`/`--comshow`/`--comsmoke`/`--comverify`/`--comop`) were
+**removed before commit** (re-add `--comdiag` from the appendix for the AOT activation work). Test dir
+`bin\jit-x64-test\` and `bin\…\publish\` are build outputs (gitignored).
+
+---
+
+## (Session 2, 2026-05-29) original headline finding — superseded by session 3 above, kept for history
 
 > **⚠️ If you are running on WSL / Linux:** you **cannot** run the Windows verification here.
 > Native AOT codegen can't cross-compile from Linux, and the WinGet COM server + installs need
