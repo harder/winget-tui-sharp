@@ -76,6 +76,15 @@ public sealed class Package
     public PinState PinState { get; set; } = PinState.Unpinned;
 
     /// <summary>
+    /// The installed version of this package, when it's installed. On the Installed/Upgrades tabs
+    /// every row is installed (so this mirrors <see cref="Version"/>); the value matters most for
+    /// <b>search</b> rows, where it's the COM composite's correlated installed version (null when
+    /// the package isn't installed) — the signal that lets the UI offer Uninstall/Upgrade instead
+    /// of a bare Install. Null on the CLI backend (no cheap correlation there).
+    /// </summary>
+    public string? InstalledVersion { get; init; }
+
+    /// <summary>
     /// For search results only: the manifest field the package matched on when it's a
     /// non-obvious one (Tag / Moniker / Command / family name / product code) — i.e. not Name/Id.
     /// Null for normal name/id matches and for non-search rows. Surfaced as a "Matched on" hint
@@ -92,6 +101,7 @@ public sealed class PackageDetail
     public required string Name { get; init; }
     public string Version { get; set; } = string.Empty;
     public string? AvailableVersion { get; set; }
+    public string? InstalledVersion { get; set; }
     public string Source { get; set; } = string.Empty;
     public PinState PinState { get; set; } = PinState.Unpinned;
     public string? Publisher { get; init; }
@@ -152,6 +162,11 @@ public sealed class PackageDetail
         if (string.IsNullOrEmpty (AvailableVersion) && !string.IsNullOrEmpty (context.AvailableVersion))
         {
             AvailableVersion = context.AvailableVersion;
+        }
+
+        if (string.IsNullOrEmpty (InstalledVersion) && !string.IsNullOrEmpty (context.InstalledVersion))
+        {
+            InstalledVersion = context.InstalledVersion;
         }
 
         if (!PinState.IsPinned && context.PinState.IsPinned)

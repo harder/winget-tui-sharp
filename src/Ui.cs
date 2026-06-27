@@ -311,9 +311,16 @@ public sealed class StatusBar : View
             InputMode.Search => ["Esc Cancel", "Enter Search"],
             InputMode.LocalFilter => ["Esc Clear", "Enter Done", "Bksp Del"],
             InputMode.VersionInput => ["Esc Cancel", "Enter Confirm", "Bksp Del"],
-            _ => Mode == AppMode.Search
-                     ? ["/ Search", "f Source", "r Refresh", "e Export", "? Help", "q Quit"]
-                     : ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "e Export", "? Help", "q Quit"]
+            _ => Mode switch
+            {
+                AppMode.Search => ["/ Search", "f Source", "r Refresh", "e Export", "? Help", "q Quit"],
+
+                // Upgrades adds the multi-select hints. They sit just before Help/Quit so the
+                // left-dropping truncation sheds the lower-value pairs (Filter/Source/Pin) first,
+                // keeping "Spc Select / U Upgrade sel" — the non-obvious batch flow — visible.
+                AppMode.Upgrades => ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "Spc Select", "U Upgrade sel", "? Help", "q Quit"],
+                _ => ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "e Export", "? Help", "q Quit"]
+            }
         };
     }
 }

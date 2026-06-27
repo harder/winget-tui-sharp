@@ -68,6 +68,13 @@ public sealed class DetailPanel : FrameView
             AddKv ("Available", detail.AvailableVersion, ValueScheme.Success);
         }
 
+        // On the Search tab a row can be one that the user already has installed — make that obvious
+        // (the Installed/Upgrades tabs are installed by definition, so the badge is search-only).
+        if (Mode == AppMode.Search && !string.IsNullOrEmpty (detail.InstalledVersion))
+        {
+            AddSingle ($"✓ Installed ({detail.InstalledVersion})", Theme.Success, TextStyle.Bold);
+        }
+
         if (!string.IsNullOrEmpty (detail.Publisher))
         {
             AddKv ("Publisher", detail.Publisher);
@@ -201,8 +208,24 @@ public sealed class DetailPanel : FrameView
         switch (Mode)
         {
             case AppMode.Search:
-                AddAction ("i", "Install");
-                AddAction ("I", "Install specific version");
+                if (!string.IsNullOrEmpty (detail.InstalledVersion))
+                {
+                    // Already installed: offer manage actions instead of a bare Install. Show
+                    // Upgrade only when the catalog's latest differs from what's installed.
+                    if (!string.IsNullOrEmpty (detail.AvailableVersion)
+                        && !string.Equals (detail.AvailableVersion, detail.InstalledVersion, StringComparison.OrdinalIgnoreCase))
+                    {
+                        AddAction ("u", "Upgrade");
+                    }
+
+                    AddAction ("x", "Uninstall");
+                    AddAction ("I", "Install specific version");
+                }
+                else
+                {
+                    AddAction ("i", "Install");
+                    AddAction ("I", "Install specific version");
+                }
 
                 break;
             case AppMode.Installed:
