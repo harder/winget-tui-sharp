@@ -115,6 +115,10 @@ public sealed class App : Runnable
         };
         _packageTable.Style.ShowHorizontalHeaderUnderline = true;
         _packageTable.Style.ExpandLastColumn = true;
+
+        // Reflow column widths when the table is resized (e.g. terminal resize) so the Available
+        // column stays visible on a narrow window instead of being pushed off the right edge.
+        _packageTable.ViewportChanged += (_, _) => ApplyColumnWidths ();
         _listFrame.Add (_packageTable);
 
         _detailPanel = new ()
@@ -324,7 +328,11 @@ public sealed class App : Runnable
         }
     }
 
-    private void TriggerRefresh ()
+    // keepMessage: when a list reload is triggered right after an operation, pass the op's result
+    // line (e.g. "Done", "Uninstalled X") so the reload keeps showing it — with the spinner as a
+    // "refreshing" cue — instead of overwriting it with "Loading Installed…" (the slow reload would
+    // otherwise mask the brief result). Null on a normal refresh, which shows the usual messages.
+    private void TriggerRefresh (string? keepMessage = null)
     {
         _viewCts.Cancel ();
         _viewCts = new ();
@@ -356,8 +364,11 @@ public sealed class App : Runnable
         }
 
         _state.Loading = true;
-        _state.StatusMessage = $"Loading {_state.Mode}…";
-        _state.StatusIsError = false;
+        _state.StatusMessage = keepMessage ?? $"Loading {_state.Mode}…";
+
+        // Keep the op's error styling (set by the caller) when preserving its message; a plain
+        // refresh is never an error.
+        _state.StatusIsError = keepMessage is not null && _state.StatusIsError;
         RefreshStatusBar ();
         SyncTabBar ();
 
@@ -382,14 +393,20 @@ public sealed class App : Runnable
                                            _state.Packages = packages.ToList ();
                                            _state.ApplyFilter ();
                                            _state.Loading = false;
-                                           int n = _state.Filtered.Count;
-                                           _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
 
-                                           // A search that hit the result cap means there's more the user can't see;
-                                           // nudge them to narrow it (only the COM backend actually caps).
-                                           if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
+                                           // Keep the op's result line visible after the reload rather than replacing it
+                                           // with a package count, so the user sees what just happened.
+                                           if (keepMessage is null)
                                            {
-                                               _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
+                                               int n = _state.Filtered.Count;
+                                               _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
+
+                                               // A search that hit the result cap means there's more the user can't see;
+                                               // nudge them to narrow it (only the COM backend actually caps).
+                                               if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
+                                               {
+                                                   _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
+                                               }
                                            }
                                            RefreshTable ();
                                            RefreshStatusBar ();
@@ -516,37 +533,8 @@ public sealed class App : Runnable
                 Focus = new (Theme.Accent, Theme.Surface, TextStyle.Bold)
             };
 
-            // Pin column widths by setting MinWidth = MaxWidth. Otherwise TableView's
-            // CalculateMaxCellWidth scans the visible viewport and recomputes widths every
-            // frame from the max content width — so when the user presses Down arrow and
-            // a new row enters the viewport with different content widths, all columns
-            // shift. Fixed widths avoid that visual jump.
-            string name = marked.ColumnNames [i];
-
-            if (name.StartsWith ("Name", StringComparison.Ordinal))
+            if (marked.ColumnNames [i] == "Source")
             {
-                s.MinWidth = 24;
-                s.MaxWidth = 24;
-            }
-            else if (name.StartsWith ("Id", StringComparison.Ordinal))
-            {
-                s.MinWidth = 28;
-                s.MaxWidth = 28;
-            }
-            else if (name.StartsWith ("Version", StringComparison.Ordinal))
-            {
-                s.MinWidth = 14;
-                s.MaxWidth = 14;
-            }
-            else if (name == "Available")
-            {
-                s.MinWidth = 14;
-                s.MaxWidth = 14;
-            }
-            else if (name == "Source")
-            {
-                s.MinWidth = 8;
-                s.MaxWidth = 8;
                 s.ColorGetter = args =>
                 {
                     string val = args.CellValue?.ToString () ?? string.Empty;
@@ -568,6 +556,81 @@ public sealed class App : Runnable
                 };
             }
         }
+
+        // Pin per-column widths (MinWidth = MaxWidth). Otherwise TableView's CalculateMaxCellWidth
+        // recomputes widths every frame from the visible rows' content, so scrolling jumps columns
+        // around. Width depends on the table's current size, so re-run on resize (ViewportChanged).
+        ApplyColumnWidths (force: true);
+    }
+
+    private int _lastColumnLayoutWidth = -1;
+
+    /// <summary>
+    /// Sizes the data columns to the table's current width. Name/Id/Version shrink toward minimums
+    /// when the terminal is narrow so the <b>Available</b> column stays visible — it sits just
+    /// before the expanding Source column and is otherwise the first to be pushed off-screen, so a
+    /// user on a small window can't tell it exists. Wired to ViewportChanged to reflow on resize.
+    /// </summary>
+    private void ApplyColumnWidths (bool force = false)
+    {
+        ITableSource? table = _packageTable.Table;
+
+        if (table is null)
+        {
+            return;
+        }
+
+        int avail = _packageTable.Viewport.Width;
+
+        if (avail <= 0 || (!force && avail == _lastColumnLayoutWidth))
+        {
+            return;
+        }
+
+        _lastColumnLayoutWidth = avail;
+
+        string [] names = table.ColumnNames;
+
+        // Preferred widths, and how far each may shrink. Available/Source are not shrunk so they
+        // survive; Source is the ExpandLastColumn target and fills whatever remains.
+        int nameW = 24, idW = 28, verW = 14;
+        const int availW = 14, sourceW = 8, srcReserve = 6;
+        const int nameMin = 14, idMin = 16, verMin = 9;
+
+        bool hasAvailable = names.Contains ("Available");
+        int dataCols = Math.Max (0, names.Length - 1); // exclude the 1-wide marker column
+
+        // Reserve the marker, rough inter-column padding, and a minimum for the expanding Source
+        // column, then shrink Id → Name → Version (in that order) to fit Name+Id+Version+Available.
+        int budget = avail - 1 - (dataCols + 1) - srcReserve;
+        int deficit = nameW + idW + verW + (hasAvailable ? availW : 0) - budget;
+
+        if (deficit > 0) { int c = Math.Min (deficit, idW - idMin); idW -= c; deficit -= c; }
+        if (deficit > 0) { int c = Math.Min (deficit, nameW - nameMin); nameW -= c; deficit -= c; }
+        if (deficit > 0) { int c = Math.Min (deficit, verW - verMin); verW -= c; deficit -= c; }
+
+        for (int i = 1; i < names.Length; i++)
+        {
+            string name = names [i];
+
+            int? w = name.StartsWith ("Name", StringComparison.Ordinal) ? nameW
+                   : name.StartsWith ("Id", StringComparison.Ordinal) ? idW
+                   : name.StartsWith ("Version", StringComparison.Ordinal) ? verW
+                   : name == "Available" ? availW
+                   : name == "Source" ? sourceW
+                   : null;
+
+            if (w is null)
+            {
+                continue;
+            }
+
+            ColumnStyle s = _packageTable.Style.GetOrCreateColumnStyle (i);
+            s.MinWidth = w.Value;
+            s.MaxWidth = w.Value;
+        }
+
+        _packageTable.SetNeedsDraw ();
     }
 
     private string HeaderWithSort (string label, SortField field)
@@ -1833,7 +1896,7 @@ public sealed class App : Runnable
                                            _state.StatusIsError = false;
                                        }
 
-                                       TriggerRefresh ();
+                                       TriggerRefresh (_state.StatusMessage);
                                    });
                   });
     }
@@ -1904,7 +1967,7 @@ public sealed class App : Runnable
                                            }
                                        }
 
-                                       TriggerRefresh ();
+                                       TriggerRefresh (_state.StatusMessage);
                                    });
                   });
     }
