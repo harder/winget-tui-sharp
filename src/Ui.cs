@@ -513,7 +513,7 @@ public sealed class HelpDialog : Runnable
         Arrangement = ViewArrangement.Movable;
 
         // Lead with which backend is live so it's discoverable that the COM build can fall back
-        // to the CLI (see WINDOWS-TESTING.md). Empty until resolved → omit the line entirely.
+        // to the CLI. Empty until resolved → omit the line entirely.
         string header = string.IsNullOrEmpty (backendDescription)
                             ? string.Empty
                             : $"Backend: {backendDescription}\n\n";

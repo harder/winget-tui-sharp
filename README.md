@@ -1,6 +1,6 @@
 # winget-tui-sharp
 
-> ⚠️ **Proof of concept** This project exists to **benchmark [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) v2 against Ratatui**: feature parity, rendering fidelity, performance, and UX. However it is fully operational: Run it on a Windows machine only if you understand that **install / uninstall / upgrade actions invoke the real `winget` CLI** and will operate on your real package state.
+> ⚠️ **Proof of concept** This project exists to **benchmark [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) v2 against Ratatui**: feature parity, rendering fidelity, performance, and UX. However it is fully operational: on Windows it drives the **WinGet COM API** by default (falling back to the `winget` CLI if COM can't activate), so **install / uninstall / upgrade / repair actions operate on your real package state**. Run it on a machine you're comfortable changing.
 
 Winget-tui-sharp is a C# / [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) reimplementation of the wonderful [winget-tui](https://github.com/shanselman/winget-tui) - a Rust + Ratatui based TUI for the [Windows Package Manager (winget)](https://github.com/microsoft/winget-cli). **Winget-tui** is a beautiful terminal app - you should go download it and try it if you have a Windows machine! [Go download winget-tui](https://github.com/shanselman/winget-tui).
 
@@ -71,16 +71,22 @@ Or right-click the exe → *Properties* → check *Unblock* → *OK*. On the fir
 | Pixel-art logo + tab bar header                                           | ✅ (3-row half-block art, mouse-clickable tabs)                                       |
 | Package list table (Name, Id, Version, Source / Available)                | ✅                                                                                    |
 | Detail panel: publisher, description, homepage, changelog, license        | ✅                                                                                    |
+| Richer COM-only detail: tags, product code, author, copyright, support / privacy / docs links | ✅ (populated from the COM API; absent fields omitted) |
 | Status bar: source filter, pin filter, hotkey hints, spinner              | ✅                                                                                    |
 | Search mode (`/` or `s`) with deferred backend search                     | ✅                                                                                    |
 | Local filter for Installed / Upgrades (auto-cleared on view switch)       | ✅                                                                                    |
 | Source filter cycling (`f`)                                               | ✅                                                                                    |
 | Pin filter cycling (`P`)                                                  | ✅                                                                                    |
 | Sort cycling (`S`) - None → Name↑↓ → Id↑↓ → Version↑↓                     | ✅                                                                                    |
-| Install / Install-version / Uninstall / Upgrade / Pin                     | ✅ (no `--exact` to match upstream behavior)                                          |
+| Install / Install-version / Uninstall / Upgrade / Pin                     | ✅                                                                                    |
+| Verify install (`V`) — COM `CheckInstalledStatus`, per-installer            | ✅ (COM only; CLI shows a neutral "COM only" note)                                    |
+| Repair install (`R`) — COM `RepairPackage`, friendly "no repair" message    | ✅ (COM only)                                                                         |
+| Download-only (`d`) and advanced install (`A`: scope / mode / arch / args)  | ✅                                                                                    |
+| Install preview (`i`) + real version picker (`I`)                           | ✅ (COM enumerates installer type/arch/scope and the real version list; CLI uses a free-text version prompt) |
+| Live determinate progress bar + cooperative `Esc` cancel                    | ✅ (COM `IProgress` marshaling; CLI watches winget output)                            |
 | Pin states distinguished: Pinned / Blocking / Gating(version)             | ✅                                                                                    |
 | Batch-select (Space / `a`) and batch upgrade (`U`)                        | ✅                                                                                    |
-| Confirm dialog, version-input dialog, help overlay                        | ✅                                                                                    |
+| Confirm dialog, version-picker / version-input dialog, help overlay        | ✅                                                                                    |
 | CSV export (`e`)                                                          | ✅                                                                                    |
 | Open homepage (`o`) / changelog (`c`)                                     | ✅                                                                                    |
 | Refresh (`r`) with cursor-anchor by package id                            | ✅                                                                                    |
@@ -97,7 +103,7 @@ Or right-click the exe → *Properties* → check *Unblock* → *OK*. On the fir
 
 ## Building
 
-`winget` itself is Windows-only, so the deployed target is Windows. The build uses **.NET Native AOT** to produce a single standalone `.exe` (~10–15 MB) that runs without `dotnet` installed on the target machine.
+`winget` itself is Windows-only, so the deployed target is Windows. The build uses **.NET Native AOT** to produce a standalone `.exe` (~22 MB) that runs without `dotnet` installed on the target machine. The Windows build additionally ships the **in-process WinGet COM engine** (`WindowsPackageManager.dll` ~7 MB + `Microsoft.Management.Deployment.InProc.dll`) into the `publish` folder beside the exe — this is what lets the COM backend activate under Native AOT (see [Choosing a backend](#choosing-a-backend-at-runtime)). Ship the `publish` folder together; an exe copied off on its own still runs, but falls back to the CLI backend.
 
 ### Build the standalone executable
 
@@ -126,7 +132,20 @@ dotnet publish -c Release -f net10.0-windows10.0.26100.0 -r win-arm64
 as the matching VS C++ build tools component is installed. Building on Windows arm64
 produces an arm64 exe that runs natively (no x64 emulation).
 
-Copy `winget-tui-sharp.exe` anywhere, no other files required.
+For the COM backend, keep `winget-tui-sharp.exe` together with the `WindowsPackageManager.dll` and `Microsoft.Management.Deployment.InProc.dll` that `publish` drops next to it; the exe alone still runs but degrades to the CLI backend.
+
+> **Building Native AOT on an ARM64 host:** a plain `dotnet publish` fails at the ILC native-link step (`'vswhere.exe' is not recognized`) because ILC calls a bare `vswhere.exe` that isn't on PATH. Run the publish inside a VS Dev Shell for the x64 cross-target with the VS Installer dir on PATH:
+>
+> ```powershell
+> $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer"
+> $root = & "$installer\vswhere.exe" -latest -products * -property installationPath
+> Import-Module (Join-Path $root "Common7\Tools\Microsoft.VisualStudio.DevShell.dll")
+> Enter-VsDevShell -VsInstallPath $root -SkipAutomaticLocation -DevCmdArguments "-arch=x64 -host_arch=arm64" | Out-Null
+> $env:PATH = "$installer;$env:PATH"   # Enter-VsDevShell does NOT add this; ILC needs bare vswhere
+> dotnet publish -c Release -f net10.0-windows10.0.26100.0 -r win-x64
+> ```
+>
+> Only AOT `publish` (the native link) needs this; `dotnet build` / `dotnet run` do not.
 
 ### Dev iteration on any host (including WSL / macOS / Linux)
 
@@ -146,7 +165,9 @@ dotnet run -f net10.0 -- --mock      # any host: force the mock backend (UI deve
 | `--com`     | `ComBackend`   | WinGet **COM API** — structured results, no stdout parsing. Windows build only. |
 | _(default)_ | COM on Windows builds, CLI elsewhere | Either degrades to the mock backend if `winget` isn't usable. |
 
-The COM backend talks to the WinGet COM API directly instead of parsing CLI output. Pinning has no COM surface, so pin/unpin/list-pins transparently delegate to the CLI. See [`spikes/ComBackendSpike/SPIKE-RESULTS.md`](spikes/ComBackendSpike/SPIKE-RESULTS.md) for the AOT validation behind it.
+The COM backend talks to the WinGet COM API directly instead of parsing CLI output, which is what unlocks the COM-only features (Verify, Repair, install preview, real version list, richer detail, live progress). Pinning has no COM surface, so pin/unpin/list-pins transparently delegate to the CLI.
+
+Activating COM under **Native AOT** required shipping the **in-process** WinGet server and routing activation to it with a registration-free WinRT manifest ([`app.manifest`](app.manifest)): the out-of-process App Installer server can't be activated from an AOT process (it throws `0x80073D54 APPMODEL_ERROR_NO_PACKAGE` — the manual-activation shim was dropped from `ComInterop ≥ 1.10.x`, and AOT has no CsWinRT runtime fallback to reach the registered OOP server). The in-process path needs neither the OOP server nor package identity, so it activates fine. The companion native DLLs are added by the `Microsoft.WindowsPackageManager.InProcCom` package; `--comdiag` prints a quick activation probe.
 
 ### Run the test suite
 
@@ -177,9 +198,12 @@ The xUnit suite under `tests/` covers:
   walks grapheme clusters correctly, `Logo` instantiates with expected dimensions,
   `TabBar` reports clicks via `TabClicked`, `MarkedTableSource` nested type still exists.
   These catch breakages on Terminal.Gui version upgrades.
+- **App behavior** (`AppBehaviorTests.cs`) - click-to-sort header→sort-field mapping,
+  truncated-id upgrade falling back to match-by-name, and the contextual empty-state
+  messages (up-to-date / no pinned / no unpinned / no filter match).
 
 Every test is anchored to a real bug found during development or a Terminal.Gui surface
-we depend on; **89 tests**, runs in <1 second.
+we depend on; **109 tests**, runs in <1 second.
 
 ### Diagnose winget parser issues at runtime
 
@@ -210,11 +234,15 @@ Mirrors `src/handler.rs` in the upstream:
 | `S`                             | Cycle sort column / direction                                                  |
 | `r`                             | Refresh (preserves selection by id)                                            |
 | `e`                             | Export visible list to CSV                                                     |
-| `i`                             | Install                                                                        |
-| `I`                             | Install specific version                                                       |
+| `i`                             | Install (shows an installer preview on the COM backend)                        |
+| `I`                             | Install specific version (real version list on COM, free-text on CLI)          |
+| `A`                             | Advanced install (scope / mode / arch / custom args)                           |
+| `d`                             | Download installer only (no install)                                           |
 | `u`                             | Upgrade                                                                        |
 | `U`                             | Batch upgrade                                                                  |
 | `x`                             | Uninstall                                                                      |
+| `V`                             | Verify install (COM only)                                                      |
+| `R`                             | Repair install (COM only)                                                      |
 | `p`                             | Pin / unpin                                                                    |
 | `Space`                         | Toggle batch select (Upgrades)                                                 |
 | `a`                             | Toggle select-all (Upgrades)                                                   |
@@ -288,8 +316,9 @@ mutating `AppState` and triggering a redraw.
 
 ```
 winget-tui-sharp/
-├── Program.cs               # Entry point + winget-detection + --dump diagnostic
-├── WingetTuiSharp.csproj         # Multi-targets net10.0 + net10.0-windows; Terminal.Gui; AOT-configured
+├── Program.cs               # Entry point + winget-detection + --dump / --comdiag diagnostics
+├── WingetTuiSharp.csproj         # Multi-targets net10.0 + net10.0-windows; Terminal.Gui; ComInterop + InProcCom; AOT-configured
+├── app.manifest             # Reg-free WinRT manifest routing COM activation to the in-process server (Windows build)
 ├── README.md
 ├── LICENSE                  # MIT
 ├── feature-gaps.md          # Terminal.Gui parity findings vs upstream
@@ -308,12 +337,13 @@ winget-tui-sharp/
 │   └── App.cs               # Main Runnable; state coordination; nested MarkedTableSource
 └── tests/
     ├── WingetTuiSharp.Tests.csproj
-    └── ParserTests.cs       # xUnit suite covering the parser pipeline
+    ├── ParserTests.cs       # xUnit suite covering the parser pipeline + Terminal.Gui surfaces
+    └── AppBehaviorTests.cs  # Sort-field mapping, truncated-id fallback, empty-state messages
 ```
 
 ## Status & roadmap
 
-This is a POC. Things known to be unfinished or different from upstream are listed in [feature-gaps.md](feature-gaps.md). Terminal.Gui is under active development and this application will be upated periodically to reflect improvements, fixes, and new features in that library. PRs that close parity gaps are welcome.
+This is a POC. The WinGet **COM backend is the default on Windows and activates under Native AOT** (via the in-process server described above), so the shipped AOT build runs the structured COM path rather than parsing CLI output. Things known to be unfinished or different from upstream are listed in [feature-gaps.md](feature-gaps.md). Terminal.Gui is under active development and this application will be updated periodically to reflect improvements, fixes, and new features in that library. PRs that close parity gaps are welcome.
 
 Things explicitly **out of scope**:
 

@@ -55,6 +55,6 @@ public interface IBackend
     // A short, human-readable description of which backend is live and (where available) the
     // winget version behind it — e.g. "COM · winget 1.11.400", "CLI · winget 1.11.400", or
     // "Mock backend". Shown in the help dialog and at startup so it's obvious which backend the
-    // app actually selected (the COM build can silently fall back to CLI — see WINDOWS-TESTING.md).
+    // app actually selected (the COM build can silently fall back to CLI if activation fails).
     Task<string> DescribeAsync (CancellationToken ct);
 }

@@ -69,7 +69,8 @@ if (args.Length > 0 && args [0] is "--dump")
 // Apartment + COM-activation probe. This is the decisive "is the COM server actually reachable?"
 // diagnostic — run it as the FIRST COM activity after a clean reboot to separate a genuine
 // AOT-activation bug from a wedged WinGet OOP server (both surface as 0x80073D54
-// APPMODEL_ERROR_NO_PACKAGE). See WINDOWS-TESTING.md (P0 critical-finding) and HANDOFF.md.
+// APPMODEL_ERROR_NO_PACKAGE). Prints the apartment state + catalog count for the main and a
+// threadpool thread; a healthy in-proc activation reports "activation OK; catalogs = 3".
 //   winget-tui-sharp.exe --comdiag
 if (args.Length > 0 && args [0] is "--comdiag")
 {
@@ -149,7 +150,7 @@ static IBackend SelectBackend (string [] args)
         {
             // COM server not registered / activation failed — degrade gracefully rather than crash.
             // The stderr note is immediately painted over by the TUI redraw (invisible in practice),
-            // so also stash the reason for the in-app Help dialog to surface (WINDOWS-TESTING.md).
+            // so also stash the reason for the in-app Help dialog ('?') to surface.
             StartupDiagnostics.ComFallbackReason = $"0x{(uint) ex.HResult:X8} — {ex.Message}";
             Console.Error.WriteLine ($"COM backend unavailable ({ex.Message}); falling back to the CLI backend.");
         }
