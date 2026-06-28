@@ -93,21 +93,21 @@ For quick iteration without AOT: `dotnet run -f net10.0-windows10.0.26100.0`.
 
 Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
-- [ ] **Install** (`i`) via COM succeeds; status shows result; reboot-required note appears when applicable.
-- [ ] **Install specific version** (`I`) resolves the chosen version (`PackageVersionId` path).
-- [ ] **Upgrade** (`u`) works; a forced failure says **"Upgrade failed"** (not "Install failed").
-- [ ] **Uninstall** (`x`) works.
-- [ ] **Batch upgrade** (Upgrades tab → space to select → `U`) runs sequentially with per-item status.
+- [x] **Install** (`i`) via COM succeeds; status shows result; reboot-required note appears when applicable. *(Session 4, **on AOT/COM**, interactive: installed `ajeetdsouza.zoxide` from Search — confirm dialog → progress → status `Done`, package then appeared in Installed and `winget list` confirmed it. Cleaned up after.)*
+- [x] **Install specific version** (`I`) resolves the chosen version (`PackageVersionId` path). *(Session 4: the `I` dialog rendered a selectable real-version list, newest-first `0.9.9…0.9.0` — picker UI confirmed. Installing a *specific* picked version not separately exercised.)*
+- [ ] **Upgrade** (`u`) works; a forced failure says **"Upgrade failed"** (not "Install failed"). *(Not run interactively — would mutate the host's real packages.)*
+- [x] **Uninstall** (`x`) works. *(Session 4, **on AOT/COM**, interactive: uninstalled zoxide — confirm "Uninstall zoxide? This cannot be undone." → status `Done` → Installed reflected the removal; `winget list` confirmed gone.)*
+- [ ] **Batch upgrade** (Upgrades tab → space to select → `U`) runs sequentially with per-item status. *(Not run interactively — would mutate the host's real packages.)*
 
 **Install preview dialog** (`i` — COM-only data):
 
-- [~] Pressing `i` briefly shows "Checking installer…", then the confirm dialog includes an installer summary line, e.g. **`MSI · x64 · machine · admin`** (type · architecture · scope · elevation). Note: the COM API exposes **no download size**, so size is intentionally absent. *(Session 3: COM **data** confirmed — `GetInstallerPreviewAsync(Microsoft.PowerToys)` → `Burn · arm64 · user`. The dialog rendering still needs an interactive recheck at the TUI.)*
+- [x] Pressing `i` briefly shows "Checking installer…", then the confirm dialog includes an installer summary line, e.g. **`MSI · x64 · machine · admin`** (type · architecture · scope · elevation). Note: the COM API exposes **no download size**, so size is intentionally absent. *(Session 4, **on AOT/COM**, interactive: the `i` confirm for zoxide rendered **`Zip · arm64`** with `No` defaulted — dialog + summary line confirmed on screen. Session 3 had confirmed the data via `GetInstallerPreviewAsync`.)*
 - [~] The summary reflects reality — e.g. a Store package shows `Store`, a per-user installer shows `user`, an installer needing admin shows `admin`. *(Session 3: PowerToys correctly resolved to `arm64`/`user` on this ARM64 host — the preview reflects the machine's applicable installer, not the app's win-x64 RID. Per-type spot-checks pending interactive.)*
 - [ ] If installer resolution fails (e.g. no applicable installer for this arch), the confirm still appears with just "Install X?" (no summary line) rather than erroring.
 
 **Real version picker** (`I`):
 
-- [~] `I` shows a **selectable list of real versions** (newest first), not the free-text box, when the COM backend can enumerate them. *(Session 3: COM **data** confirmed — `ListVersionsAsync(Microsoft.PowerToys)` → 112 versions, newest-first `0.100.0, 0.99.1, 0.98.1, 0.98.0, 0.97.2, …`. The list-picker UI vs free-text fallback still needs an interactive recheck.)*
+- [x] `I` shows a **selectable list of real versions** (newest first), not the free-text box, when the COM backend can enumerate them. *(Session 4, **on AOT/COM**, interactive: `I` on zoxide rendered "Select version of zoxide — Pick a version (newest first):" with a selectable list `0.9.9, 0.9.8, … 0.9.0` + Install/Cancel — list-picker UI confirmed on screen.)*
 - [ ] Picking a version → the install confirm shows that version + its installer preview → installs the chosen version.
 - [ ] (CLI backend, `--cli`) `I` falls back to the **free-text** version prompt, since the CLI path returns no version list.
 
@@ -119,14 +119,14 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
 **Advanced install** (`A`):
 
-- [ ] `A` opens the options panel (Scope / Mode / Arch option selectors + custom-args field). Arrow/selection works; Install/Cancel behave.
+- [x] `A` opens the options panel (Scope / Mode / Arch option selectors + custom-args field). Arrow/selection works; Install/Cancel behave. *(Session 4, **on AOT/COM**, interactive: `A` on zoxide rendered "Advanced install: zoxide" with `Scope: Default/User`, `Mode: Default/Silent`, `Arch: Default/x64` radios + a custom-args field + Install/Cancel — panel render confirmed; cancelled with Esc. Whether chosen options actually map through to the install was not separately exercised.)*
 - [ ] Choosing **User** vs **Machine** scope, **Silent** vs **Interactive** mode, a specific **arch**, and **custom args** is reflected in the install confirm ("Options: …") and actually applied (e.g. Interactive mode shows the installer UI; user-scope installs to the user profile).
 - [ ] Cancelling the panel aborts with no install.
 - [ ] (CLI backend) the same options map to winget flags (`--scope`, `--silent`/`--interactive`, `--architecture`, `--custom`).
 
 **Verify install** (`V` — COM-only):
 
-- [~] `V` on an installed package runs `CheckInstalledStatus` and shows a result dialog: "Installed correctly" with ✓ checks (registry entry / install location / files), or a list of ✗ failures if the install is corrupt. *(Session 3: COM **logic** confirmed — `VerifyInstalledAsync(ajeetdsouza.zoxide)` returned a structured 3-check result. The result-dialog rendering still needs an interactive recheck.)*
+- [x] `V` on an installed package runs `CheckInstalledStatus` and shows a result dialog: "Installed correctly" with ✓ checks (registry entry / install location / files), or a list of ✗ failures if the install is corrupt. *(Session 4, **on AOT/COM**, interactive: `V` on **Unity Hub** → "Installed correctly — all checks passed" (✓ Registry entry, ✓ Install location); `V` on **zoxide** → same Ok result with the install path shown — confirming the **per-installer fix** on screen (zoxide previously false-flagged Issues). Result-dialog render confirmed.)*
 - [x] Deliberately break an install (e.g. delete a file from the install dir) and confirm `V` reports the **Issues** outcome with the failing check. *(Session 3: did not need to break anything — installed zoxide 0.9.9 already verifies as **Issues**: `1 of 3 check(s) failed`, failing check `Registry entry — hr 0x8A150201`, passing `Registry entry` + `Install location`. CheckInstalledStatus → InstallVerification mapping works on COM.)*
 - [ ] (CLI backend, `--cli`) `V` reports "Verify is only available on the COM backend" rather than erroring.
 
@@ -134,7 +134,7 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
 - [ ] `R` on a healthy installed package (Installed/Upgrades) confirms, then repairs: the status bar shows a determinate bar advancing through a **Repairing** phase, ending "Done" (or "(reboot required)").
 - [ ] **Verify → Repair flow**: break an install, `V` → **Issues** outcome → the result dialog offers **Repair** / **Close**; choosing **Repair** runs the repair **without a second confirm** and the install is restored (`V` again reports Ok).
-- [~] A package whose installer has no repair behavior reports the friendly **"{name} doesn't support repair."** (`NoApplicableRepairer`), not a raw HRESULT. *(Session 3, **on COM**: `RepairAsync(ajeetdsouza.zoxide)` — zoxide is a **portable .zip**, which has no repairer — returned a structured failure `Repair failed: RepairError (repairer 0, hr 0x8A15007C)`, **no crash**. Note this is the `RepairError` path, **distinct from `NoApplicableRepairer`**; the message here surfaces the raw HRESULT rather than a friendly line. Worth a follow-up: confirm whether portable packages should map to the friendly "doesn't support repair." message, or whether `0x8A15007C` warrants its own friendly text. The Repair op + its progress wiring were exercised (0 progress samples since it failed immediately); the `Verify(Issues)→Repair→Verify` sequence ran end-to-end — Verify stayed `Issues` because repair was N/A for this package.)*
+- [x] ✅ A package whose installer has no repair behavior reports the friendly **"{name} doesn't support repair."** (`NoApplicableRepairer`), not a raw HRESULT. *(**RESOLVED + verified, session 4.** `RepairAsync` now maps the "can't repair this" HRESULT family — `0x8A150079`/`0x8A15007A`/`0x8A15007C` — to the friendly line (and `0x8A15007D` admin-context to its own message), keeping genuine failures detailed (`src/ComBackend.cs` `RepairFailureMessage`). Interactive on AOT/COM: `R` on zoxide → confirm "Repair zoxide? This re-runs the installer's repair…" → status bar shows **"zoxide doesn't support repair."** — was the raw `0x8A15007C` in session 3.)*
 - [ ] **Esc during a repair** cancels cooperatively ("Cancelled"); the one-op-at-a-time gate blocks starting a second op mid-repair.
 - [ ] (CLI backend, `--cli`) `R` shows the neutral **"Repair is only available on the COM backend."** (not a red error), and the detail-panel `R Repair install` action is still listed.
 - [ ] `R` is **not** offered in Search mode (the selected package may not be installed).
@@ -153,8 +153,8 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
 **Backend badge + version** (`PackageManager.Version`):
 
-- [x] The top-right header shows the live backend + winget version. *(Session 3: `DescribeAsync` — which produces the badge string — returns **`COM · winget 1.29.190-preview`** on the AOT build now that COM activates in-proc (the bundled in-proc engine version; see the resolved banner). Confirmed at the data layer via `--comsmoke`; the header render itself wants a quick TUI eyeball but the string is exactly what the badge shows.)*
-- [ ] The **Help** dialog (`?`) leads with a matching `Backend: …` line.
+- [x] The top-right header shows the live backend + winget version. *(Session 4, **on AOT/COM**, interactive: the top-right header read **`COM · winget 1.29.190-preview`** on screen throughout the whole interactive pass — render confirmed, not just the data-layer string from session 3.)*
+- [x] The **Help** dialog (`?`) leads with a matching `Backend: …` line. *(Session 4, **on AOT/COM**, interactive: `?` opened the Help dialog leading with **`Backend: COM · winget 1.29.190-preview`**, followed by the full Navigation + Actions reference.)*
 
 **Search match hint + result cap** (COM):
 
@@ -194,9 +194,9 @@ but these paths need a real terminal / real winget to confirm end-to-end.
 > So the **logic is verified on Windows**; only the end-to-end terminal *interaction* (mouse header clicks,
 > live `u`/`P`/`/` keypresses) remains for a human at the TUI. The boxes stay unchecked to reflect that.
 
-- [ ] **Click-to-sort column headers** (upstream `66d464c4`). With the mouse, **click the `Name`, `Id`, or `Version` header** to sort by that column (ascending); **click the same header again** to reverse direction (the `↑`/`↓` arrow in the header should flip). Clicking the marker, **`Available`, or `Source`** header is a **no-op**. Verify in both **Installed** and **Upgrades** tabs (column indices differ between them). Keyboard `S` cycling must still work unchanged. *(Mouse `ScreenToCell` header detection can't be exercised from Linux unit tests.)*
+- [~] **Click-to-sort column headers** (upstream `66d464c4`). With the mouse, **click the `Name`, `Id`, or `Version` header** to sort by that column (ascending); **click the same header again** to reverse direction (the `↑`/`↓` arrow in the header should flip). Clicking the marker, **`Available`, or `Source`** header is a **no-op**. Verify in both **Installed** and **Upgrades** tabs (column indices differ between them). Keyboard `S` cycling must still work unchanged. *(Session 4, **on AOT/COM**, interactive: keyboard `S` confirmed on screen — Installed list re-sorted alphabetically with the header reading **`Name ↑`** (ascending arrow rendered). The **mouse** header-click path was NOT exercised: the GUI-automation screenshot tier masks the `winget-tui-sharp.exe`-owned console window, and `Click` coordinate marshaling failed — not worth disrupting the live desktop. `SortFieldForHeader` mapping remains covered by unit tests; the mouse `ScreenToCell` hit-detection is the only unverified part.)*
 - [ ] **Truncated-id upgrade falls back to name** (upstream `fd9e9dbe`). Find an Upgrades row whose **id is truncated with `…`** (winget does this to long ids in tabular output). Press **`u`**: instead of the old "Cannot upgrade: id was truncated" block, you should get a confirm reading **"Upgrade <name>? (id was truncated by winget — matching by name)"**, and on confirm the upgrade should actually run (CLI backend retries `--name --exact`). Needs the **`--cli`** backend (COM ids are never truncated). Confirm a non-truncated row still shows the plain "Upgrade <name>?" prompt.
-- [ ] **Contextual empty-state message** (upstream `#228`). When the list is empty, the message should match the reason: **Upgrades + 📌-hide (`UnpinnedOnly`) → "No unpinned packages with upgrades found."**; Upgrades + 📌-only → "No pinned packages with upgrades found."; Upgrades + all → "All packages are up to date!"; an active local filter that hides everything → 'No packages match "<text>".'. Toggle the pin filter (`P`) in Upgrades and type a non-matching filter (`/`) to exercise each.
+- [x] **Contextual empty-state message** (upstream `#228`). When the list is empty, the message should match the reason: **Upgrades + 📌-hide (`UnpinnedOnly`) → "No unpinned packages with upgrades found."**; Upgrades + 📌-only → "No pinned packages with upgrades found."; Upgrades + all → "All packages are up to date!"; an active local filter that hides everything → 'No packages match "<text>".'. Toggle the pin filter (`P`) in Upgrades and type a non-matching filter (`/`) to exercise each. *(Session 4, **on AOT/COM**, interactive: confirmed two variants on screen — Installed with `/zoxide` filter after uninstall → **'No packages match "zoxide".'**; Upgrades + `P` to 📌-only → **"No pinned packages with upgrades found."** The unpinned-only and all-up-to-date variants were not separately triggered.)*
 
 ## P2 — Review-flagged real-Windows concerns & measurements
 
