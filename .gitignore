@@ -2,8 +2,13 @@
 bin/
 obj/
 publish/
+dist/
 *.nupkg
 *.snupkg
+
+# Signing material — never commit private keys
+*.pfx
+*.p12
 
 # Tool output
 *.user

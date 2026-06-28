@@ -91,6 +91,43 @@ jobs:
           -o publish/${{ matrix.rid }}
           /p:Version=${{ steps.version.outputs.version }}
 
+      # Download B: a signed MSIX whose package identity lets the AOT exe reach the in-box
+      # out-of-process WinGet server, shipping only the ~61 KB projection winmd (not the 7 MB
+      # in-process engine). See com-activation.md. Built pack-only here; signed by the next step.
+      - name: Build MSIX (download B)
+        continue-on-error: true   # experimental; never block the exe/zip downloads
+        shell: pwsh
+        run: |
+          $arch = "${{ matrix.rid }}" -replace '^win-', ''
+          # Appx Version must be 4-part numeric with no prerelease suffix.
+          $v = "${{ steps.version.outputs.version }}" -replace '[-+].*$', ''
+          $p = @($v.Split('.')); while ($p.Count -lt 3) { $p += '0' }
+          $msixVersion = ($p[0..2] -join '.') + '.0'
+          $publisher = "${{ vars.MSIX_PUBLISHER }}"
+          if (-not $publisher) { $publisher = 'CN=winget-tui-sharp (Dev)' }
+          Write-Host "MSIX version=$msixVersion publisher=$publisher arch=$arch"
+          ./packaging/build-msix.ps1 -Arch $arch -Version $msixVersion -Publisher $publisher
+
+      # Sign the MSIX with Azure Trusted Signing when configured (see code-signing.md). vars.MSIX_PUBLISHER
+      # must equal the certificate subject. Skipped when secrets are absent — the resulting MSIX is then
+      # unsigned and installs only under Developer Mode, so configure signing before shipping B to users.
+      - name: Sign MSIX (Azure Trusted Signing)
+        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        continue-on-error: true
+        uses: azure/trusted-signing-action@v0.5.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files-folder: ${{ github.workspace }}/dist
+          files-folder-filter: msix
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
       - name: Package artifacts
         shell: pwsh
         run: |
@@ -166,25 +203,28 @@ jobs:
 
           ## Downloads
 
-          | File | Target |
-          |------|--------|
-          | \`winget-tui-sharp-${VERSION}-win-x64.zip\` | **x64 (recommended)** — exe + in-process WinGet COM engine + docs |
-          | \`winget-tui-sharp-${VERSION}-win-arm64.zip\` | **ARM64 (recommended)** — Surface Pro X, Snapdragon Copilot+ |
-          | \`winget-tui-sharp-x64.exe\` | x64 single exe — runs on the \`winget\` CLI backend (no COM features) |
-          | \`winget-tui-sharp-arm64.exe\` | ARM64 single exe — CLI backend |
-          | \`SHA256SUMS-*.txt\` | Per-architecture checksums |
+          Three ways to run it; pick by how much you want the COM features (Verify, Repair, install preview, richer detail, live progress) vs. zero-install simplicity. See [com-activation.md](https://github.com/${{ github.repository }}/blob/main/com-activation.md).
+
+          | File | Backend | Install | Notes |
+          |------|---------|---------|-------|
+          | \`winget-tui-sharp-${VERSION}-{x64,arm64}.msix\` | **COM** | yes (signed) | **Download B** — package identity → COM, smallest footprint. Requires the package to be signed (see below). |
+          | \`winget-tui-sharp-${VERSION}-win-{x64,arm64}.zip\` | **COM** | no (portable) | Exe + in-process engine + docs. COM with no install, no signing — the no-fuss COM option. |
+          | \`winget-tui-sharp-{x64,arm64}.exe\` | CLI | no (portable) | **Download A** — single exe, \`winget\` CLI backend, no COM features. |
+          | \`SHA256SUMS-*.txt\` | — | — | Per-architecture checksums |
 
           ## Quick start
 
-          Download the **\`.zip\`** matching your machine's architecture, extract it, and run \`winget-tui-sharp.exe\` from the folder — no .NET runtime needed. The zip ships the in-process COM engine beside the exe, which is what enables the COM backend (Verify, Repair, install preview, richer detail, live progress). The standalone \`.exe\` downloads are a lighter option that run on the \`winget\` CLI backend instead.
+          - **Just run it (CLI):** download the \`.exe\` for your architecture and run it.
+          - **COM, no install:** download the \`.zip\`, extract, run \`winget-tui-sharp.exe\` from the folder (the in-process engine sits beside it).
+          - **COM, installed (MSIX):** download the \`.msix\` and double-click. *Unsigned MSIX builds install only with Developer Mode enabled; a properly signed release installs normally.*
 
           \`\`\`powershell
-          # Verify the download (PowerShell)
+          # Verify a download (PowerShell)
           Get-FileHash .\winget-tui-sharp-x64.exe -Algorithm SHA256
           # Compare against SHA256SUMS-win-x64.txt
           \`\`\`
 
-          The first run on Windows may show a SmartScreen warning — these binaries aren't code-signed (POC). Click "More info" → "Run anyway" if you trust the source.
+          The portable downloads aren't code-signed (POC) — on first run click SmartScreen's "More info" → "Run anyway", or \`Unblock-File\` the exe.
           EOF
 
       - name: Publish release
@@ -193,10 +233,13 @@ jobs:
           files: |
             artifacts/*.exe
             artifacts/*.zip
+            artifacts/*.msix
             artifacts/SHA256SUMS-*.txt
           body_path: release-notes.md
           generate_release_notes: true
           append_body: true
-          fail_on_unmatched_files: true
+          # false so an experimental MSIX that didn't build doesn't fail the release; the exe/zip/
+          # sums always exist because this job only runs after `build` succeeds.
+          fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

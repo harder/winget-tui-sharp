@@ -169,6 +169,8 @@ The COM backend talks to the WinGet COM API directly instead of parsing CLI outp
 
 Activating COM under **Native AOT** required shipping the **in-process** WinGet server and routing activation to it with a registration-free WinRT manifest ([`app.manifest`](app.manifest)): the out-of-process App Installer server can't be activated from an AOT process (it throws `0x80073D54 APPMODEL_ERROR_NO_PACKAGE` — the manual-activation shim was dropped from `ComInterop ≥ 1.10.x`, and AOT has no CsWinRT runtime fallback to reach the registered OOP server). The in-process path needs neither the OOP server nor package identity, so it activates fine. The companion native DLLs are added by the `Microsoft.WindowsPackageManager.InProcCom` package; `--comdiag` prints a quick activation probe.
 
+The full activation story — including the alternative of giving the app **package identity** (a signed MSIX) so it can reach the in-box out-of-process server while shipping only a 61 KB metadata file instead of the engine — is in [com-activation.md](com-activation.md). The `WingetComMode` build property selects between the two (`InProc` for the portable build, `Identity` for the MSIX).
+
 ### Run the test suite
 
 ```bash

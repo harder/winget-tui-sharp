@@ -31,6 +31,16 @@
       since winget itself is Windows-only.
     -->
     <RuntimeIdentifiers>win-x64;win-arm64;linux-x64;linux-arm64;osx-x64;osx-arm64</RuntimeIdentifiers>
+    <!--
+      COM activation strategy for the Windows build (see com-activation.md):
+        InProc   (default) - bundle the in-process WinGet engine + a reg-free WinRT manifest.
+                             A portable exe (+ ~7 MB engine); no package identity needed.
+                             This is what the standalone exe / zip ships.
+        Identity           - drop the in-process engine, ship only the ~61 KB projection winmd,
+                             and rely on PACKAGE IDENTITY (an MSIX) to reach the in-box
+                             out-of-process server. This is what the signed MSIX (download B) ships.
+    -->
+    <WingetComMode Condition="'$(WingetComMode)' == ''">InProc</WingetComMode>
   </PropertyGroup>
 
   <!--
@@ -46,12 +56,16 @@
     -->
     <MicrosoftManagementDeployment-Platform Condition="'$(RuntimeIdentifier)' == ''">x64</MicrosoftManagementDeployment-Platform>
     <!--
-      Registration-free WinRT manifest routing the WinGet activatable classes to the in-process
-      server (InProcCom below), so `new PackageManager()` activates IN-PROC. The out-of-process
-      path can't be activated from a Native-AOT process (0x80073D54 APPMODEL_ERROR_NO_PACKAGE — the
-      winrtact.dll manual-activation shim was dropped from ComInterop >= 1.10.x). See app.manifest.
+      InProc: registration-free WinRT manifest routing the WinGet activatable classes to the
+      in-process server (InProcCom below), so `new PackageManager()` activates IN-PROC. The
+      out-of-process path can't be activated from a Native-AOT process (0x80073D54
+      APPMODEL_ERROR_NO_PACKAGE — the winrtact.dll manual-activation shim was dropped from
+      ComInterop >= 1.10.x). See app.manifest.
+      Identity: a bare manifest (no in-proc routing); the MSIX supplies package identity so the
+      out-of-process server is reachable. See app.identity.manifest and com-activation.md.
     -->
-    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(WingetComMode)' == 'InProc'">app.manifest</ApplicationManifest>
+    <ApplicationManifest Condition="'$(WingetComMode)' == 'Identity'">app.identity.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>
@@ -69,8 +83,13 @@
       projected collection) — see the "one AOT rule" comment atop src/ComBackend.cs for why
       (foreach over a WinRT-projected collection throws InvalidCastException under Native AOT).
       No CsWinRT optimizer package is needed for the indexing pattern.
+      GeneratePathProperty exposes $(PkgMicrosoft_WindowsPackageManager_ComInterop) so the Identity
+      build can copy the projection winmd out of the package.
     -->
-    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.190-preview" />
+    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.190-preview" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(WingetComMode)' == 'InProc' and '$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
     <!--
       In-process WinGet COM server (WindowsPackageManager.dll + Microsoft.Management.Deployment.InProc.dll).
       ExcludeAssets=compile so its bundled .winmd doesn't collide with ComInterop's managed projection;
@@ -79,18 +98,26 @@
     <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.190-preview" ExcludeAssets="compile" NoWarn="NU1701" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(WingetComMode)' == 'Identity' and '$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
+    <!--
+      Identity build ships the WinRT projection metadata next to the exe so the OS metadata resolver
+      (RoActivateInstance / RoResolveNamespace) can find the type under Native AOT — without it,
+      activation fails with 0x8000000F RO_E_METADATA_NAME_NOT_FOUND even when identity is present.
+      ~61 KB, vs the ~7 MB in-process engine the InProc build ships.
+    -->
+    <None Include="$(PkgMicrosoft_WindowsPackageManager_ComInterop)\lib\uap10.0\Microsoft.Management.Deployment.winmd"
+          CopyToOutputDirectory="PreserveNewest" Link="Microsoft.Management.Deployment.winmd" Visible="false" />
+  </ItemGroup>
+
   <ItemGroup>
     <!-- Expose internal parser helpers (DedupePackages, ParsePinState, CompareVersionsLike) to the test project. -->
     <InternalsVisibleTo Include="WingetTuiSharp.Tests" />
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The main project's source globs from the repo root. Exclude the test project and the
-         standalone spikes so their files (and generated obj/ artifacts) don't get pulled into
-         the main exe's compile set. -->
+    <!-- The main project's source globs from the repo root. Exclude the test project so its files
+         (and generated obj/ artifacts) don't get pulled into the main exe's compile set. -->
     <Compile Remove="tests/**/*.cs" />
     <None Remove="tests/**/*" />
-    <Compile Remove="spikes/**/*.cs" />
-    <None Remove="spikes/**/*" />
   </ItemGroup>
 </Project>

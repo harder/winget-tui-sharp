@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX manifest for download B (the COM build). Placeholders {VERSION} / {ARCH} / {PUBLISHER} are
+  substituted by build-msix.ps1. The package's identity is what lets the Native-AOT exe reach the
+  in-box out-of-process WinGet server (see ../com-activation.md); runFullTrust + the
+  Windows.FullTrustApplication entry point are required for a packaged desktop app.
+
+  Publisher MUST match the subject of the signing certificate, or signtool/install will reject it.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+
+  <Identity Name="winget-tui-sharp" Publisher="{PUBLISHER}" Version="{VERSION}" ProcessorArchitecture="{ARCH}"/>
+
+  <Properties>
+    <DisplayName>winget-tui-sharp</DisplayName>
+    <PublisherDisplayName>winget-tui-sharp</PublisherDisplayName>
+    <Logo>assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0"/>
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-us"/>
+  </Resources>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust"/>
+  </Capabilities>
+
+  <Applications>
+    <Application Id="wingettuisharp" Executable="winget-tui-sharp.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="winget-tui-sharp"
+        Description="A Terminal.Gui terminal UI for the Windows Package Manager (winget)."
+        BackgroundColor="#1A1410"
+        Square150x150Logo="assets\Square150x150Logo.png"
+        Square44x44Logo="assets\Square44x44Logo.png"/>
+    </Application>
+  </Applications>
+</Package>

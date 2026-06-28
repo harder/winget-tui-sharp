@@ -21,16 +21,16 @@ Code signing addresses (1) immediately for **EV** certs, eventually for **OV** c
 
 ### 1. Azure Trusted Signing — *what upstream `shanselman/winget-tui` uses*
 
-Microsoft's managed cloud signing service. No hardware tokens, no certificate management — you authenticate via Entra ID, the cert lives in Azure, the build agent calls a signing endpoint.
+Microsoft's managed cloud signing service. No hardware tokens, no certificate management — you authenticate via Entra ID, the cert lives in Azure, the build agent calls a signing endpoint. **Renamed "Azure Artifact Signing" in 2026** (same service, same pricing).
 
 | | |
 |---|---|
-| **Cost** | $9.99 USD per month (Basic), $99.99 per month (Premium) |
-| **Cert type** | Microsoft-issued OV (Organization Validation), backed by Microsoft's CA |
-| **SmartScreen** | Builds reputation over time. Not instant. |
-| **Setup** | Subscription identity validation (~2–4 weeks initial), then turnaround is fast |
+| **Cost** | $9.99 USD per month (Basic, ≤5,000 signatures), $99.99 per month (Premium) |
+| **Cert type** | Microsoft-issued **OV** (Organization Validation). It **never issues EV** — Microsoft has stated there are no plans to. |
+| **SmartScreen** | Builds reputation over time. **Not instant** (only a real EV cert is instant — see #3). |
+| **Setup** | Subscription identity validation, then turnaround is fast |
 | **CI integration** | First-class [`azure/trusted-signing-action`](https://github.com/Azure/trusted-signing-action) GitHub Action |
-| **Constraint** | Requires an Azure tenant and an organization-or-individual identity that passes Microsoft's verification |
+| **Eligibility (updated 2026)** | The old 3-year-org-history requirement was **dropped at GA**. Now open to **organizations** (US/Canada/EU/UK) and **individual self-employed developers** (US/Canada). Requires a **paid** Azure subscription — **no free/trial/sponsored subscriptions**. Verification documents must be <12 months old. |
 | **What upstream does** | The Rust `shanselman/winget-tui` uses this; see `.github/workflows/build.yml` in upstream — they sign all release exes |
 
 **Recommendation: best fit if you want to match upstream's signing story exactly and don't mind a small recurring cost.**
@@ -83,6 +83,38 @@ Free, GitHub-native cryptographic provenance — proves a binary was built from 
 | **Worth doing?** | Yes, *in addition to* a real signing strategy. Adds verifiable build-source attestation for security-minded users. |
 
 Documented for completeness; doesn't solve the prompt-on-download problem on its own.
+
+## Packaging & package identity
+
+Signing and **packaging** are separate axes, and for this project packaging matters for a second
+reason beyond trust: **package identity is what lets the COM backend activate without shipping the
+7 MB in-process engine.** See [com-activation.md](com-activation.md) for the full activation story
+and the spike that proved it; the short version is that `0x80073D54 APPMODEL_ERROR_NO_PACKAGE` is
+literally "this process has no package identity," and giving the app identity (via MSIX) clears it.
+
+| Option | Produces | Confers package identity? | Signing | Notes |
+|---|---|---|---|---|
+| **Portable exe** | one `.exe` | **No** | optional | What download A ships (CLI backend). |
+| **Inno / NSIS / WiX-MSI** | classic installer → files in Program Files | **No** | sign installer + exe | A traditional installer does *not* grant identity, so it does nothing for the COM/WinRT path. |
+| **MSIX** | `.msix` installed via App Installer / Store | **Yes** | **Mandatory** (cert root must be trusted on the target) | What download B ships. Gives identity → COM works. Can wrap a Native-AOT exe. |
+| **Sparse / external-location package** | tiny identity `.msix` registered next to a normally-installed exe | **Yes** | **Mandatory** | Lightest way to get identity while keeping a normal install layout. Win10 19041+. |
+
+Key facts:
+
+- **MSIX must be signed even to *sideload*.** The signing cert's root has to be trusted on the
+  target machine (a self-signed dev cert must be imported into Trusted People / a trusted root, or
+  install fails with `CERT_E_UNTRUSTEDROOT 0x800B0109`). Production wants a CA cert or Artifact
+  Signing. During development, Developer Mode lets you **loose-register an unsigned layout**
+  (`Add-AppxPackage -Register AppxManifest.xml`) — no cert needed — which is how the packaging
+  script tests activation locally.
+- **A full-trust desktop app in MSIX needs `<rescap:Capability Name="runFullTrust"/>`** in the
+  manifest, and the application entry uses `EntryPoint="Windows.FullTrustApplication"`.
+- **No `Microsoft.DesktopAppInstaller` `<PackageDependency>` is needed** — winget's server is an
+  in-box system component; you just rely on it being present (recent Win10/11; LTSC/Server SKUs may
+  lack it).
+- **Cost of "B" = a cert.** MSIX is unsigned-installable only under Developer Mode; real users need
+  a signed package, so download B is gated on adopting one of options #1–#3 above (Artifact Signing
+  at ~$10/mo, or SignPath OSS, being the realistic picks).
 
 ## Workaround for users on the unsigned binary (Phase 1)
 
