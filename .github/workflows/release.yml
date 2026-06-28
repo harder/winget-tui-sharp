@@ -80,9 +80,13 @@ jobs:
           echo "Version: $VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      # -f selects the Windows TFM, which is what compiles in the COM backend (WINGET_COM)
+      # and pulls the in-process WinGet engine into the publish folder. Without it, the
+      # multi-targeted project wouldn't produce the COM build.
       - name: AOT publish ${{ matrix.rid }}
         run: >
           dotnet publish -c Release
+          -f net10.0-windows10.0.26100.0
           -r ${{ matrix.rid }}
           -o publish/${{ matrix.rid }}
           /p:Version=${{ steps.version.outputs.version }}
@@ -102,12 +106,16 @@ jobs:
           New-Item -ItemType Directory -Path "dist" -Force | Out-Null
 
           # Bare-exe drop, named with the architecture so latest links from the
-          # release page don't need to encode the version.
+          # release page don't need to encode the version. NB: the exe on its own runs
+          # on the CLI backend — the COM backend needs the in-process engine DLLs that
+          # only the zip below bundles.
           Copy-Item "publish/$rid/winget-tui-sharp.exe" "dist/winget-tui-sharp-$exeSuffix.exe"
 
-          # Portable bundle: exe + README + LICENSE + feature-gaps in a zip.
+          # Portable bundle: the full publish output (exe + the in-process WinGet COM
+          # engine — WindowsPackageManager.dll + Microsoft.Management.Deployment.InProc.dll
+          # — so the COM backend activates) + docs, in a zip. Exclude the .pdb (symbols only).
           New-Item -ItemType Directory -Path "stage/$bundleName" -Force | Out-Null
-          Copy-Item "publish/$rid/winget-tui-sharp.exe" "stage/$bundleName/"
+          Copy-Item "publish/$rid/*"   "stage/$bundleName/" -Recurse -Exclude *.pdb
           Copy-Item "README.md"        "stage/$bundleName/"
           Copy-Item "LICENSE"          "stage/$bundleName/"
           Copy-Item "feature-gaps.md"  "stage/$bundleName/"
@@ -154,21 +162,21 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           cat > release-notes.md <<EOF
-          > ⚠️ **Proof of concept** Install / uninstall / upgrade actions invoke the real \`winget\` CLI. See [README](https://github.com/${{ github.repository }}#readme) before running on real systems.
+          > ⚠️ **Proof of concept** Install / uninstall / upgrade / repair actions operate on your real package state. See [README](https://github.com/${{ github.repository }}#readme) before running on real systems.
 
           ## Downloads
 
           | File | Target |
           |------|--------|
-          | \`winget-tui-sharp-x64.exe\` | Windows x64 (Intel/AMD) |
-          | \`winget-tui-sharp-arm64.exe\` | Windows ARM64 (Surface Pro X, Snapdragon Copilot+) |
-          | \`winget-tui-sharp-${VERSION}-win-x64.zip\` | x64 portable bundle (exe + docs) |
-          | \`winget-tui-sharp-${VERSION}-win-arm64.zip\` | arm64 portable bundle |
+          | \`winget-tui-sharp-${VERSION}-win-x64.zip\` | **x64 (recommended)** — exe + in-process WinGet COM engine + docs |
+          | \`winget-tui-sharp-${VERSION}-win-arm64.zip\` | **ARM64 (recommended)** — Surface Pro X, Snapdragon Copilot+ |
+          | \`winget-tui-sharp-x64.exe\` | x64 single exe — runs on the \`winget\` CLI backend (no COM features) |
+          | \`winget-tui-sharp-arm64.exe\` | ARM64 single exe — CLI backend |
           | \`SHA256SUMS-*.txt\` | Per-architecture checksums |
 
           ## Quick start
 
-          Download the \`.exe\` matching your machine's architecture. No installation, no .NET runtime, no other files required.
+          Download the **\`.zip\`** matching your machine's architecture, extract it, and run \`winget-tui-sharp.exe\` from the folder — no .NET runtime needed. The zip ships the in-process COM engine beside the exe, which is what enables the COM backend (Verify, Repair, install preview, richer detail, live progress). The standalone \`.exe\` downloads are a lighter option that run on the \`winget\` CLI backend instead.
 
           \`\`\`powershell
           # Verify the download (PowerShell)
