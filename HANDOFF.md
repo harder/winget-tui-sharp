@@ -1,12 +1,56 @@
 # Handoff — Windows COM-backend verification
 
-**Latest:** session 3 · 2026-06-13 · branch `main` · Windows 11 **ARM64**, App Installer `1.29.250.0` (Arm64), winget `v1.29.250`.
-**Originally:** session 2 · 2026-05-29 · branch `feat/com-backend` · App Installer `1.29.140.0`, winget `v1.29.140-preview`.
+**Latest:** session 4 · 2026-06-27 · branch `main` (PR #11 merged) · Windows 11 **ARM64**, App Installer `1.29.250.0`.
+**Earlier:** session 3 · 2026-06-13 · branch `main`; session 2 · 2026-05-29 · branch `feat/com-backend`.
 
 Sessions 1–2 were human-in-the-loop (a human drove the interactive TUI; the agent handled builds,
 non-interactive checks, diagnosis, fixes). Session 3 was fully autonomous (no human at the TUI), so it
 resolved the headline question and exercised the COM backend via read-only diagnostics rather than the
-interactive flows — see the session-3 block immediately below.
+interactive flows. **Session 4 was autonomous *with* the agent driving the interactive TUI itself**
+(GUI automation on the AOT build), closing most of the interactive-render gaps — see the session-4 block
+immediately below.
+
+---
+
+## ✅ SESSION 4 (2026-06-27) — agent-driven interactive TUI pass + repair-message fix
+
+The agent published the **Native-AOT win-x64** build (22.5 MB exe, no `coreclr.dll`, in-proc
+`WindowsPackageManager.dll` beside it), confirmed `--comdiag` → **activation OK, 3 catalogs on both MTA
+threads**, then drove the live TUI via GUI automation. All checks below were **observed on screen on the
+AOT/COM build** (badge read `COM · winget 1.29.190-preview` throughout). Throwaway package: `ajeetdsouza.zoxide`
+(installed → verified → repair-attempted → uninstalled; confirmed gone via `winget list`, system restored).
+
+**Code fix this session — repair message (`src/ComBackend.cs` `RepairAsync`).** A portable `.zip` package
+returns `RepairResultStatus.RepairError` with `ExtendedErrorCode 0x8A15007C`
+(`APPINSTALLER_CLI_ERROR_REPAIR_NOT_SUPPORTED`), which fell through to the raw-HRESULT branch. Now a
+`RepairFailureMessage` helper maps the "can't repair this" HRESULT family — `0x8A150079`
+(NO_REPAIR_INFO_FOUND), `0x8A15007A` (NOT_APPLICABLE), `0x8A15007C` (NOT_SUPPORTED) — to the friendly
+**"{name} doesn't support repair."**, and `0x8A15007D` (ADMIN_CONTEXT_REPAIR_PROHIBITED) to its own
+elevation message; genuine failures keep the detailed status + HRESULT. **Verified live:** Repair on zoxide
+now shows **"zoxide doesn't support repair."** in the status bar (was the raw `0x8A15007C`). Tests: 109 pass.
+
+**Interactive items verified on screen (AOT/COM):** backend badge (`COM · winget 1.29.190-preview`) on the
+header *and* leading the `?` Help dialog · Installed + Upgrades tabs with the **Available** column populated ·
+rich detail panel (Tags, Product code, Author, Copyright, Support, Privacy, Manual/FAQ, Homepage, Release
+notes) on Unity Hub / 7-Zip / zoxide · **bulk-select hint** (`Spc Select` / `U Upgrade sel`) · **Verify**
+dialog → **Ok** ("all checks passed", ✓ Registry + ✓ Install location) on Unity Hub and on zoxide (the
+per-installer fix — zoxide previously false-flagged Issues) · **Install preview** dialog with summary line
+`Zip · arm64` · real **Install** (zoxide) and **Uninstall** execution · **Repair** confirm + friendly message
+(above) · **op result persists** ("Done") through the post-op reload · **version picker** (`I`) selectable
+list newest-first (`0.9.9…0.9.0`) · **advanced install** panel (`A`: Scope/Mode/Arch radios + custom-args) ·
+**empty-state** variants — filter-no-match `No packages match "zoxide".` and Upgrades 📌-only `No pinned
+packages with upgrades found.` · **sort** (`S`) → `Name ↑` arrow + alphabetized list · paste into `/` search ·
+ARP-only graceful fallback ("could not retrieve manifest details … list-view information only").
+
+**Still NOT exercised (and why):** live progress-bar *frames* advancing + **Esc** cancel mid-op (zoxide ops
+finish too fast to capture; the `IProgress` path itself was already proven via `DownloadAsync` in session 3) ·
+**batch upgrade** execution (`U`) and single **upgrade** `u` execution (would mutate the host's real packages) ·
+**mouse** click-to-sort header hit-detection (the GUI-automation screenshot masks the `winget-tui-sharp.exe`-owned
+window and hides other windows — not worth disrupting a live desktop; sort logic + arrow render confirmed via
+keyboard `S`, and `SortFieldForHeader` is unit-tested) · **pinning** state change `p` (mutates real winget pins) ·
+truncated-id `u` fallback (needs `--cli`; COM ids never truncate) · non-ASCII/IME input + terminal resize
+(Terminal.Gui bump spot-checks). NB: installed count read 299→298 across the install/uninstall cycle — normal
+±1 winget ARP-enumeration drift between refreshes (only zoxide was ever uninstalled).
 
 ---
 
@@ -73,8 +117,9 @@ ref (the API-correct place) before compositing, making the composite set both re
     under AOT in-proc. Cleaned up.
   - `RepairAsync(zoxide)` → **Success=False**, `Repair failed: RepairError (repairer 0, hr 0x8A15007C)`,
     **no crash** — zoxide is a portable .zip with no repairer. NB this is the `RepairError` path, *distinct*
-    from `NoApplicableRepairer`; the message leaks the raw HRESULT. Possible follow-up: map portable/no-repairer
-    to the friendly "doesn't support repair." line. The `Verify(Issues) → Repair → Verify` sequence ran e2e.
+    from `NoApplicableRepairer`; the message leaked the raw HRESULT. **RESOLVED in session 4** — `0x8A15007C`
+    now maps to the friendly "doesn't support repair." line (see the session-4 block). The
+    `Verify(Issues) → Repair → Verify` sequence ran e2e.
 - `dotnet test -f net10.0` → **pass** (18 facts incl. all three P1.5 ports' logic).
 
 **4. Still NOT verified (need a human at the interactive TUI, and/or are destructive):** actual

@@ -587,11 +587,35 @@ public sealed class ComBackend : IBackend
         asyncOp.Progress = (_, p) => progress?.Report (MapRepair (p));
         RepairResult result = await asyncOp.AsTask (ct);
 
-        return result.Status switch
+        if (result.Status == RepairResultStatus.Ok)
         {
-            RepairResultStatus.Ok => Ok (op, $"Repaired {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}"),
-            RepairResultStatus.NoApplicableRepairer => Fail (op, $"{pkg.Name} doesn't support repair."),
-            _ => Fail (op, $"Repair failed: {result.Status} (repairer {result.RepairerErrorCode}, hr 0x{HResultOf (result.ExtendedErrorCode):X8})")
+            return Ok (op, $"Repaired {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}");
+        }
+
+        return Fail (op, RepairFailureMessage (pkg.Name, result));
+    }
+
+    // The COM API reports "this package can't be repaired" in two ways: as the dedicated
+    // RepairResultStatus.NoApplicableRepairer status, or — for portable/zip and similar installer
+    // technologies — as a generic RepairError whose ExtendedErrorCode carries one of the winget
+    // "not supported / not applicable" HRESULTs. Both mean the same thing to the user, so map them
+    // to one friendly line; genuine repair failures keep the detailed status + HRESULT.
+    private static string RepairFailureMessage (string name, RepairResult result)
+    {
+        if (result.Status == RepairResultStatus.NoApplicableRepairer)
+        {
+            return $"{name} doesn't support repair.";
+        }
+
+        return HResultOf (result.ExtendedErrorCode) switch
+        {
+            0x8A150079u or // NO_REPAIR_INFO_FOUND — "Repair command not found."
+            0x8A15007Au or // REPAIR_NOT_APPLICABLE
+            0x8A15007Cu    // REPAIR_NOT_SUPPORTED — installer technology has no repair (e.g. portable .zip)
+                => $"{name} doesn't support repair.",
+            0x8A15007Du    // ADMIN_CONTEXT_REPAIR_PROHIBITED
+                => $"Repairing {name} requires elevation it can't get (it's installed in user scope).",
+            var hr => $"Repair failed: {result.Status} (repairer {result.RepairerErrorCode}, hr 0x{hr:X8})"
         };
     }
 
