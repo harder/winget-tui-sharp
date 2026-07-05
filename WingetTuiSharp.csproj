@@ -60,7 +60,7 @@
       prereleases; this is intentionally a moving target since the project's purpose is
       to evaluate parity against current Terminal.Gui behavior.
     -->
-    <PackageReference Include="Terminal.Gui" Version="2.4.12-develop.7" />
+    <PackageReference Include="Terminal.Gui" Version="2.4.17-develop.6" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
@@ -69,13 +69,13 @@
       projected collection) — see spikes/ComBackendSpike/SPIKE-RESULTS.md for why. No
       CsWinRT optimizer package is needed for the indexing pattern.
     -->
-    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.190-preview" />
+    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.280" />
     <!--
       In-process WinGet COM server (WindowsPackageManager.dll + Microsoft.Management.Deployment.InProc.dll).
       ExcludeAssets=compile so its bundled .winmd doesn't collide with ComInterop's managed projection;
       we only want its native runtime assets copied next to the exe. app.manifest routes activation here.
     -->
-    <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.190-preview" ExcludeAssets="compile" NoWarn="NU1701" />
+    <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.280" ExcludeAssets="compile" NoWarn="NU1701" />
   </ItemGroup>
 
   <ItemGroup>
