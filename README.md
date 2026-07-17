@@ -114,6 +114,24 @@ produces an arm64 exe that runs natively (no x64 emulation).
 
 Copy `winget-tui-sharp.exe` anywhere, no other files required.
 
+### CLI-only build (no COM projection/in-proc-server DLLs)
+
+The `net10.0-windows10.0.26100.0` TFM above is the full COM-capable build: it bundles the
+WinGet COM projection (`Microsoft.WindowsPackageManager.ComInterop`) and the in-proc COM
+server (`Microsoft.WindowsPackageManager.InProcCom`, ~7 MB) so `ComBackend` can activate
+under Native AOT without needing an installer's out-of-process registration. If you'd
+rather ship a smaller, dependency-free exe and are fine relying purely on the system's
+`winget.exe` CLI, publish the cross-platform `net10.0` TFM for a Windows RID instead — it
+has no COM package references at all, so it's a plain CLI/mock build:
+
+```powershell
+dotnet publish -c Release -f net10.0 -r win-x64
+.\bin\Release\net10.0\win-x64\publish\winget-tui-sharp.exe
+```
+
+This is exactly the "no COM available" case the runtime backend selection already handles —
+no flags needed, it just runs the CLI backend since COM isn't compiled in.
+
 ### Dev iteration on any host (including WSL / macOS / Linux)
 
 For iterating on the code, `dotnet run` is faster than re-publishing AOT each time, and unlike the AOT publish it works on any OS - handy for hacking on the UI from WSL. Because the project multi-targets, pick the cross-platform TFM with `-f net10.0` off-Windows. There's no `winget` to invoke on non-Windows hosts, so use `--mock`:
@@ -130,9 +148,9 @@ dotnet run -f net10.0 -- --mock      # any host: force the mock backend (UI deve
 | `--mock` / `-m` | `MockBackend`  | In-memory fixtures; works on any OS.                             |
 | `--cli`     | `CliBackend`   | Shells out to `winget.exe` and parses its table output.          |
 | `--com`     | `ComBackend`   | WinGet **COM API** — structured results, no stdout parsing. Windows build only. |
-| _(default)_ | COM on Windows builds, CLI elsewhere | Either degrades to the mock backend if `winget` isn't usable. |
+| _(default)_ | COM on Windows COM builds, CLI elsewhere | Falls back to CLI if COM activation fails (missing/unregistered COM server); falls back further to the mock backend if `winget` isn't usable either. |
 
-The COM backend talks to the WinGet COM API directly instead of parsing CLI output. Pinning has no COM surface, so pin/unpin/list-pins transparently delegate to the CLI. See [`spikes/ComBackendSpike/SPIKE-RESULTS.md`](spikes/ComBackendSpike/SPIKE-RESULTS.md) for the AOT validation behind it.
+The COM backend talks to the WinGet COM API directly instead of parsing CLI output. Pinning has no COM surface, so pin/unpin/list-pins transparently delegate to the CLI. COM is the default on the Windows COM build (see "Build the standalone executable" below) because it gives structured results without shelling out — CLI is the automatic fallback whenever COM can't activate, and also the *only* backend compiled into the lean `net10.0` Windows build described under "CLI-only build" for when you don't want to ship the COM projection/in-proc-server DLLs.
 
 #### Choosing a theme at runtime
 

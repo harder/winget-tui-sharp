@@ -66,8 +66,9 @@
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
     <!--
       WinGet COM API projection. Consumed via indexed access only (never foreach over a
-      projected collection) — see spikes/ComBackendSpike/SPIKE-RESULTS.md for why. No
-      CsWinRT optimizer package is needed for the indexing pattern.
+      projected collection) — the AOT-published projection can't generate the IIterable<T>
+      RCW for foreach, so it throws InvalidCastException at runtime. No CsWinRT optimizer
+      package is needed for the indexing pattern.
     -->
     <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.280" />
     <!--
@@ -84,12 +85,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- The main project's source globs from the repo root. Exclude the test project and the
-         standalone spikes so their files (and generated obj/ artifacts) don't get pulled into
-         the main exe's compile set. -->
+    <!-- The main project's source globs from the repo root. Exclude the test project so its
+         files (and generated obj/ artifacts) don't get pulled into the main exe's compile set. -->
     <Compile Remove="tests/**/*.cs" />
     <None Remove="tests/**/*" />
-    <Compile Remove="spikes/**/*.cs" />
-    <None Remove="spikes/**/*" />
   </ItemGroup>
 </Project>

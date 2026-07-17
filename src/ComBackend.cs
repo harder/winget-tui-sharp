@@ -4,7 +4,7 @@
 // net10.0-windows10.0.26100.0 TFM — on net10.0 this file compiles to nothing so the
 // cross-platform build stays clean.
 //
-// === The one AOT rule (see spikes/ComBackendSpike/SPIKE-RESULTS.md) ===
+// === The one AOT rule ===
 // NEVER `foreach` or LINQ directly over a WinRT-projected collection. Under Native AOT the
 // IIterable<T> runtime-callable-wrapper for the generic instantiation isn't generated and
 // enumeration throws InvalidCastException at runtime. Indexed access (IVectorView.GetAt,

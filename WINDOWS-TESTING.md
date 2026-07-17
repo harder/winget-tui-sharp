@@ -215,5 +215,4 @@ but these paths need a real terminal / real winget to confirm end-to-end.
 ---
 
 ### Notes
-- Spike repro for the COM-in-AOT mechanics lives in `spikes/ComBackendSpike/` (`Run-AotSpike.ps1`, `SPIKE-RESULTS.md`) — already validated; useful if a low-level COM/AOT question resurfaces.
 - This checklist is maintained as the canonical "verify on Windows" list for the COM work; new COM-backend changes that can't be checked from Linux should add an item here.
