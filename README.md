@@ -43,7 +43,7 @@ Or right-click the exe → *Properties* → check *Unblock* → *OK*. On the fir
 
 winget-tui-sharp began as a from-scratch C# / [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) port of [**shanselman/winget-tui**](https://github.com/shanselman/winget-tui) — Scott Hanselman's Rust + Ratatui TUI for winget — built to benchmark Terminal.Gui v2 against Ratatui on feature parity, rendering fidelity, performance, and UX. **Winget-tui** is a beautiful terminal app in its own right - go download it and try it too! [Go download winget-tui](https://github.com/shanselman/winget-tui). Winget-tui is copyright © [Scott Hanselman](https://github.com/shanselman), MIT-licensed.
 
-UI layout, keybindings, color palette, table structure, winget output parsing, dedupe / pin-state / locale handling, and the "Found `<name>` [`<id>`]" detail-header convention all follow the [upstream source](https://github.com/shanselman/winget-tui/tree/main/src). **No upstream code was copied** - the upstream served as the behavioral and visual specification.
+UI layout, keybindings, color palette, table structure, winget output parsing, dedupe / pin-state / locale handling, and the "Found `<name>` [`<id>`]" detail-header convention all follow the [upstream source](https://github.com/shanselman/winget-tui/tree/main/src). **No upstream code was copied** - the upstream served as the behavioral and visual specification. (The app's default color theme is now **Sage** rather than the original warm-amber palette - that exact upstream-matching palette is still available as the **Amber** theme, selectable via `t` or `--theme=amber`; see [Choosing a theme at runtime](#choosing-a-theme-at-runtime).)
 
 With the COM backend now stable under Native AOT, this port has grown from a benchmark exercise into a usable tool in its own right - the Terminal.Gui benchmarking goal continues alongside it, and differences between the two implementations, including Terminal.Gui feature gaps surfaced along the way, are tracked in [feature-gaps.md](feature-gaps.md).
 
@@ -77,7 +77,7 @@ This port is also MIT-licensed; see [LICENSE](LICENSE).
 | Rich-text detail panel: inline span styling, accent label, info-blue URLs | ✅ (via direct drawing, plus clickable homepage/release links via tiny Markdown rows) |
 | CJK / display-width column slicing                                        | ✅                                                                                    |
 | Bracketed-paste support on search/version inputs                          | ✅ (via Terminal.Gui v2 paste pipeline)                                               |
-| Warm-amber theme matching upstream `theme.rs` palette                     | ✅                                                                                    |
+| Switchable theme: Sage (default), Amber (exact upstream `theme.rs` match), Moss & Olive, Dusty Rose | ✅ (`t` in-app picker or `--theme=`)                          |
 | Mock backend for non-Windows hosts                                        | ✅                                                                                    |
 | Native AOT standalone exe, no .NET runtime needed                         | ✅                                                                                    |
 
@@ -133,6 +133,14 @@ dotnet run -f net10.0 -- --mock      # any host: force the mock backend (UI deve
 | _(default)_ | COM on Windows builds, CLI elsewhere | Either degrades to the mock backend if `winget` isn't usable. |
 
 The COM backend talks to the WinGet COM API directly instead of parsing CLI output. Pinning has no COM surface, so pin/unpin/list-pins transparently delegate to the CLI. See [`spikes/ComBackendSpike/SPIKE-RESULTS.md`](spikes/ComBackendSpike/SPIKE-RESULTS.md) for the AOT validation behind it.
+
+#### Choosing a theme at runtime
+
+`--theme=<amber|sage|moss|rose>` picks the starting palette (default: `sage`). An unrecognized value falls back to the default with a stderr note instead of failing to launch. Switch at any time in-app with the `t` keybinding — see [Keybindings](#keybindings).
+
+```powershell
+winget-tui-sharp.exe --theme=amber
+```
 
 ### Run the test suite
 
@@ -207,6 +215,7 @@ Mirrors `src/handler.rs` in the upstream:
 | `o`                             | Open homepage                                                                  |
 | `c`                             | Open changelog                                                                 |
 | `?`                             | Toggle help                                                                    |
+| `t`                             | Open theme picker (Amber / Sage / Moss & Olive / Dusty Rose)                   |
 | `q` / `Esc` / `Ctrl+C`          | Quit                                                                           |
 
 ## Architecture

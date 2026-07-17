@@ -423,6 +423,73 @@ public sealed class VersionPickerDialog : Runnable<string?>
 }
 
 /// <summary>
+/// Theme picker: lets the user switch among <see cref="Theme.Palettes"/> at runtime. Result is
+/// the chosen palette's <c>Id</c> (e.g. "sage"), or null on cancel.
+/// </summary>
+public sealed class ThemePickerDialog : Runnable<string?>
+{
+    public ThemePickerDialog ()
+    {
+        Title = " Select theme ";
+        BorderStyle = LineStyle.Rounded;
+        Width = 40;
+        Height = Math.Clamp (Theme.Palettes.Count + 6, 10, 14);
+        X = Pos.Center ();
+        Y = Pos.Center ();
+        SchemeName = Theme.SurfaceSchemeName;
+        Arrangement = ViewArrangement.Movable;
+
+        Label prompt = new () { X = 1, Y = 0, Text = "Pick a theme:" };
+
+        ListView list = new ()
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Fill (1),
+            Height = Dim.Fill (2),
+            SchemeName = Theme.SurfaceSchemeName
+        };
+        List<string> names = [.. Theme.Palettes.Select (p => p.DisplayName)];
+        list.SetSource (new ObservableCollection<string> (names));
+
+        int currentIndex = 0;
+
+        for (int i = 0; i < Theme.Palettes.Count; i++)
+        {
+            if (Theme.Palettes [i].Id == Theme.CurrentPaletteName)
+            {
+                currentIndex = i;
+
+                break;
+            }
+        }
+
+        list.SelectedItem = currentIndex;
+
+        Button apply = new () { X = Pos.Center () - 8, Y = Pos.AnchorEnd (1), Text = "_Apply", IsDefault = true };
+        Button cancel = new () { X = Pos.Center () + 2, Y = Pos.AnchorEnd (1), Text = "Cancel" };
+
+        apply.Accepting += (_, e) =>
+                           {
+                               int idx = list.SelectedItem ?? -1;
+                               Result = idx >= 0 && idx < Theme.Palettes.Count ? Theme.Palettes [idx].Id : null;
+                               RequestStop ();
+                               e.Handled = true;
+                           };
+
+        cancel.Accepting += (_, e) =>
+                            {
+                                Result = null;
+                                RequestStop ();
+                                e.Handled = true;
+                            };
+
+        Add (prompt, list, apply, cancel);
+        list.SetFocus ();
+    }
+}
+
+/// <summary>
 /// Advanced install options panel: install scope, mode, architecture, and custom installer args.
 /// Result is the chosen <see cref="InstallSettings"/>, or null on cancel. The COM backend maps
 /// these onto InstallOptions; the CLI backend onto winget flags. Each OptionSelector's index lines
@@ -600,6 +667,7 @@ public sealed class HelpDialog : Runnable
 
         General
           ?             Toggle this help
+          t             Theme picker (Amber / Sage / Moss & Olive / Dusty Rose)
           Esc           Cancel a running operation, else quit
           q / Ctrl+C    Quit
         """;

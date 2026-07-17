@@ -935,6 +935,45 @@ public class ParserTests
     }
 
     [Fact]
+    public void Theme_TryApply_SwitchesPaletteAndSchemesReflectNewColors ()
+    {
+        try
+        {
+            Assert.True (Theme.TryApply ("amber"));
+            Assert.Equal ("amber", Theme.CurrentPaletteName);
+            Assert.Equal (Theme.AmberPalette.Accent, Theme.Accent);
+
+            Scheme? scheme = SchemeManager.GetScheme (Theme.AccentSchemeName);
+            Assert.NotNull (scheme);
+            Assert.Equal (Theme.AmberPalette.Accent, scheme!.Normal.Foreground);
+        }
+        finally
+        {
+            // Reset so test order doesn't leak a non-default palette into other tests.
+            Theme.TryApply ("sage");
+        }
+    }
+
+    [Fact]
+    public void Theme_TryApply_UnknownId_ReturnsFalse_LeavesCurrentPaletteUnchanged ()
+    {
+        try
+        {
+            Theme.TryApply ("sage");
+            string before = Theme.CurrentPaletteName;
+            Color accentBefore = Theme.Accent;
+
+            Assert.False (Theme.TryApply ("not-a-real-theme"));
+            Assert.Equal (before, Theme.CurrentPaletteName);
+            Assert.Equal (accentBefore, Theme.Accent);
+        }
+        finally
+        {
+            Theme.TryApply ("sage");
+        }
+    }
+
+    [Fact]
     public void TerminalGui_RuneGetColumns_ReturnsExpectedWidthForCjkAndAscii ()
     {
         // Our display-width column slicing in CliBackend depends on

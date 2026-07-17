@@ -1,23 +1,116 @@
 namespace WingetTuiSharp;
 
 /// <summary>
-/// Warm-amber color palette and the registered <see cref="Scheme"/>s for the app, plus the
-/// pixel-art "winget" wordart rendered as a <see cref="Logo"/> view. Mirrors the constants
-/// and shapes in shanselman/winget-tui's src/theme.rs.
+/// Switchable color palettes and the registered <see cref="Scheme"/>s for the app, plus the
+/// pixel-art "winget" wordart rendered as a <see cref="Logo"/> view. The default (Sage) and
+/// the "Amber" alternative mirror the constants and shapes in shanselman/winget-tui's
+/// src/theme.rs; Amber is the exact upstream-matching palette.
 /// </summary>
 public static class Theme
 {
-    public static readonly Color Accent = new (238, 201, 141);
-    public static readonly Color AccentDim = new (137, 130, 112);
-    public static readonly Color TextPrimary = new (232, 220, 183);
-    public static readonly Color TextSecondary = new (158, 158, 158);
-    public static readonly Color TextOnAccent = new (30, 30, 30);
-    public static readonly Color Surface = new (45, 45, 45);
-    public static readonly Color Bg = new (30, 30, 30);
-    public static readonly Color Success = new (86, 185, 127);
-    public static readonly Color Danger = new (231, 72, 86);
-    public static readonly Color Info = new (97, 175, 239);
-    public static readonly Color Selection = new (198, 120, 221);
+    /// <summary>A named set of the 11 color roles the app draws with.</summary>
+    public readonly record struct Palette (
+        Color Accent,
+        Color AccentDim,
+        Color TextPrimary,
+        Color TextSecondary,
+        Color TextOnAccent,
+        Color Surface,
+        Color Bg,
+        Color Success,
+        Color Danger,
+        Color Info,
+        Color Selection);
+
+    public static readonly Palette AmberPalette = new (
+        Accent: new (238, 201, 141),
+        AccentDim: new (137, 130, 112),
+        TextPrimary: new (232, 220, 183),
+        TextSecondary: new (158, 158, 158),
+        TextOnAccent: new (30, 30, 30),
+        Surface: new (45, 45, 45),
+        Bg: new (30, 30, 30),
+        Success: new (86, 185, 127),
+        Danger: new (231, 72, 86),
+        Info: new (97, 175, 239),
+        Selection: new (198, 120, 221));
+
+    public static readonly Palette SagePalette = AmberPalette with
+    {
+        Accent = new (196, 214, 150),
+        AccentDim = new (128, 138, 110),
+        TextPrimary = new (222, 227, 196)
+    };
+
+    public static readonly Palette MossPalette = AmberPalette with
+    {
+        Accent = new (216, 206, 124),
+        AccentDim = new (140, 132, 80),
+        TextPrimary = new (228, 220, 168)
+    };
+
+    public static readonly Palette RosePalette = AmberPalette with
+    {
+        Accent = new (236, 194, 194),
+        AccentDim = new (156, 124, 124),
+        TextPrimary = new (236, 212, 212)
+    };
+
+    /// <summary>All selectable palettes, in picker/display order. <c>Id</c> is the short
+    /// lowercase token accepted by <c>--theme=</c> and <see cref="TryApply"/>; <c>DisplayName</c>
+    /// is what the in-app theme picker shows.</summary>
+    public static readonly IReadOnlyList<(string Id, string DisplayName, Palette Value)> Palettes =
+    [
+        ("amber", "Amber", AmberPalette),
+        ("sage", "Sage", SagePalette),
+        ("moss", "Moss & Olive", MossPalette),
+        ("rose", "Dusty Rose", RosePalette)
+    ];
+
+    public static string CurrentPaletteName { get; private set; } = "sage";
+
+    public static Color Accent = SagePalette.Accent;
+    public static Color AccentDim = SagePalette.AccentDim;
+    public static Color TextPrimary = SagePalette.TextPrimary;
+    public static Color TextSecondary = SagePalette.TextSecondary;
+    public static Color TextOnAccent = SagePalette.TextOnAccent;
+    public static Color Surface = SagePalette.Surface;
+    public static Color Bg = SagePalette.Bg;
+    public static Color Success = SagePalette.Success;
+    public static Color Danger = SagePalette.Danger;
+    public static Color Info = SagePalette.Info;
+    public static Color Selection = SagePalette.Selection;
+
+    /// <summary>Switches to the palette whose <c>Id</c> matches <paramref name="id"/>
+    /// (case-insensitive), re-registers all schemes, and returns <see langword="true"/>.
+    /// Returns <see langword="false"/> without changing anything if <paramref name="id"/>
+    /// doesn't match any entry in <see cref="Palettes"/>.</summary>
+    public static bool TryApply (string id)
+    {
+        foreach ((string paletteId, string _, Palette value) in Palettes)
+        {
+            if (string.Equals (paletteId, id, StringComparison.OrdinalIgnoreCase))
+            {
+                Accent = value.Accent;
+                AccentDim = value.AccentDim;
+                TextPrimary = value.TextPrimary;
+                TextSecondary = value.TextSecondary;
+                TextOnAccent = value.TextOnAccent;
+                Surface = value.Surface;
+                Bg = value.Bg;
+                Success = value.Success;
+                Danger = value.Danger;
+                Info = value.Info;
+                Selection = value.Selection;
+                CurrentPaletteName = paletteId;
+                Register ();
+
+                return true;
+            }
+        }
+
+        return false;
+    }
 
     public const string AppSchemeName = "WingetTuiSharp.App";
     public const string SurfaceSchemeName = "WingetTuiSharp.Surface";
