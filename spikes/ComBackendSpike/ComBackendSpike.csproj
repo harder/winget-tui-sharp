@@ -58,10 +58,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.190-preview" />
+    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.280" />
     <!-- InProcCom pulls in 130+MB of native pdbs; only need it for actually *running* the spike.
          Comment out for compile-only AOT verification; uncomment for runtime smoke on Windows. -->
-    <!-- <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.190-preview" /> -->
+    <!-- <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.280" /> -->
   </ItemGroup>
 
 </Project>
