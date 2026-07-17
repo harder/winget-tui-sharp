@@ -5,7 +5,7 @@ building this winget-tui port. Each entry is the kind of thing that should drive
 Terminal.Gui issue, PR, or wishlist discussion — not a complaint about Terminal.Gui being
 incomplete. Where this port works around a gap, the workaround is noted.
 
-The list is anchored to **Terminal.Gui 2.4.3-develop.9** (the version in `WingetTuiSharp.csproj`).
+The list is anchored to **Terminal.Gui 2.4.17-develop.6** (the version in `WingetTuiSharp.csproj`).
 If Terminal.Gui upgrades close any of these, please send a PR removing the entry — and
 ideally adding a test in `tests/ParserTests.cs § Terminal.Gui compatibility` that would
 have caught a regression.
@@ -65,15 +65,6 @@ write `MarkedTableSource` (nested in `App.cs`) that injects a column-0 marker an
 the cursor row externally via `ValueChanged`. A `Func<CellRepresentationArgs, string>`
 overload exposing `RowIndex`, `ColumnIndex`, and `IsCursorRow` would have made this a
 one-liner without a wrapper type.
-
-### A7. No `TableStyle.HeaderColorGetter` (only per-column)
-`ColumnStyle.HeaderColorGetter` exists for per-column overrides, but the very common case
-— "render every header bold accent" — has to be applied by looping over every column after
-the table source is set, in every refresh. A table-level `HeaderColorGetter` fallback
-(consulted when the column-level one is null) would make this trivial.
-
-**Workaround:** `App.ApplyColumnStyles` loops over all columns and assigns the same
-`HeaderColorGetter` to each. Repeated on every `RefreshTable` call.
 
 ### A8. Column widths shift with viewport contents
 `TableView.CalculateMaxCellWidth` scans only the **visible** rows and picks the max cell
@@ -245,6 +236,13 @@ whether they've regressed.
   layout changes.
 - ~~**Duplicate `ScreenChanged` from `Application.Screen` setter**~~ — Fixed upstream in
   PR #5404 (#5274). Halves the redraw cost on terminal resize.
+- ~~**No `TableStyle.HeaderColorGetter` (only per-column), A7**~~ — Closed by 2.4.17's
+  `TableStyle.HeaderScheme`: a base `Scheme` applied to all column headers, falling back to
+  the view's scheme if `null`, with `ColumnStyle.HeaderColorGetter` still available for
+  per-column overrides. `App.ApplyColumnStyles` (`src/App.cs`) still loops over every column
+  to assign the same `HeaderColorGetter` on every `RefreshTable` call — that loop can be
+  replaced with a single `TableStyle.HeaderScheme` assignment as a follow-up simplification.
+
 ## H. Wishlist — items that would have made the port noticeably shorter
 
 Prioritized by LOC saved if Terminal.Gui implemented them:
@@ -258,5 +256,4 @@ Prioritized by LOC saved if Terminal.Gui implemented them:
 | `TableView.OnHeaderClicked(int col)` + sort cycling | ~30 (header parsing, sort wiring) | A2, A3 |
 | `Key.Character` modifier-aware property | ~5 per handler site | C1 |
 | `Application.InvokeIfCurrent(guard, action)` | ~5 per async call site | D1 |
-| `TableStyle.HeaderColorGetter` fallback | ~10 (ApplyColumnStyles loop) | A7 |
 | `ColumnStyle.WidthMode { Fixed, FitVisible, FitAll }` | ~3 per column | A8 |
