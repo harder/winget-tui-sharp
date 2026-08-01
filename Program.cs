@@ -115,7 +115,22 @@ if (args.Length > 0 && args [0] is "--comdiag")
 // on PATH → mock. Scripts that need a guaranteed backend should check that note.
 IBackend backend = SelectBackend (args);
 
-Theme.Register ();
+// Theme selection: --theme=<amber|sage|moss|rose>. Defaults to Sage. An unrecognized id
+// degrades gracefully (stderr note, keep the default) rather than crashing. TryApply already
+// registers schemes on success, so Register() below only needs to run for the default case.
+string? themeArg = args.FirstOrDefault (a => a.StartsWith ("--theme=", StringComparison.OrdinalIgnoreCase))
+                       ?[8..];
+
+if (themeArg is null || !Theme.TryApply (themeArg))
+{
+    if (themeArg is not null)
+    {
+        string validIds = string.Join (", ", Theme.Palettes.Select (p => p.Id));
+        Console.Error.WriteLine ($"Unknown theme '{themeArg}' - valid values are: {validIds}. Using the default (sage).");
+    }
+
+    Theme.Register ();
+}
 
 IApplication app = Application.Create ().Init ();
 App window = new (backend);

@@ -1161,6 +1161,11 @@ public sealed class App : Runnable
                     key.Handled = true;
 
                     return;
+                case 't':
+                    ShowThemePicker ();
+                    key.Handled = true;
+
+                    return;
                 case 'e':
                     ExportCsv ();
                     key.Handled = true;
@@ -2040,6 +2045,36 @@ public sealed class App : Runnable
         HelpDialog dlg = new (_state.BackendDescription, StartupDiagnostics.ComFallbackReason);
         App.Run (dlg);
         dlg.Dispose ();
+    }
+
+    private void ShowThemePicker ()
+    {
+        if (App is null)
+        {
+            return;
+        }
+
+        ThemePickerDialog dlg = new ();
+        App.Run (dlg);
+        string? chosen = dlg.Result;
+        dlg.Dispose ();
+
+        if (chosen is not null && chosen != Theme.CurrentPaletteName)
+        {
+            Theme.TryApply (chosen);
+            RefreshTheme ();
+        }
+    }
+
+    /// <summary>Forces a full-app repaint after a live theme swap. Scheme-named views and the
+    /// direct-draw Attribute calls in DetailPanel/Ui/Logo already re-read Theme.* fields at draw
+    /// time - this just needs to trigger that redraw.</summary>
+    private void RefreshTheme ()
+    {
+        RefreshTable ();
+        RefreshStatusBar ();
+        App?.TopRunnableView?.SetNeedsLayout ();
+        App?.TopRunnableView?.SetNeedsDraw ();
     }
 
     private void ExportCsv ()
