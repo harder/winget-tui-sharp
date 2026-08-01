@@ -1,11 +1,6 @@
 # winget-tui-sharp
 
-> ⚠️ **Proof of concept** This project exists to **benchmark [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) v2 against Ratatui**: feature parity, rendering fidelity, performance, and UX. However it is fully operational: on Windows it drives the **WinGet COM API** by default (falling back to the `winget` CLI if COM can't activate), so **install / uninstall / upgrade / repair actions operate on your real package state**. Run it on a machine you're comfortable changing.
-
-Winget-tui-sharp is a C# / [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) reimplementation of the wonderful [winget-tui](https://github.com/shanselman/winget-tui) - a Rust + Ratatui based TUI for the [Windows Package Manager (winget)](https://github.com/microsoft/winget-cli). **Winget-tui** is a beautiful terminal app - you should go download it and try it if you have a Windows machine! [Go download winget-tui](https://github.com/shanselman/winget-tui).
-
-
-This application shows what is possible with a .NET terminal UI, and helps us improve the Terminal.Gui open source library. Release binaries are Native AOT and self-contained. You do NOT need the .NET runtime to use them.
+> ⚠️ **Proof of concept**, originally built to **benchmark [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) v2 against Ratatui** (feature parity, rendering fidelity, performance, UX) — but fully operational and **actively used as a daily winget TUI**: search, install, upgrade, uninstall, and manage pins without leaving the terminal. On Windows it drives the **WinGet COM API** by default for structured results (falling back to the `winget` CLI if COM can't activate), and ships as a single Native AOT `.exe` — no .NET runtime required. **Install / uninstall / upgrade / repair actions operate on your real package state** — run it on a machine you're comfortable changing.
 
 [![C#](https://img.shields.io/badge/C%23-239120?style=flat&logo=csharp&logoColor=white)](https://learn.microsoft.com/dotnet/csharp/)
 [![Terminal.Gui](https://img.shields.io/badge/Terminal.Gui-v2-FF6F00?style=flat&logo=windowsterminal&logoColor=white)](https://github.com/gui-cs/Terminal.Gui)
@@ -17,32 +12,16 @@ This application shows what is possible with a .NET terminal UI, and helps us im
 
 ![winget-tui-sharp screenshot](img/winget-tui-sharp.png)
 
-## Origin & attribution
+## Quick start
 
-This is a from-scratch C# / Terminal.Gui port of [**shanselman/winget-tui**](https://github.com/shanselman/winget-tui): Scott Hanselman's Rust + Ratatui TUI for the Windows Package Manager. Winget-tui is copyright © [Scott Hanselman](https://github.com/shanselman), MIT-licensed.
+**Prerequisites:** Windows 10/11, [winget](https://github.com/microsoft/winget-cli) 1.4+, a terminal with Unicode support (Windows Terminal recommended).
 
-UI layout, keybindings, color palette, table structure, winget output parsing, dedupe / pin-state / locale handling, and the "Found `<name>` [`<id>`]" detail-header convention all follow the [upstream source](https://github.com/shanselman/winget-tui/tree/main/src). **No upstream code was copied** - the upstream served as the behavioral and visual specification.
-
-Differences between the two implementations, including Terminal.Gui feature gaps surfaced while porting, are documented in [feature-gaps.md](feature-gaps.md).
-
-This port is also MIT-licensed; see [LICENSE](LICENSE).
-
-## Prerequisites
-
-- Windows 10/11
-- [winget](https://github.com/microsoft/winget-cli) 1.4+ installed
-- A terminal with Unicode support (Windows Terminal recommended)
-
-## Installation
-
-### Download a release
-
-You do **not** need .NET to run `winget-tui-sharp`.
+You do **not** need .NET installed.
 
 1. Download the latest Windows binary from the [Releases page](https://github.com/harder/winget-tui-sharp/releases/latest):
    - `winget-tui-sharp-x64.exe` for Windows on Intel/AMD x86
    - `winget-tui-sharp-arm64.exe` for Windows on ARM
-2. Run the `.exe` from Windows Terminal:
+2. Run it from Windows Terminal:
 
 ```powershell
 .\winget-tui-sharp-x64.exe
@@ -50,11 +29,7 @@ You do **not** need .NET to run `winget-tui-sharp`.
 .\winget-tui-sharp-arm64.exe
 ```
 
-### Code signing
-
-The released binaries are **not code-signed** yet. This POC doesn't have a Azure Trusted Signing subscription set up, so users will see a Microsoft Defender SmartScreen warning on first run. See [code-signing.md](code-signing.md) for the full breakdown of options researched (Azure Trusted Signing, SignPath.io OSS sponsorship, EV cert via Azure Key Vault, GitHub Attestations) and which I'd adopt first if this graduates from POC.
-
-**Workaround for users on the unsigned binary:**
+The released binaries are **not code-signed** yet (see [code-signing.md](code-signing.md)), so Microsoft Defender SmartScreen will warn on first run. Workaround:
 
 ```powershell
 Unblock-File -Path .\winget-tui-sharp-x64.exe
@@ -62,6 +37,15 @@ Unblock-File -Path .\winget-tui-sharp-x64.exe
 
 Or right-click the exe → *Properties* → check *Unblock* → *OK*. On the first run after unblocking, click *More info → Run anyway* and SmartScreen will remember the decision.
 
+## Origin & attribution
+
+winget-tui-sharp began as a from-scratch C# / [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) port of [**shanselman/winget-tui**](https://github.com/shanselman/winget-tui) — Scott Hanselman's Rust + Ratatui TUI for winget — built to benchmark Terminal.Gui v2 against Ratatui on feature parity, rendering fidelity, performance, and UX. **Winget-tui** is a beautiful terminal app in its own right - go download it and try it too! [Go download winget-tui](https://github.com/shanselman/winget-tui). Winget-tui is copyright © [Scott Hanselman](https://github.com/shanselman), MIT-licensed.
+
+UI layout, keybindings, color palette, table structure, winget output parsing, dedupe / pin-state / locale handling, and the "Found `<name>` [`<id>`]" detail-header convention all follow the [upstream source](https://github.com/shanselman/winget-tui/tree/main/src). **No upstream code was copied** - the upstream served as the behavioral and visual specification.
+
+With the COM backend now stable under Native AOT, this port has grown from a benchmark exercise into a usable tool in its own right - the Terminal.Gui benchmarking goal continues alongside it, and differences between the two implementations, including Terminal.Gui feature gaps surfaced along the way, are tracked in [feature-gaps.md](feature-gaps.md).
+
+This port is also MIT-licensed; see [LICENSE](LICENSE).
 
 ## What's in the box
 
@@ -324,7 +308,7 @@ winget-tui-sharp/
 ├── README.md
 ├── LICENSE                  # MIT
 ├── feature-gaps.md          # Terminal.Gui parity findings vs upstream
-├── code-signing.md          # Code-signing options researched but not adopted (POC)
+├── code-signing.md          # Code-signing options + the recommended next step
 ├── src/
 │   ├── GlobalUsings.cs      # Centralized using directives
 │   ├── Models.cs            # Package, PackageDetail, enums, OpResult
@@ -345,9 +329,9 @@ winget-tui-sharp/
 
 ## Status & roadmap
 
-This is a POC. The WinGet **COM backend is the default on Windows and activates under Native AOT** (via the in-process server described above), so the shipped AOT build runs the structured COM path rather than parsing CLI output. Things known to be unfinished or different from upstream are listed in [feature-gaps.md](feature-gaps.md). Terminal.Gui is under active development and this application will be updated periodically to reflect improvements, fixes, and new features in that library. PRs that close parity gaps are welcome.
+This started as a POC and is now actively used as a daily winget TUI. The WinGet **COM backend is the default on Windows and activates under Native AOT** (via the in-process server described above), so the shipped AOT build runs the structured COM path rather than parsing CLI output. Things known to be unfinished or different from upstream are listed in [feature-gaps.md](feature-gaps.md). Terminal.Gui is under active development and this application will be updated periodically to reflect improvements, fixes, and new features in that library. PRs that close parity gaps, fix bugs, or add new features are all welcome.
 
-Things explicitly **out of scope**:
+Not yet implemented:
 
 - Configuration file support (`%APPDATA%\winget-tui\config.toml`)
 

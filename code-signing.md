@@ -1,9 +1,12 @@
 # Code signing the Windows executables
 
-> **Status: not adopted.** This is a POC; the released binaries are unsigned. This doc
-> captures the options I investigated, what they cost, what they buy you, and which I'd
-> pick first if and when this graduates beyond POC. If you're a contributor looking to
-> drive code signing forward, this is the briefing.
+> **Status: recommended next step.** winget-tui-sharp is now used as a daily winget TUI, so
+> the SmartScreen friction below hits real users on every fresh download — this is worth
+> acting on, not just researching. This doc captures the options investigated, what they
+> cost, what they buy you, and the recommended path: apply for **SignPath.io**'s OSS
+> sponsorship first (free, fits a small-maintenance project); fall back to **Azure Trusted
+> Signing** (~$10/mo) if sponsorship is declined or too slow. If you're a contributor looking
+> to drive this forward, this is the briefing.
 
 ## What the problem actually is
 
@@ -49,7 +52,7 @@ Third-party signing service that brokers code-signing certs and runs the actual 
 | **Constraint** | OSS sponsorship requires project to be public, OSI-approved license, "responsible maintainership" (vague). POC projects sometimes get declined. |
 | **Reputation note** | They publish a guide to building SmartScreen reputation faster — basically, ship and let users run it |
 
-**Recommendation: best fit if cost matters and the project graduates from POC to "real OSS."** Apply for sponsorship; while pending, ship unsigned with a clear `Unblock-File` doc (see below).
+**Recommendation: apply now.** This is the first move — free, and fits the project's actual maintenance capacity. While the application is pending, keep shipping unsigned with a clear `Unblock-File` doc (see below).
 
 ### 3. EV (Extended Validation) code-signing cert + Azure Key Vault
 
