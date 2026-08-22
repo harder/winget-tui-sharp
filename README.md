@@ -184,7 +184,7 @@ winget-tui-sharp.exe --theme=amber
 ### Run the test suite
 
 ```bash
-dotnet test tests/WingetTuiSharp.Tests.csproj
+dotnet test --project tests/WingetTuiSharp.Tests.csproj
 ```
 
 The xUnit suite under `tests/` covers:
