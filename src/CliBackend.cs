@@ -593,20 +593,28 @@ public sealed partial class CliBackend : IBackend
         string [] lines = SplitLines (output);
         trace.WriteLine ($"[parse] line count: {lines.Length}");
 
-        List<Package> rows = ParseOneTable (lines, 0, hasAvailable, trace, out int afterFirstTable);
+        // `winget upgrade --include-pinned` can append further footer-delimited tables after
+        // the first — one for packages explicitly targeted, one for packages whose pins block
+        // upgrade, etc. Loop until a table produces no footer (i.e. it's the last one), rather
+        // than special-casing only a single secondary table. Mirrors upstream
+        // shanselman/winget-tui#393 ("fix: restore MSRV and multi-table parsing"), which
+        // generalized the old two-table-only handling the same way.
+        List<Package> rows = [];
+        int nextTableStart = 0;
+        int tableIndex = 0;
 
-        // Handle the secondary table that `winget upgrade --include-pinned` appends after the
-        // footer for packages whose pins block upgrade. Upstream src/cli_backend.rs parses it
-        // too so pinned packages still surface in the Upgrades view.
-        if (afterFirstTable >= 0 && afterFirstTable < lines.Length)
+        while (nextTableStart >= 0 && nextTableStart < lines.Length)
         {
-            List<Package> pinned = ParseOneTable (lines, afterFirstTable, hasAvailable, trace, out _);
+            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, out int afterFooter);
 
-            if (pinned.Count > 0)
+            if (tableRows.Count > 0)
             {
-                trace.WriteLine ($"[parse] secondary (pinned) table contributed {pinned.Count} rows");
-                rows.AddRange (pinned);
+                trace.WriteLine ($"[parse] table #{tableIndex} contributed {tableRows.Count} rows");
+                rows.AddRange (tableRows);
             }
+
+            nextTableStart = afterFooter;
+            tableIndex++;
         }
 
         rows = DedupePackages (rows);
@@ -736,6 +744,15 @@ public sealed partial class CliBackend : IBackend
     /// "61 upgrades available." or "5 packages available." in any locale (the leading
     /// number is the locale-independent signature).
     /// </summary>
+    /// <remarks>
+    /// A digit-space prefix alone is ambiguous: a package literally named e.g. "20 Minutes
+    /// Till Dawn" has the exact same shape (upstream fixed this in
+    /// shanselman/winget-tui#347, "fix: distinguish digit-leading packages from footers").
+    /// The distinguishing signal isn't the id column (its slice position is layout-dependent
+    /// and can coincidentally land on whitespace-free footer text), it's that real table
+    /// rows are column-aligned with runs of 2+ spaces between fields, while footer messages
+    /// are single-spaced prose. So a footer line must also contain no such run.
+    /// </remarks>
     private static bool IsFooterLine (string line)
     {
         ReadOnlySpan<char> s = line.AsSpan ().TrimStart ();
@@ -746,7 +763,20 @@ public sealed partial class CliBackend : IBackend
             d++;
         }
 
-        return d > 0 && d < s.Length && s [d] == ' ';
+        if (d == 0 || d >= s.Length || s [d] != ' ')
+        {
+            return false;
+        }
+
+        for (int i = 0; i < s.Length - 1; i++)
+        {
+            if (s [i] == ' ' && s [i + 1] == ' ')
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private readonly record struct PackageColumnMap (int Name, int Id, int Version, int Available, int Source);

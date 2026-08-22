@@ -98,6 +98,39 @@ public class ParserTests
     }
 
     [Fact]
+    public void ParseTable_HandlesThreeFooterDelimitedTables ()
+    {
+        // Regression test ported from shanselman/winget-tui#393 ("fix: restore MSRV and
+        // multi-table parsing"). winget upgrade --include-pinned can append more than one
+        // extra section (e.g. "explicitly targeted" packages, then "pin blocks upgrade"
+        // packages) — each is its own footer-delimited mini-table. The old two-call
+        // handling (first table + exactly one secondary table) silently dropped anything
+        // past the second table; parsing must loop until a table has no trailing footer.
+        const string output = """
+            Name        Id             Version    Available    Source
+            -------------------------------------------------------
+            Regular     Example.One    1.0        2.0          winget
+            1 upgrade available.
+
+            The following package was explicitly targeted:
+            Name        Id             Version    Available    Source
+            -------------------------------------------------------
+            Targeted    Example.Two    1.0        2.0          winget
+            1 upgrade available.
+
+            The following package has a pin that prevents upgrade:
+            Name        Id             Version    Available    Source
+            -------------------------------------------------------
+            Pinned      Example.Three  1.0        2.0          winget
+            """;
+
+        IReadOnlyList<Package> rows = CliBackend.ParseTable (output, hasAvailable: true);
+
+        Assert.Equal (["Example.One", "Example.Two", "Example.Three"], rows.Select (p => p.Id));
+        Assert.DoesNotContain (rows, p => p.Name == "Name");
+    }
+
+    [Fact]
     public void ParseTable_RejectsRowsWithMalformedIds ()
     {
         // Localized footer text occasionally lands in the id column. Valid ids contain '.',
@@ -623,6 +656,29 @@ public class ParserTests
 
         Assert.Single (rows);
         Assert.Equal ("7zip.7zip", rows [0].Id);
+    }
+
+    [Fact]
+    public void ParseTable_DigitSpacePackageNameIsNotFooter ()
+    {
+        // Regression test ported from shanselman/winget-tui#347 (fixed upstream in
+        // "fix: distinguish digit-leading packages from footers"). A package literally
+        // named "20 Minutes Till Dawn" has the exact same shape as a winget count footer
+        // ("20 upgrades available.") — digits immediately followed by a space — so
+        // IsFooterLine's naive digit-then-space heuristic stops parsing before this row
+        // (and anything after it) is read. A real table row is column-aligned (runs of 2+
+        // spaces between fields); a genuine footer is single-spaced prose.
+        const string output = """
+            Name                    Id                                      Version
+            --------------------------------------------------------------------------------
+            20 Minutes Till Dawn    ARP\Machine\X64\Steam App 1966900       Unknown
+            """;
+
+        IReadOnlyList<Package> rows = CliBackend.ParseTable (output, hasAvailable: false);
+
+        Assert.Single (rows);
+        Assert.Equal ("20 Minutes Till Dawn", rows [0].Name);
+        Assert.Equal (@"ARP\Machine\X64\Steam App 1966900", rows [0].Id);
     }
 
     [Fact]
