@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
@@ -8,8 +9,9 @@ using Microsoft.Win32.SafeHandles;
 namespace WingetTuiSharp;
 
 /// <summary>
-/// Runs a redirected child process with a finite lifetime and bounded output retention.
-/// The pipes are always drained concurrently, even after their capture limits are reached.
+/// Runs a redirected child process with a finite lifetime, bounded output retention, and a
+/// kernel-owned process-tree boundary. A gated copy of this executable establishes the boundary
+/// before it is allowed to launch the requested target.
 /// </summary>
 internal static class ProcessRunner
 {
@@ -17,6 +19,9 @@ internal static class ProcessRunner
     internal const string TruncationMarker = "\n...[output truncated]...\n";
     internal static readonly int MaxCombinedCapturedCharacters = 2 * (MaxCapturedCharactersPerStream + TruncationMarker.Length);
 
+    private const string WrapperFlag = "--internal-contained-process-wrapper";
+    private const int SigKill = 9;
+    private const int NoSuchProcess = 3;
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds (5);
 
     internal static async Task<(int Code, string Output)> RunAsync (
@@ -35,9 +40,11 @@ internal static class ProcessRunner
 
         cancellationToken.ThrowIfCancellationRequested ();
 
+        WrapperControlFiles controls = WrapperControlFiles.Create ();
+        WrapperLaunch wrapper = ResolveWrapperLaunch ();
         ProcessStartInfo startInfo = new ()
         {
-            FileName = executable,
+            FileName = wrapper.Executable,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -46,6 +53,18 @@ internal static class ProcessRunner
             StandardErrorEncoding = outputEncoding
         };
 
+        foreach (string prefixArgument in wrapper.PrefixArguments)
+        {
+            startInfo.ArgumentList.Add (prefixArgument);
+        }
+
+        startInfo.ArgumentList.Add (WrapperFlag);
+        startInfo.ArgumentList.Add (controls.Ready);
+        startInfo.ArgumentList.Add (controls.Gate);
+        startInfo.ArgumentList.Add (controls.Status);
+        startInfo.ArgumentList.Add (Environment.ProcessId.ToString (CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add (executable);
+
         foreach (string arg in args)
         {
             startInfo.ArgumentList.Add (arg);
@@ -53,50 +72,249 @@ internal static class ProcessRunner
 
         using Process process = new () { StartInfo = startInfo };
         using ProcessContainment containment = ProcessContainment.Create ();
+        Task<string>? stdoutTask = null;
+        Task<string>? stderrTask = null;
+        Task? allOutputTask = null;
 
         try
         {
             process.Start ();
             containment.Attach (process);
+            stdoutTask = DrainBoundedAsync (process.StandardOutput);
+            stderrTask = DrainBoundedAsync (process.StandardError);
+            allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
+
+            using CancellationTokenSource deadline = new (timeout);
+            using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (
+                cancellationToken,
+                deadline.Token);
+
+            try
+            {
+                int sessionId = await WaitForIntegerFileAsync (controls.Ready, lifetime.Token).ConfigureAwait (false);
+                containment.MarkWrapperReady (process, sessionId);
+                CreateGate (controls.Gate);
+
+                int targetExitCode = await WaitForIntegerFileAsync (controls.Status, lifetime.Token).ConfigureAwait (false);
+
+                // The wrapper deliberately remains alive after publishing the target's result.
+                // Kill the still-owned job/group before the wrapper PID/PGID can be recycled.
+                containment.TerminateRemaining (process);
+                await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+
+                string stdout = await stdoutTask.ConfigureAwait (false);
+                string stderr = await stderrTask.ConfigureAwait (false);
+
+                return (targetExitCode, string.Concat (stdout, stderr));
+            }
+            catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+            {
+                containment.TerminateRemaining (process);
+                await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+
+                cancellationToken.ThrowIfCancellationRequested ();
+                string command = args.Count > 0 ? $" {args [0]}" : string.Empty;
+                throw new TimeoutException ($"Process '{executable}{command}' exceeded its {timeout.TotalSeconds:0.###}-second deadline and was terminated.");
+            }
         }
         catch
         {
-            TryKillDirectProcess (process);
+            containment.TerminateRemaining (process);
+
+            if (allOutputTask is not null)
+            {
+                await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+            }
+
             throw;
         }
+        finally
+        {
+            controls.Delete ();
+        }
+    }
 
-        Task<string> stdoutTask = DrainBoundedAsync (process.StandardOutput);
-        Task<string> stderrTask = DrainBoundedAsync (process.StandardError);
-        Task allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
+    /// <summary>
+    /// Handles the private launcher mode before normal argument processing. Arguments are passed
+    /// end-to-end with <see cref="ProcessStartInfo.ArgumentList"/>; no shell or command-line
+    /// quoting is involved. The target inherits stdin unchanged. On POSIX the wrapper calls
+    /// setsid before announcing readiness; on Windows the parent assigns the gated wrapper to a
+    /// kill-on-close Job Object before creating the gate file.
+    /// </summary>
+    internal static bool TryRunContainedWrapper (string [] args)
+    {
+        if (args.Length == 0 || args [0] != WrapperFlag)
+        {
+            return false;
+        }
 
-        using CancellationTokenSource deadline = new (timeout);
-        using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (
-            cancellationToken,
-            deadline.Token);
+        RunContainedWrapper (args);
+
+        return true;
+    }
+
+    private static void RunContainedWrapper (string [] args)
+    {
+        if (args.Length < 6 || !int.TryParse (args [4], NumberStyles.None, CultureInfo.InvariantCulture, out int ownerPid))
+        {
+            Environment.ExitCode = 125;
+
+            return;
+        }
+
+        string readyPath = args [1];
+        string gatePath = args [2];
+        string statusPath = args [3];
+        string targetExecutable = args [5];
+        WrapperControlFiles controls = new (readyPath, gatePath, statusPath);
+
+        if (!OperatingSystem.IsWindows ())
+        {
+            int sessionId = SetSessionId ();
+
+            if (sessionId <= 1 || sessionId != Environment.ProcessId)
+            {
+                WriteIntegerFile (readyPath, -1);
+                WaitForOwnerTermination (ownerPid, controls);
+
+                return;
+            }
+        }
+
+        WriteIntegerFile (readyPath, Environment.ProcessId);
+
+        while (!File.Exists (gatePath))
+        {
+            ExitIfOwnerDied (ownerPid, controls);
+            Thread.Sleep (5);
+        }
+
+        ProcessStartInfo targetStartInfo = new ()
+        {
+            FileName = targetExecutable,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        for (int i = 6; i < args.Length; i++)
+        {
+            targetStartInfo.ArgumentList.Add (args [i]);
+        }
+
+        int targetExitCode;
 
         try
         {
-            await process.WaitForExitAsync (lifetime.Token).ConfigureAwait (false);
-            await allOutputTask.WaitAsync (lifetime.Token).ConfigureAwait (false);
+            using Process target = new () { StartInfo = targetStartInfo };
+            target.Start ();
+
+            while (!target.HasExited)
+            {
+                ExitIfOwnerDied (ownerPid, controls);
+                Thread.Sleep (25);
+            }
+
+            targetExitCode = target.ExitCode;
         }
-        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
         {
-            await TerminateAndDrainAsync (process, containment, allOutputTask).ConfigureAwait (false);
-
-            // A caller cancellation remains cancellation; an internal deadline is a diagnosable
-            // timeout. Check the caller first in case both tokens raced.
-            cancellationToken.ThrowIfCancellationRequested ();
-            string command = args.Count > 0 ? $" {args [0]}" : string.Empty;
-            throw new TimeoutException ($"Process '{executable}{command}' exceeded its {timeout.TotalSeconds:0.###}-second deadline and was terminated.");
+            Console.Error.WriteLine ($"Could not start contained process '{targetExecutable}': {ex.Message}");
+            targetExitCode = 127;
         }
 
-        string stdout = await stdoutTask.ConfigureAwait (false);
-        string stderr = await stderrTask.ConfigureAwait (false);
-        await containment.CompleteAsync ().ConfigureAwait (false);
+        WriteIntegerFile (statusPath, targetExitCode);
 
-        // Each component is bounded, so this final allocation is capped by
-        // MaxCombinedCapturedCharacters.
-        return (process.ExitCode, string.Concat (stdout, stderr));
+        // The owner now has the target result and kills the kernel containment boundary. Staying
+        // alive keeps the Job/PGID ownership stable until that kill; it also prevents PID reuse.
+        WaitForOwnerTermination (ownerPid, controls);
+    }
+
+    private static void WaitForOwnerTermination (int ownerPid, WrapperControlFiles controls)
+    {
+        while (true)
+        {
+            ExitIfOwnerDied (ownerPid, controls);
+            Thread.Sleep (100);
+        }
+    }
+
+    private static void ExitIfOwnerDied (int ownerPid, WrapperControlFiles controls)
+    {
+        if (OperatingSystem.IsWindows () || GetParentProcessId () == ownerPid)
+        {
+            return;
+        }
+
+        controls.Delete ();
+        KillProcess (-Environment.ProcessId, SigKill);
+        Environment.FailFast ("Contained process owner exited unexpectedly.");
+    }
+
+    private static WrapperLaunch ResolveWrapperLaunch ()
+    {
+        string executableName = OperatingSystem.IsWindows () ? "winget-tui-sharp.exe" : "winget-tui-sharp";
+        string localAppHost = Path.Combine (AppContext.BaseDirectory, executableName);
+
+        if (File.Exists (localAppHost))
+        {
+            return new (localAppHost, []);
+        }
+
+        string? processPath = Environment.ProcessPath;
+
+        if (!string.IsNullOrEmpty (processPath)
+            && Path.GetFileNameWithoutExtension (processPath).Equals ("winget-tui-sharp", StringComparison.OrdinalIgnoreCase))
+        {
+            return new (processPath, []);
+        }
+
+        string assemblyPath = Path.Combine (AppContext.BaseDirectory, "winget-tui-sharp.dll");
+
+        if (!string.IsNullOrEmpty (assemblyPath) && File.Exists (assemblyPath))
+        {
+            return new ("dotnet", [assemblyPath]);
+        }
+
+        throw new InvalidOperationException ("Could not locate the winget-tui-sharp launcher used for process containment.");
+    }
+
+    private static async Task<int> WaitForIntegerFileAsync (string path, CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested ();
+
+            try
+            {
+                if (File.Exists (path))
+                {
+                    string value = await File.ReadAllTextAsync (path, cancellationToken).ConfigureAwait (false);
+
+                    if (int.TryParse (value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
+                    {
+                        return parsed;
+                    }
+                }
+            }
+            catch (IOException)
+            {
+            }
+
+            await Task.Delay (10, cancellationToken).ConfigureAwait (false);
+        }
+    }
+
+    private static void WriteIntegerFile (string path, int value)
+    {
+        string temporary = path + ".tmp";
+        File.WriteAllText (temporary, value.ToString (CultureInfo.InvariantCulture), new UTF8Encoding (false));
+        File.Move (temporary, path, overwrite: true);
+    }
+
+    private static void CreateGate (string path)
+    {
+        using FileStream gate = new (path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1, FileOptions.WriteThrough);
+        gate.WriteByte (1);
     }
 
     private static async Task<string> DrainBoundedAsync (StreamReader reader)
@@ -144,17 +362,12 @@ internal static class ProcessRunner
         }
     }
 
-    private static async Task TerminateAndDrainAsync (Process process, ProcessContainment containment, Task outputTask)
+    private static async Task FinishDrainAsync (Process process, Task outputTask)
     {
-        containment.TerminateRemaining ();
-        TryKillDirectProcess (process);
-
         await WaitBoundedNoThrowAsync (process.WaitForExitAsync (), CleanupTimeout).ConfigureAwait (false);
 
         if (!await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false))
         {
-            // A descendant could keep inherited pipe handles open after the direct child exits.
-            // Close our readers after the bounded drain so their tasks cannot remain rooted.
             try
             {
                 process.StandardOutput.Dispose ();
@@ -165,40 +378,6 @@ internal static class ProcessRunner
             }
 
             await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false);
-        }
-
-        await containment.CompleteAsync ().ConfigureAwait (false);
-    }
-
-    private static void TryKillDirectProcess (Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill (entireProcessTree: true);
-            }
-        }
-        catch (InvalidOperationException)
-        {
-            // It exited between HasExited and Kill.
-        }
-        catch (Exception ex) when (ex is Win32Exception or NotSupportedException)
-        {
-            // A platform can fail while enumerating descendants. Still terminate the direct
-            // child so cancellation never degrades into leaving the command itself running.
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill ();
-                }
-            }
-            catch (Exception fallbackEx) when (fallbackEx is InvalidOperationException
-                                               or Win32Exception
-                                               or NotSupportedException)
-            {
-            }
         }
     }
 
@@ -216,39 +395,21 @@ internal static class ProcessRunner
                                    or ObjectDisposedException
                                    or InvalidOperationException)
         {
-            // Cleanup is best-effort and bounded. Kill(entireProcessTree: true) was already
-            // issued; don't replace the original cancellation/timeout with a drain failure.
             return task.IsCompleted;
         }
     }
 
-    /// <summary>
-    /// Keeps descendants addressable after their immediate parent exits. Windows uses a Job
-    /// Object with kill-on-close, which is inherited by descendants and is the production
-    /// containment boundary. Assignment happens immediately after <see cref="Process.Start()"/>;
-    /// its API has no suspended-start hook, so a process that explicitly breaks away or creates
-    /// and detaches a child before assignment can escape the Windows job. Linux/macOS likewise do
-    /// not expose atomic process-group assignment through <see cref="Process"/>, so those
-    /// development platforms retain identity-checked descendant snapshots while the parent is
-    /// alive. A process that forks and exits before the first snapshot can escape on POSIX.
-    /// Cooperative winget processes and adversarial children that remain visible for one
-    /// scheduling quantum are contained on every supported platform.
-    /// </summary>
     private sealed class ProcessContainment : IDisposable
     {
+        // The target can only escape by deliberately creating a new POSIX session/process group,
+        // or by requesting Windows job breakaway. winget is cooperative and all commands are
+        // launched without a shell, so neither escape is part of the supported command contract.
         private const uint JobObjectLimitKillOnJobClose = 0x00002000;
         private const int JobObjectExtendedLimitInformationClass = 9;
-        private const uint ProcAllPids = 1;
-        private const int ProcPidTbsdInfo = 3;
 
-        private readonly object _gate = new ();
-        private readonly Dictionary<int, DateTime> _trackedDescendants = [];
-        private readonly CancellationTokenSource _trackingStop = new ();
-        private SafeFileHandle? _job;
-        private Task? _trackingTask;
-        private int _rootPid;
-        private DateTime _rootStarted;
-        private bool _completed;
+        private readonly SafeFileHandle? _job;
+        private int _processGroupId;
+        private bool _terminated;
 
         private ProcessContainment ()
         {
@@ -283,329 +444,62 @@ internal static class ProcessRunner
 
         internal void Attach (Process process)
         {
-            _rootPid = process.Id;
-            _rootStarted = process.StartTime.ToUniversalTime ();
-
-            if (_job is not null)
+            if (_job is not null && !AssignProcessToJobObject (_job, process.Handle))
             {
-                if (!AssignProcessToJobObject (_job, process.Handle))
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not assign the gated wrapper to its containment Job Object.");
+            }
+        }
+
+        internal void MarkWrapperReady (Process process, int sessionId)
+        {
+            if (sessionId != process.Id || sessionId <= 1)
+            {
+                throw new InvalidOperationException ("The contained-process wrapper reported an invalid session/process-group id.");
+            }
+
+            if (!OperatingSystem.IsWindows ())
+            {
+                int ownerGroup = GetProcessGroup ();
+
+                if (sessionId == ownerGroup)
                 {
-                    throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not assign the child process to its containment Job Object.");
+                    throw new InvalidOperationException ("Refusing to target the owner's own POSIX process group.");
                 }
 
+                _processGroupId = sessionId;
+            }
+        }
+
+        internal void TerminateRemaining (Process process)
+        {
+            if (_terminated)
+            {
                 return;
             }
 
-            CaptureDescendants ();
-            _trackingTask = Task.Run (TrackDescendantsAsync);
-        }
+            _terminated = true;
 
-        internal void TerminateRemaining ()
-        {
             if (_job is not null)
             {
                 _job.Dispose ();
-
-                return;
             }
-
-            CaptureDescendants ();
-            KillTrackedDescendants ();
-        }
-
-        internal async Task CompleteAsync ()
-        {
-            if (_completed)
+            else if (_processGroupId > 1 && _processGroupId != GetProcessGroup ())
             {
-                return;
-            }
+                int result = KillProcess (-_processGroupId, SigKill);
+                int error = Marshal.GetLastWin32Error ();
 
-            _trackingStop.Cancel ();
-
-            if (_trackingTask is not null)
-            {
-                await WaitBoundedNoThrowAsync (_trackingTask, CleanupTimeout).ConfigureAwait (false);
-            }
-
-            if (_job is not null)
-            {
-                // Closing a kill-on-close job also removes successful-command descendants that
-                // detached their standard handles and would otherwise outlive the operation.
-                _job.Dispose ();
+                if (result != 0 && error != NoSuchProcess)
+                {
+                    TryKillDirectProcess (process);
+                }
             }
             else
             {
-                CaptureDescendants ();
-                KillTrackedDescendants ();
-            }
-
-            _completed = true;
-        }
-
-        public void Dispose ()
-        {
-            _trackingStop.Cancel ();
-            _job?.Dispose ();
-
-            if (!_completed && _job is null)
-            {
-                CaptureDescendants ();
-                KillTrackedDescendants ();
-                KillIdentity (_rootPid, _rootStarted);
-            }
-
-            _trackingStop.Dispose ();
-        }
-
-        private async Task TrackDescendantsAsync ()
-        {
-            Stopwatch elapsed = Stopwatch.StartNew ();
-
-            try
-            {
-                while (!_trackingStop.IsCancellationRequested)
-                {
-                    CaptureDescendants ();
-                    TimeSpan delay = elapsed.Elapsed < TimeSpan.FromSeconds (2)
-                                         ? TimeSpan.FromMilliseconds (50)
-                                         : TimeSpan.FromSeconds (1);
-                    await Task.Delay (delay, _trackingStop.Token).ConfigureAwait (false);
-                }
-            }
-            catch (OperationCanceledException) when (_trackingStop.IsCancellationRequested)
-            {
+                TryKillDirectProcess (process);
             }
         }
 
-        private void CaptureDescendants ()
-        {
-            if (_rootPid <= 0 || OperatingSystem.IsWindows ())
-            {
-                return;
-            }
-
-            IReadOnlyDictionary<int, int> parents = SnapshotParentPids ();
-            HashSet<int> ancestors = [];
-
-            if (IsIdentityAlive (_rootPid, _rootStarted))
-            {
-                ancestors.Add (_rootPid);
-            }
-
-            ancestors.UnionWith (LiveTrackedPids ());
-
-            bool added;
-
-            do
-            {
-                added = false;
-
-                foreach ((int pid, int parentPid) in parents)
-                {
-                    if (pid == Environment.ProcessId || ancestors.Contains (pid) || !ancestors.Contains (parentPid))
-                    {
-                        continue;
-                    }
-
-                    ancestors.Add (pid);
-                    TrackIdentity (pid);
-                    added = true;
-                }
-            }
-            while (added);
-        }
-
-        private void TrackIdentity (int pid)
-        {
-            try
-            {
-                using Process descendant = Process.GetProcessById (pid);
-                DateTime started = descendant.StartTime.ToUniversalTime ();
-
-                lock (_gate)
-                {
-                    _trackedDescendants.TryAdd (pid, started);
-                }
-            }
-            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
-            {
-            }
-        }
-
-        private void KillTrackedDescendants ()
-        {
-            KeyValuePair<int, DateTime> [] snapshot;
-
-            lock (_gate)
-            {
-                snapshot = [.. _trackedDescendants];
-            }
-
-            foreach ((int pid, DateTime expectedStart) in snapshot.Reverse ())
-            {
-                KillIdentity (pid, expectedStart);
-            }
-        }
-
-        private IReadOnlyList<int> LiveTrackedPids ()
-        {
-            KeyValuePair<int, DateTime> [] snapshot;
-
-            lock (_gate)
-            {
-                snapshot = [.. _trackedDescendants];
-            }
-
-            List<int> live = [];
-            List<int> stale = [];
-
-            foreach ((int pid, DateTime expectedStart) in snapshot)
-            {
-                if (IsIdentityAlive (pid, expectedStart))
-                {
-                    live.Add (pid);
-                }
-                else
-                {
-                    stale.Add (pid);
-                }
-            }
-
-            if (stale.Count > 0)
-            {
-                lock (_gate)
-                {
-                    foreach (int pid in stale)
-                    {
-                        _trackedDescendants.Remove (pid);
-                    }
-                }
-            }
-
-            return live;
-        }
-
-        private static bool IsIdentityAlive (int pid, DateTime expectedStart)
-        {
-            try
-            {
-                using Process process = Process.GetProcessById (pid);
-
-                return process.StartTime.ToUniversalTime () == expectedStart && !process.HasExited;
-            }
-            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception)
-            {
-                return false;
-            }
-        }
-
-        private static void KillIdentity (int pid, DateTime expectedStart)
-        {
-            if (pid <= 0)
-            {
-                return;
-            }
-
-            try
-            {
-                using Process descendant = Process.GetProcessById (pid);
-
-                if (descendant.StartTime.ToUniversalTime () == expectedStart && !descendant.HasExited)
-                {
-                    descendant.Kill (entireProcessTree: true);
-                }
-            }
-            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or Win32Exception or NotSupportedException)
-            {
-            }
-        }
-
-        private static IReadOnlyDictionary<int, int> SnapshotParentPids ()
-        {
-            if (OperatingSystem.IsLinux ())
-            {
-                return SnapshotLinuxParentPids ();
-            }
-
-            if (OperatingSystem.IsMacOS ())
-            {
-                return SnapshotMacParentPids ();
-            }
-
-            return new Dictionary<int, int> ();
-        }
-
-        private static IReadOnlyDictionary<int, int> SnapshotLinuxParentPids ()
-        {
-            Dictionary<int, int> parents = [];
-
-            try
-            {
-                foreach (string directory in Directory.EnumerateDirectories ("/proc"))
-                {
-                    if (!int.TryParse (Path.GetFileName (directory), out int pid))
-                    {
-                        continue;
-                    }
-
-                    string stat = File.ReadAllText (Path.Combine (directory, "stat"));
-                    int commandEnd = stat.LastIndexOf (')');
-
-                    if (commandEnd < 0)
-                    {
-                        continue;
-                    }
-
-                    string [] fields = stat [(commandEnd + 2)..].Split (' ', StringSplitOptions.RemoveEmptyEntries);
-
-                    if (fields.Length > 1 && int.TryParse (fields [1], out int parentPid))
-                    {
-                        parents [pid] = parentPid;
-                    }
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
-            {
-            }
-
-            return parents;
-        }
-
-        private static IReadOnlyDictionary<int, int> SnapshotMacParentPids ()
-        {
-            Dictionary<int, int> parents = [];
-
-            try
-            {
-                int requiredBytes = ProcListPids (ProcAllPids, 0, null, 0);
-
-                if (requiredBytes <= 0)
-                {
-                    return parents;
-                }
-
-                int [] pids = new int [requiredBytes / sizeof (int) + 64];
-                int returnedBytes = ProcListPids (ProcAllPids, 0, pids, pids.Length * sizeof (int));
-                byte [] info = new byte [256];
-
-                for (int i = 0; i < returnedBytes / sizeof (int); i++)
-                {
-                    int pid = pids [i];
-
-                    if (pid <= 0 || ProcPidInfo (pid, ProcPidTbsdInfo, 0, info, info.Length) < 20)
-                    {
-                        continue;
-                    }
-
-                    parents [pid] = BitConverter.ToInt32 (info, 16);
-                }
-            }
-            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
-            {
-            }
-
-            return parents;
-        }
+        public void Dispose () => _job?.Dispose ();
 
         [DllImport ("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateJobObject (IntPtr jobAttributes, string? name);
@@ -621,12 +515,6 @@ internal static class ProcessRunner
         [DllImport ("kernel32.dll", SetLastError = true)]
         [return: MarshalAs (UnmanagedType.Bool)]
         private static extern bool AssignProcessToJobObject (SafeFileHandle job, IntPtr process);
-
-        [DllImport ("/usr/lib/libproc.dylib", EntryPoint = "proc_listpids")]
-        private static extern int ProcListPids (uint type, uint typeInfo, [Out] int []? buffer, int bufferSize);
-
-        [DllImport ("/usr/lib/libproc.dylib", EntryPoint = "proc_pidinfo")]
-        private static extern int ProcPidInfo (int pid, int flavor, ulong arg, [Out] byte [] buffer, int bufferSize);
 
         [StructLayout (LayoutKind.Sequential)]
         private struct JobObjectBasicLimitInformation
@@ -664,4 +552,56 @@ internal static class ProcessRunner
             public UIntPtr PeakJobMemoryUsed;
         }
     }
+
+    private static void TryKillDirectProcess (Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill (entireProcessTree: true);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
+        {
+        }
+    }
+
+    private sealed record WrapperLaunch (string Executable, IReadOnlyList<string> PrefixArguments);
+
+    private sealed record WrapperControlFiles (string Ready, string Gate, string Status)
+    {
+        internal static WrapperControlFiles Create ()
+        {
+            string prefix = Path.Combine (Path.GetTempPath (), $"winget-tui-process-{Guid.NewGuid ():N}");
+
+            return new (prefix + ".ready", prefix + ".gate", prefix + ".status");
+        }
+
+        internal void Delete ()
+        {
+            foreach (string path in new [] { Ready, Gate, Status, Ready + ".tmp", Status + ".tmp" })
+            {
+                try
+                {
+                    File.Delete (path);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+    }
+
+    [DllImport ("libc", EntryPoint = "setsid", SetLastError = true)]
+    private static extern int SetSessionId ();
+
+    [DllImport ("libc", EntryPoint = "getpgrp")]
+    private static extern int GetProcessGroup ();
+
+    [DllImport ("libc", EntryPoint = "getppid")]
+    private static extern int GetParentProcessId ();
+
+    [DllImport ("libc", EntryPoint = "kill", SetLastError = true)]
+    private static extern int KillProcess (int pid, int signal);
 }
