@@ -8,23 +8,19 @@ using Microsoft.Win32.SafeHandles;
 
 namespace WingetTuiSharp;
 
-/// <summary>
-/// Runs a redirected child process with a finite lifetime, bounded output retention, and a
-/// kernel-owned process-tree boundary. A gated copy of this executable establishes the boundary
-/// before it is allowed to launch the requested target.
-/// </summary>
+/// <summary>Runs a child with finite lifetime, bounded output, and kernel process containment.</summary>
 internal static class ProcessRunner
 {
     internal const int MaxCapturedCharactersPerStream = 1024 * 1024;
     internal const string TruncationMarker = "\n...[output truncated]...\n";
     internal static readonly int MaxCombinedCapturedCharacters = 2 * (MaxCapturedCharactersPerStream + TruncationMarker.Length);
 
-    private const string WrapperFlag = "--internal-contained-process-wrapper";
+    private const string PosixExecFlag = "--internal-posix-contained-exec";
     private const int SigKill = 9;
     private const int NoSuchProcess = 3;
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds (5);
 
-    internal static async Task<(int Code, string Output)> RunAsync (
+    internal static Task<(int Code, string Output)> RunAsync (
         string executable,
         IReadOnlyList<string> args,
         Encoding outputEncoding,
@@ -33,6 +29,11 @@ internal static class ProcessRunner
     {
         ArgumentException.ThrowIfNullOrWhiteSpace (executable);
 
+        if (executable.Contains ('\0') || args.Any (arg => arg.Contains ('\0')))
+        {
+            throw new ArgumentException ("Process executable and arguments cannot contain NUL characters.");
+        }
+
         if (timeout <= TimeSpan.Zero)
         {
             throw new ArgumentOutOfRangeException (nameof (timeout), "The process timeout must be finite and positive.");
@@ -40,29 +41,130 @@ internal static class ProcessRunner
 
         cancellationToken.ThrowIfCancellationRequested ();
 
-        WrapperControlFiles controls = WrapperControlFiles.Create ();
-        WrapperLaunch wrapper = ResolveWrapperLaunch ();
-        ProcessStartInfo startInfo = new ()
-        {
-            FileName = wrapper.Executable,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            StandardOutputEncoding = outputEncoding,
-            StandardErrorEncoding = outputEncoding
-        };
+        return OperatingSystem.IsWindows ()
+                   ? RunWindowsAsync (executable, args, outputEncoding, timeout, cancellationToken)
+                   : RunPosixAsync (executable, args, outputEncoding, timeout, cancellationToken);
+    }
 
-        foreach (string prefixArgument in wrapper.PrefixArguments)
+    /// <summary>
+    /// POSIX launch helper. It creates a new session and immediately replaces itself with the
+    /// target using execvp, so the target keeps the same PID/PGID and no second runtime remains.
+    /// stdin/stdout/stderr and exact argv boundaries survive exec unchanged.
+    /// </summary>
+    internal static bool TryExecPosixContainedTarget (string [] args)
+    {
+        if (OperatingSystem.IsWindows () || args.Length < 2 || args [0] != PosixExecFlag)
+        {
+            return false;
+        }
+
+        if (SetSessionId () != Environment.ProcessId)
+        {
+            Console.Error.WriteLine ($"Could not establish a contained process session: errno {Marshal.GetLastWin32Error ()}.");
+            Environment.ExitCode = 125;
+
+            return true;
+        }
+
+        string executable = args [1];
+        string [] targetArgv = [executable, .. args.Skip (2)];
+        IntPtr argv = IntPtr.Zero;
+        IntPtr [] strings = new IntPtr [targetArgv.Length];
+
+        try
+        {
+            argv = Marshal.AllocHGlobal ((targetArgv.Length + 1) * IntPtr.Size);
+
+            for (int i = 0; i < targetArgv.Length; i++)
+            {
+                strings [i] = Marshal.StringToCoTaskMemUTF8 (targetArgv [i]);
+                Marshal.WriteIntPtr (argv, i * IntPtr.Size, strings [i]);
+            }
+
+            Marshal.WriteIntPtr (argv, targetArgv.Length * IntPtr.Size, IntPtr.Zero);
+            ExecVp (executable, argv);
+            int error = Marshal.GetLastWin32Error ();
+            Console.Error.WriteLine ($"Could not exec contained process '{executable}': errno {error}.");
+            Environment.ExitCode = 127;
+
+            return true;
+        }
+        finally
+        {
+            foreach (IntPtr value in strings)
+            {
+                if (value != IntPtr.Zero)
+                {
+                    Marshal.FreeCoTaskMem (value);
+                }
+            }
+
+            if (argv != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal (argv);
+            }
+        }
+    }
+
+    internal static string QuoteWindowsArgument (string argument)
+    {
+        if (argument.Length > 0 && !argument.Any (c => char.IsWhiteSpace (c) || c == '"'))
+        {
+            return argument;
+        }
+
+        StringBuilder quoted = new (argument.Length + 2);
+        quoted.Append ('"');
+        int backslashes = 0;
+
+        foreach (char c in argument)
+        {
+            if (c == '\\')
+            {
+                backslashes++;
+
+                continue;
+            }
+
+            if (c == '"')
+            {
+                quoted.Append ('\\', backslashes * 2 + 1);
+                quoted.Append ('"');
+                backslashes = 0;
+
+                continue;
+            }
+
+            quoted.Append ('\\', backslashes);
+            backslashes = 0;
+            quoted.Append (c);
+        }
+
+        quoted.Append ('\\', backslashes * 2);
+        quoted.Append ('"');
+
+        return quoted.ToString ();
+    }
+
+    internal static string BuildWindowsCommandLine (string executable, IReadOnlyList<string> args)
+        => string.Join (' ', new [] { executable }.Concat (args).Select (QuoteWindowsArgument));
+
+    private static async Task<(int Code, string Output)> RunPosixAsync (
+        string executable,
+        IReadOnlyList<string> args,
+        Encoding outputEncoding,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        WrapperLaunch helper = ResolvePosixHelperLaunch ();
+        ProcessStartInfo startInfo = CreateRedirectedStartInfo (helper.Executable, outputEncoding);
+
+        foreach (string prefixArgument in helper.PrefixArguments)
         {
             startInfo.ArgumentList.Add (prefixArgument);
         }
 
-        startInfo.ArgumentList.Add (WrapperFlag);
-        startInfo.ArgumentList.Add (controls.Ready);
-        startInfo.ArgumentList.Add (controls.Gate);
-        startInfo.ArgumentList.Add (controls.Status);
-        startInfo.ArgumentList.Add (Environment.ProcessId.ToString (CultureInfo.InvariantCulture));
+        startInfo.ArgumentList.Add (PosixExecFlag);
         startInfo.ArgumentList.Add (executable);
 
         foreach (string arg in args)
@@ -71,189 +173,94 @@ internal static class ProcessRunner
         }
 
         using Process process = new () { StartInfo = startInfo };
-        using ProcessContainment containment = ProcessContainment.Create ();
-        Task<string>? stdoutTask = null;
-        Task<string>? stderrTask = null;
-        Task? allOutputTask = null;
+        process.Start ();
+        int processGroupId = process.Id;
+        Task<string> stdoutTask = DrainBoundedAsync (process.StandardOutput);
+        Task<string> stderrTask = DrainBoundedAsync (process.StandardError);
+        Task allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
+
+        using CancellationTokenSource deadline = new (timeout);
+        using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (cancellationToken, deadline.Token);
 
         try
         {
-            process.Start ();
-            containment.Attach (process);
-            stdoutTask = DrainBoundedAsync (process.StandardOutput);
-            stderrTask = DrainBoundedAsync (process.StandardError);
-            allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
+            await process.WaitForExitAsync (lifetime.Token).ConfigureAwait (false);
+            int exitCode = process.ExitCode;
 
-            using CancellationTokenSource deadline = new (timeout);
-            using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (
-                cancellationToken,
-                deadline.Token);
+            // The exec'd target remains the session leader. Kill its group on success too, before
+            // waiting for pipe EOF, so an immediate parent exit cannot orphan a descendant.
+            TerminatePosixGroup (process, processGroupId);
+            await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
 
-            try
-            {
-                int sessionId = await WaitForIntegerFileAsync (controls.Ready, lifetime.Token).ConfigureAwait (false);
-                containment.MarkWrapperReady (process, sessionId);
-                CreateGate (controls.Gate);
-
-                int targetExitCode = await WaitForIntegerFileAsync (controls.Status, lifetime.Token).ConfigureAwait (false);
-
-                // The wrapper deliberately remains alive after publishing the target's result.
-                // Kill the still-owned job/group before the wrapper PID/PGID can be recycled.
-                containment.TerminateRemaining (process);
-                await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
-
-                string stdout = await stdoutTask.ConfigureAwait (false);
-                string stderr = await stderrTask.ConfigureAwait (false);
-
-                return (targetExitCode, string.Concat (stdout, stderr));
-            }
-            catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
-            {
-                containment.TerminateRemaining (process);
-                await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
-
-                cancellationToken.ThrowIfCancellationRequested ();
-                string command = args.Count > 0 ? $" {args [0]}" : string.Empty;
-                throw new TimeoutException ($"Process '{executable}{command}' exceeded its {timeout.TotalSeconds:0.###}-second deadline and was terminated.");
-            }
+            return (exitCode, string.Concat (await stdoutTask.ConfigureAwait (false), await stderrTask.ConfigureAwait (false)));
+        }
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
+        {
+            TerminatePosixGroup (process, processGroupId);
+            await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+            cancellationToken.ThrowIfCancellationRequested ();
+            throw ProcessTimeout (executable, args, timeout);
         }
         catch
         {
-            containment.TerminateRemaining (process);
-
-            if (allOutputTask is not null)
-            {
-                await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
-            }
-
+            TerminatePosixGroup (process, processGroupId);
+            await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
             throw;
         }
-        finally
-        {
-            controls.Delete ();
-        }
     }
 
-    /// <summary>
-    /// Handles the private launcher mode before normal argument processing. Arguments are passed
-    /// end-to-end with <see cref="ProcessStartInfo.ArgumentList"/>; no shell or command-line
-    /// quoting is involved. The target inherits stdin unchanged. On POSIX the wrapper calls
-    /// setsid before announcing readiness; on Windows the parent assigns the gated wrapper to a
-    /// kill-on-close Job Object before creating the gate file.
-    /// </summary>
-    internal static bool TryRunContainedWrapper (string [] args)
+    private static async Task<(int Code, string Output)> RunWindowsAsync (
+        string executable,
+        IReadOnlyList<string> args,
+        Encoding outputEncoding,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
     {
-        if (args.Length == 0 || args [0] != WrapperFlag)
-        {
-            return false;
-        }
-
-        RunContainedWrapper (args);
-
-        return true;
-    }
-
-    private static void RunContainedWrapper (string [] args)
-    {
-        if (args.Length < 6 || !int.TryParse (args [4], NumberStyles.None, CultureInfo.InvariantCulture, out int ownerPid))
-        {
-            Environment.ExitCode = 125;
-
-            return;
-        }
-
-        string readyPath = args [1];
-        string gatePath = args [2];
-        string statusPath = args [3];
-        string targetExecutable = args [5];
-        WrapperControlFiles controls = new (readyPath, gatePath, statusPath);
-
-        if (!OperatingSystem.IsWindows ())
-        {
-            int sessionId = SetSessionId ();
-
-            if (sessionId <= 1 || sessionId != Environment.ProcessId)
-            {
-                WriteIntegerFile (readyPath, -1);
-                WaitForOwnerTermination (ownerPid, controls);
-
-                return;
-            }
-        }
-
-        WriteIntegerFile (readyPath, Environment.ProcessId);
-
-        while (!File.Exists (gatePath))
-        {
-            ExitIfOwnerDied (ownerPid, controls);
-            Thread.Sleep (5);
-        }
-
-        ProcessStartInfo targetStartInfo = new ()
-        {
-            FileName = targetExecutable,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        for (int i = 6; i < args.Length; i++)
-        {
-            targetStartInfo.ArgumentList.Add (args [i]);
-        }
-
-        int targetExitCode;
+        using WindowsChildProcess child = WindowsChildProcess.Start (executable, args, outputEncoding);
+        Task<string> stdoutTask = DrainBoundedAsync (child.StandardOutput);
+        Task<string> stderrTask = DrainBoundedAsync (child.StandardError);
+        Task allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
+        using CancellationTokenSource deadline = new (timeout);
+        using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (cancellationToken, deadline.Token);
 
         try
         {
-            using Process target = new () { StartInfo = targetStartInfo };
-            target.Start ();
+            await child.Process.WaitForExitAsync (lifetime.Token).ConfigureAwait (false);
+            int exitCode = child.Process.ExitCode;
+            child.TerminateJob ();
+            await FinishDrainAsync (child.Process, allOutputTask).ConfigureAwait (false);
 
-            while (!target.HasExited)
-            {
-                ExitIfOwnerDied (ownerPid, controls);
-                Thread.Sleep (25);
-            }
-
-            targetExitCode = target.ExitCode;
+            return (exitCode, string.Concat (await stdoutTask.ConfigureAwait (false), await stderrTask.ConfigureAwait (false)));
         }
-        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or NotSupportedException)
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
-            Console.Error.WriteLine ($"Could not start contained process '{targetExecutable}': {ex.Message}");
-            targetExitCode = 127;
+            child.TerminateJob ();
+            await FinishDrainAsync (child.Process, allOutputTask).ConfigureAwait (false);
+            cancellationToken.ThrowIfCancellationRequested ();
+            throw ProcessTimeout (executable, args, timeout);
         }
-
-        WriteIntegerFile (statusPath, targetExitCode);
-
-        // The owner now has the target result and kills the kernel containment boundary. Staying
-        // alive keeps the Job/PGID ownership stable until that kill; it also prevents PID reuse.
-        WaitForOwnerTermination (ownerPid, controls);
-    }
-
-    private static void WaitForOwnerTermination (int ownerPid, WrapperControlFiles controls)
-    {
-        while (true)
+        catch
         {
-            ExitIfOwnerDied (ownerPid, controls);
-            Thread.Sleep (100);
+            child.TerminateJob ();
+            await FinishDrainAsync (child.Process, allOutputTask).ConfigureAwait (false);
+            throw;
         }
     }
 
-    private static void ExitIfOwnerDied (int ownerPid, WrapperControlFiles controls)
+    private static ProcessStartInfo CreateRedirectedStartInfo (string executable, Encoding encoding) => new ()
     {
-        if (OperatingSystem.IsWindows () || GetParentProcessId () == ownerPid)
-        {
-            return;
-        }
+        FileName = executable,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        StandardOutputEncoding = encoding,
+        StandardErrorEncoding = encoding
+    };
 
-        controls.Delete ();
-        KillProcess (-Environment.ProcessId, SigKill);
-        Environment.FailFast ("Contained process owner exited unexpectedly.");
-    }
-
-    private static WrapperLaunch ResolveWrapperLaunch ()
+    private static WrapperLaunch ResolvePosixHelperLaunch ()
     {
-        string executableName = OperatingSystem.IsWindows () ? "winget-tui-sharp.exe" : "winget-tui-sharp";
-        string localAppHost = Path.Combine (AppContext.BaseDirectory, executableName);
+        string localAppHost = Path.Combine (AppContext.BaseDirectory, "winget-tui-sharp");
 
         if (File.Exists (localAppHost))
         {
@@ -270,51 +277,53 @@ internal static class ProcessRunner
 
         string assemblyPath = Path.Combine (AppContext.BaseDirectory, "winget-tui-sharp.dll");
 
-        if (!string.IsNullOrEmpty (assemblyPath) && File.Exists (assemblyPath))
+        if (File.Exists (assemblyPath))
         {
             return new ("dotnet", [assemblyPath]);
         }
 
-        throw new InvalidOperationException ("Could not locate the winget-tui-sharp launcher used for process containment.");
+        throw new InvalidOperationException ("Could not locate the POSIX process-containment helper.");
     }
 
-    private static async Task<int> WaitForIntegerFileAsync (string path, CancellationToken cancellationToken)
+    private static TimeoutException ProcessTimeout (string executable, IReadOnlyList<string> args, TimeSpan timeout)
     {
-        while (true)
+        string command = args.Count > 0 ? $" {args [0]}" : string.Empty;
+
+        return new ($"Process '{executable}{command}' exceeded its {timeout.TotalSeconds:0.###}-second deadline and was terminated.");
+    }
+
+    private static void TerminatePosixGroup (Process process, int processGroupId)
+    {
+        // The helper PID is freshly allocated and cannot already name another process group. It
+        // calls setsid before exec, and the Process object is retained until this method returns.
+        // If the helper has not reached setsid, group kill returns ESRCH and direct tree-kill is
+        // sufficient because the target cannot have started. Deliberate target setsid is the only
+        // cooperative-contract escape.
+        bool safeGroup = processGroupId > 1 && processGroupId != GetProcessGroup ();
+
+        if (safeGroup)
         {
-            cancellationToken.ThrowIfCancellationRequested ();
+            int result = KillProcess (-processGroupId, SigKill);
+            int error = Marshal.GetLastWin32Error ();
 
-            try
+            if (result == 0 || error == NoSuchProcess)
             {
-                if (File.Exists (path))
-                {
-                    string value = await File.ReadAllTextAsync (path, cancellationToken).ConfigureAwait (false);
+                TryKillDirectProcess (process);
 
-                    if (int.TryParse (value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed))
-                    {
-                        return parsed;
-                    }
-                }
+                return;
             }
-            catch (IOException)
-            {
-            }
-
-            await Task.Delay (10, cancellationToken).ConfigureAwait (false);
         }
-    }
 
-    private static void WriteIntegerFile (string path, int value)
-    {
-        string temporary = path + ".tmp";
-        File.WriteAllText (temporary, value.ToString (CultureInfo.InvariantCulture), new UTF8Encoding (false));
-        File.Move (temporary, path, overwrite: true);
-    }
+        TryKillDirectProcess (process);
 
-    private static void CreateGate (string path)
-    {
-        using FileStream gate = new (path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1, FileOptions.WriteThrough);
-        gate.WriteByte (1);
+        // Close the only launch race: setsid may complete between the first group probe and the
+        // direct kill. A second group kill is safe because this freshly allocated PID cannot have
+        // named another process group before the helper, and a surviving descendant keeps the
+        // group id reserved after the target exits.
+        if (safeGroup)
+        {
+            KillProcess (-processGroupId, SigKill);
+        }
     }
 
     private static async Task<string> DrainBoundedAsync (StreamReader reader)
@@ -399,28 +408,449 @@ internal static class ProcessRunner
         }
     }
 
-    private sealed class ProcessContainment : IDisposable
+    private static void TryKillDirectProcess (Process process)
     {
-        // The target can only escape by deliberately creating a new POSIX session/process group,
-        // or by requesting Windows job breakaway. winget is cooperative and all commands are
-        // launched without a shell, so neither escape is part of the supported command contract.
-        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
-        private const int JobObjectExtendedLimitInformationClass = 9;
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill (entireProcessTree: true);
+            }
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
+        {
+        }
+    }
 
-        private readonly SafeFileHandle? _job;
-        private int _processGroupId;
+    private sealed record WrapperLaunch (string Executable, IReadOnlyList<string> PrefixArguments);
+
+    private sealed class WindowsChildProcess : IDisposable
+    {
+        private const uint CreateSuspended = 0x00000004;
+        private const uint CreateNoWindow = 0x08000000;
+        private const uint ExtendedStartupInfoPresent = 0x00080000;
+        private const uint StartfUseStdHandles = 0x00000100;
+        private const uint HandleFlagInherit = 0x00000001;
+        private const nuint ProcThreadAttributeHandleList = 0x00020002;
+        private const uint DuplicateSameAccess = 0x00000002;
+        private const uint GenericRead = 0x80000000;
+        private const uint FileShareRead = 0x00000001;
+        private const uint FileShareWrite = 0x00000002;
+        private const uint OpenExisting = 3;
+        private const int StdInputHandle = -10;
+
+        private readonly WindowsJob _job;
         private bool _terminated;
 
-        private ProcessContainment ()
+        private WindowsChildProcess (Process process, StreamReader stdout, StreamReader stderr, WindowsJob job)
         {
-            if (!OperatingSystem.IsWindows ())
+            Process = process;
+            StandardOutput = stdout;
+            StandardError = stderr;
+            _job = job;
+        }
+
+        internal Process Process { get; }
+        internal StreamReader StandardOutput { get; }
+        internal StreamReader StandardError { get; }
+
+        internal static WindowsChildProcess Start (string executable, IReadOnlyList<string> args, Encoding encoding)
+        {
+            string resolvedExecutable = ResolveWindowsExecutable (executable);
+            string commandLine = BuildWindowsCommandLine (resolvedExecutable, args);
+            SecurityAttributes inheritable = new ()
+            {
+                Length = Marshal.SizeOf<SecurityAttributes> (),
+                InheritHandle = true
+            };
+            WindowsJob job = new ();
+            SafeFileHandle? stdoutRead = null;
+            SafeFileHandle? stdoutWrite = null;
+            SafeFileHandle? stderrRead = null;
+            SafeFileHandle? stderrWrite = null;
+            SafeFileHandle? stdin = null;
+            SafeFileHandle? nativeProcess = null;
+            SafeFileHandle? nativeThread = null;
+            IntPtr attributeList = IntPtr.Zero;
+            IntPtr inheritedHandles = IntPtr.Zero;
+            Process? process = null;
+            StreamReader? stdoutReader = null;
+            StreamReader? stderrReader = null;
+
+            try
+            {
+                CreatePipePair (ref inheritable, out stdoutRead, out stdoutWrite);
+                CreatePipePair (ref inheritable, out stderrRead, out stderrWrite);
+                stdin = DuplicateOrOpenStdin (ref inheritable);
+
+                nuint attributeBytes = 0;
+                InitializeProcThreadAttributeList (IntPtr.Zero, 1, 0, ref attributeBytes);
+                attributeList = Marshal.AllocHGlobal ((nint) attributeBytes);
+
+                if (!InitializeProcThreadAttributeList (attributeList, 1, 0, ref attributeBytes))
+                {
+                    throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not initialize the process handle allow-list.");
+                }
+
+                IntPtr [] handles = [stdin.DangerousGetHandle (), stdoutWrite.DangerousGetHandle (), stderrWrite.DangerousGetHandle ()];
+                inheritedHandles = Marshal.AllocHGlobal (handles.Length * IntPtr.Size);
+
+                for (int i = 0; i < handles.Length; i++)
+                {
+                    Marshal.WriteIntPtr (inheritedHandles, i * IntPtr.Size, handles [i]);
+                }
+
+                if (!UpdateProcThreadAttribute (
+                        attributeList,
+                        0,
+                        ProcThreadAttributeHandleList,
+                        inheritedHandles,
+                        (nuint) (handles.Length * IntPtr.Size),
+                        IntPtr.Zero,
+                        IntPtr.Zero))
+                {
+                    throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not configure inherited process handles.");
+                }
+
+                StartupInfoEx startup = new ();
+                startup.StartupInfo.Size = Marshal.SizeOf<StartupInfoEx> ();
+                startup.StartupInfo.Flags = StartfUseStdHandles;
+                startup.StartupInfo.StandardInput = stdin.DangerousGetHandle ();
+                startup.StartupInfo.StandardOutput = stdoutWrite.DangerousGetHandle ();
+                startup.StartupInfo.StandardError = stderrWrite.DangerousGetHandle ();
+                startup.AttributeList = attributeList;
+                StringBuilder mutableCommandLine = new (commandLine);
+
+                if (!CreateProcess (
+                        resolvedExecutable,
+                        mutableCommandLine,
+                        IntPtr.Zero,
+                        IntPtr.Zero,
+                        true,
+                        CreateSuspended | CreateNoWindow | ExtendedStartupInfoPresent,
+                        IntPtr.Zero,
+                        null,
+                        ref startup,
+                        out ProcessInformation processInformation))
+                {
+                    throw new Win32Exception (Marshal.GetLastWin32Error (), $"Could not create contained process '{resolvedExecutable}'.");
+                }
+
+                nativeProcess = new (processInformation.Process, ownsHandle: true);
+                nativeThread = new (processInformation.Thread, ownsHandle: true);
+                job.Assign (nativeProcess);
+                process = Process.GetProcessById ((int) processInformation.ProcessId);
+
+                if (ResumeThread (nativeThread) == uint.MaxValue)
+                {
+                    throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not resume the contained process.");
+                }
+
+                stdoutWrite.Dispose ();
+                stdoutWrite = null;
+                stderrWrite.Dispose ();
+                stderrWrite = null;
+                stdoutReader = new (new FileStream (stdoutRead, FileAccess.Read, 8192, isAsync: false), encoding, false, 8192);
+                stdoutRead = null;
+                stderrReader = new (new FileStream (stderrRead, FileAccess.Read, 8192, isAsync: false), encoding, false, 8192);
+                stderrRead = null;
+                WindowsChildProcess result = new (process, stdoutReader, stderrReader, job);
+                process = null;
+                stdoutReader = null;
+                stderrReader = null;
+
+                return result;
+            }
+            catch
+            {
+                if (nativeProcess is not null && !nativeProcess.IsInvalid)
+                {
+                    TerminateProcess (nativeProcess, 127);
+                }
+
+                job.Dispose ();
+                process?.Dispose ();
+                stdoutReader?.Dispose ();
+                stderrReader?.Dispose ();
+                throw;
+            }
+            finally
+            {
+                nativeThread?.Dispose ();
+                nativeProcess?.Dispose ();
+                stdin?.Dispose ();
+                stdoutRead?.Dispose ();
+                stdoutWrite?.Dispose ();
+                stderrRead?.Dispose ();
+                stderrWrite?.Dispose ();
+
+                if (attributeList != IntPtr.Zero)
+                {
+                    DeleteProcThreadAttributeList (attributeList);
+                    Marshal.FreeHGlobal (attributeList);
+                }
+
+                if (inheritedHandles != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal (inheritedHandles);
+                }
+            }
+        }
+
+        internal void TerminateJob ()
+        {
+            if (_terminated)
             {
                 return;
             }
 
-            _job = CreateJobObject (IntPtr.Zero, null);
+            _terminated = true;
+            _job.Dispose ();
+        }
 
-            if (_job.IsInvalid)
+        public void Dispose ()
+        {
+            TerminateJob ();
+            StandardOutput.Dispose ();
+            StandardError.Dispose ();
+            Process.Dispose ();
+        }
+
+        private static void CreatePipePair (
+            ref SecurityAttributes attributes,
+            out SafeFileHandle read,
+            out SafeFileHandle write)
+        {
+            if (!CreatePipe (out IntPtr readHandle, out IntPtr writeHandle, ref attributes, 0))
+            {
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not create a redirected process pipe.");
+            }
+
+            read = new (readHandle, ownsHandle: true);
+            write = new (writeHandle, ownsHandle: true);
+
+            if (!SetHandleInformation (read, HandleFlagInherit, 0))
+            {
+                read.Dispose ();
+                write.Dispose ();
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not protect the parent side of a process pipe.");
+            }
+        }
+
+        private static SafeFileHandle DuplicateOrOpenStdin (ref SecurityAttributes attributes)
+        {
+            IntPtr current = GetCurrentProcess ();
+            IntPtr source = GetStdHandle (StdInputHandle);
+
+            if (source != IntPtr.Zero
+                && source != new IntPtr (-1)
+                && DuplicateHandle (current, source, current, out IntPtr duplicate, 0, true, DuplicateSameAccess))
+            {
+                return new (duplicate, ownsHandle: true);
+            }
+
+            SafeFileHandle nul = CreateFile (
+                "NUL",
+                GenericRead,
+                FileShareRead | FileShareWrite,
+                ref attributes,
+                OpenExisting,
+                0,
+                IntPtr.Zero);
+
+            if (nul.IsInvalid)
+            {
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not provide stdin to the contained process.");
+            }
+
+            return nul;
+        }
+
+        private static string ResolveWindowsExecutable (string executable)
+        {
+            if (executable.Contains (Path.DirectorySeparatorChar) || executable.Contains (Path.AltDirectorySeparatorChar))
+            {
+                string fullPath = Path.GetFullPath (executable);
+
+                if (!File.Exists (fullPath))
+                {
+                    throw new Win32Exception (2, $"Executable '{executable}' was not found.");
+                }
+
+                return fullPath;
+            }
+
+            string [] names = Path.HasExtension (executable) ? [executable] : [executable, executable + ".exe"];
+            string? pathValue = Environment.GetEnvironmentVariable ("PATH");
+
+            foreach (string directoryValue in (pathValue ?? string.Empty).Split (Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            {
+                string directory = directoryValue.Trim ().Trim ('"');
+
+                if (directory.Length == 0)
+                {
+                    continue;
+                }
+
+                foreach (string name in names)
+                {
+                    try
+                    {
+                        string candidate = Path.GetFullPath (Path.Combine (directory, name));
+
+                        if (File.Exists (candidate))
+                        {
+                            return candidate;
+                        }
+                    }
+                    catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+                    {
+                    }
+                }
+            }
+
+            throw new Win32Exception (2, $"Executable '{executable}' was not found on PATH.");
+        }
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool CreatePipe (out IntPtr readPipe, out IntPtr writePipe, ref SecurityAttributes attributes, uint size);
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool SetHandleInformation (SafeFileHandle handle, uint mask, uint flags);
+
+        [DllImport ("kernel32.dll")]
+        private static extern IntPtr GetCurrentProcess ();
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetStdHandle (int standardHandle);
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool DuplicateHandle (
+            IntPtr sourceProcess,
+            IntPtr sourceHandle,
+            IntPtr targetProcess,
+            out IntPtr targetHandle,
+            uint desiredAccess,
+            [MarshalAs (UnmanagedType.Bool)] bool inheritHandle,
+            uint options);
+
+        [DllImport ("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern SafeFileHandle CreateFile (
+            string fileName,
+            uint desiredAccess,
+            uint shareMode,
+            ref SecurityAttributes securityAttributes,
+            uint creationDisposition,
+            uint flagsAndAttributes,
+            IntPtr templateFile);
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool InitializeProcThreadAttributeList (
+            IntPtr attributeList,
+            int attributeCount,
+            int flags,
+            ref nuint size);
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool UpdateProcThreadAttribute (
+            IntPtr attributeList,
+            uint flags,
+            nuint attribute,
+            IntPtr value,
+            nuint size,
+            IntPtr previousValue,
+            IntPtr returnSize);
+
+        [DllImport ("kernel32.dll")]
+        private static extern void DeleteProcThreadAttributeList (IntPtr attributeList);
+
+        [DllImport ("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool CreateProcess (
+            string applicationName,
+            StringBuilder commandLine,
+            IntPtr processAttributes,
+            IntPtr threadAttributes,
+            [MarshalAs (UnmanagedType.Bool)] bool inheritHandles,
+            uint creationFlags,
+            IntPtr environment,
+            string? currentDirectory,
+            ref StartupInfoEx startupInfo,
+            out ProcessInformation processInformation);
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        private static extern uint ResumeThread (SafeFileHandle thread);
+
+        [DllImport ("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs (UnmanagedType.Bool)]
+        private static extern bool TerminateProcess (SafeFileHandle process, uint exitCode);
+
+        [StructLayout (LayoutKind.Sequential)]
+        private struct SecurityAttributes
+        {
+            public int Length;
+            public IntPtr SecurityDescriptor;
+
+            [MarshalAs (UnmanagedType.Bool)]
+            public bool InheritHandle;
+        }
+
+        [StructLayout (LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct StartupInfo
+        {
+            public int Size;
+            public string? Reserved;
+            public string? Desktop;
+            public string? Title;
+            public uint X;
+            public uint Y;
+            public uint XSize;
+            public uint YSize;
+            public uint XCountChars;
+            public uint YCountChars;
+            public uint FillAttribute;
+            public uint Flags;
+            public ushort ShowWindow;
+            public ushort Reserved2Bytes;
+            public IntPtr Reserved2;
+            public IntPtr StandardInput;
+            public IntPtr StandardOutput;
+            public IntPtr StandardError;
+        }
+
+        [StructLayout (LayoutKind.Sequential)]
+        private struct StartupInfoEx
+        {
+            public StartupInfo StartupInfo;
+            public IntPtr AttributeList;
+        }
+
+        [StructLayout (LayoutKind.Sequential)]
+        private struct ProcessInformation
+        {
+            public IntPtr Process;
+            public IntPtr Thread;
+            public uint ProcessId;
+            public uint ThreadId;
+        }
+    }
+
+    private sealed class WindowsJob : IDisposable
+    {
+        private const uint JobObjectLimitKillOnJobClose = 0x00002000;
+        private const int JobObjectExtendedLimitInformationClass = 9;
+        private readonly SafeFileHandle _handle;
+
+        internal WindowsJob ()
+        {
+            _handle = CreateJobObject (IntPtr.Zero, null);
+
+            if (_handle.IsInvalid)
             {
                 throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not create a process-containment Job Object.");
             }
@@ -429,77 +859,26 @@ internal static class ProcessRunner
             limits.BasicLimitInformation.LimitFlags = JobObjectLimitKillOnJobClose;
 
             if (!SetInformationJobObject (
-                    _job,
+                    _handle,
                     JobObjectExtendedLimitInformationClass,
                     ref limits,
                     (uint) Marshal.SizeOf<JobObjectExtendedLimitInformation> ()))
             {
                 int error = Marshal.GetLastWin32Error ();
-                _job.Dispose ();
+                _handle.Dispose ();
                 throw new Win32Exception (error, "Could not configure process-tree termination for the Job Object.");
             }
         }
 
-        internal static ProcessContainment Create () => new ();
-
-        internal void Attach (Process process)
+        internal void Assign (SafeFileHandle process)
         {
-            if (_job is not null && !AssignProcessToJobObject (_job, process.Handle))
+            if (!AssignProcessToJobObject (_handle, process))
             {
-                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not assign the gated wrapper to its containment Job Object.");
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not assign the suspended process to its Job Object.");
             }
         }
 
-        internal void MarkWrapperReady (Process process, int sessionId)
-        {
-            if (sessionId != process.Id || sessionId <= 1)
-            {
-                throw new InvalidOperationException ("The contained-process wrapper reported an invalid session/process-group id.");
-            }
-
-            if (!OperatingSystem.IsWindows ())
-            {
-                int ownerGroup = GetProcessGroup ();
-
-                if (sessionId == ownerGroup)
-                {
-                    throw new InvalidOperationException ("Refusing to target the owner's own POSIX process group.");
-                }
-
-                _processGroupId = sessionId;
-            }
-        }
-
-        internal void TerminateRemaining (Process process)
-        {
-            if (_terminated)
-            {
-                return;
-            }
-
-            _terminated = true;
-
-            if (_job is not null)
-            {
-                _job.Dispose ();
-            }
-            else if (_processGroupId > 1 && _processGroupId != GetProcessGroup ())
-            {
-                int result = KillProcess (-_processGroupId, SigKill);
-                int error = Marshal.GetLastWin32Error ();
-
-                if (result != 0 && error != NoSuchProcess)
-                {
-                    TryKillDirectProcess (process);
-                }
-            }
-            else
-            {
-                TryKillDirectProcess (process);
-            }
-        }
-
-        public void Dispose () => _job?.Dispose ();
+        public void Dispose () => _handle.Dispose ();
 
         [DllImport ("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         private static extern SafeFileHandle CreateJobObject (IntPtr jobAttributes, string? name);
@@ -514,7 +893,7 @@ internal static class ProcessRunner
 
         [DllImport ("kernel32.dll", SetLastError = true)]
         [return: MarshalAs (UnmanagedType.Bool)]
-        private static extern bool AssignProcessToJobObject (SafeFileHandle job, IntPtr process);
+        private static extern bool AssignProcessToJobObject (SafeFileHandle job, SafeFileHandle process);
 
         [StructLayout (LayoutKind.Sequential)]
         private struct JobObjectBasicLimitInformation
@@ -553,55 +932,15 @@ internal static class ProcessRunner
         }
     }
 
-    private static void TryKillDirectProcess (Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill (entireProcessTree: true);
-            }
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
-        {
-        }
-    }
-
-    private sealed record WrapperLaunch (string Executable, IReadOnlyList<string> PrefixArguments);
-
-    private sealed record WrapperControlFiles (string Ready, string Gate, string Status)
-    {
-        internal static WrapperControlFiles Create ()
-        {
-            string prefix = Path.Combine (Path.GetTempPath (), $"winget-tui-process-{Guid.NewGuid ():N}");
-
-            return new (prefix + ".ready", prefix + ".gate", prefix + ".status");
-        }
-
-        internal void Delete ()
-        {
-            foreach (string path in new [] { Ready, Gate, Status, Ready + ".tmp", Status + ".tmp" })
-            {
-                try
-                {
-                    File.Delete (path);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-                {
-                }
-            }
-        }
-    }
-
     [DllImport ("libc", EntryPoint = "setsid", SetLastError = true)]
     private static extern int SetSessionId ();
 
     [DllImport ("libc", EntryPoint = "getpgrp")]
     private static extern int GetProcessGroup ();
 
-    [DllImport ("libc", EntryPoint = "getppid")]
-    private static extern int GetParentProcessId ();
-
     [DllImport ("libc", EntryPoint = "kill", SetLastError = true)]
     private static extern int KillProcess (int pid, int signal);
+
+    [DllImport ("libc", EntryPoint = "execvp", SetLastError = true)]
+    private static extern int ExecVp ([MarshalAs (UnmanagedType.LPUTF8Str)] string file, IntPtr argv);
 }

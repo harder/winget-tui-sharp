@@ -1,6 +1,6 @@
 using WingetTuiSharp;
 
-if (ProcessRunner.TryRunContainedWrapper (args))
+if (ProcessRunner.TryExecPosixContainedTarget (args))
 {
     return;
 }

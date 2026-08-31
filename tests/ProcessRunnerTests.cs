@@ -49,6 +49,27 @@ public sealed class ProcessRunnerTests : IDisposable
         Assert.Equal (payload, output);
     }
 
+    [Theory]
+    [InlineData ("", "\"\"")]
+    [InlineData ("plain", "plain")]
+    [InlineData ("two words", "\"two words\"")]
+    [InlineData ("a\"b", "\"a\\\"b\"")]
+    [InlineData ("C:\\Program Files\\Thing\\", "\"C:\\Program Files\\Thing\\\\\"")]
+    public void QuoteWindowsArgument_FollowsCreateProcessBackslashQuoteRules (string argument, string expected)
+    {
+        Assert.Equal (expected, ProcessRunner.QuoteWindowsArgument (argument));
+    }
+
+    [Fact]
+    public void BuildWindowsCommandLine_QuotesExecutableAndKeepsArgumentBoundaries ()
+    {
+        string commandLine = ProcessRunner.BuildWindowsCommandLine (
+            "C:\\Program Files\\winget.exe",
+            ["search", "two words", "a\"b", string.Empty]);
+
+        Assert.Equal ("\"C:\\Program Files\\winget.exe\" search \"two words\" \"a\\\"b\" \"\"", commandLine);
+    }
+
     [Fact]
     public async Task RunWithCodeAsync_CallerCancellationTerminatesProcessTree ()
     {
