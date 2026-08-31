@@ -609,16 +609,7 @@ public sealed partial class CliBackend : IBackend
 
         while (nextTableStart >= 0 && nextTableStart < lines.Length)
         {
-            int remaining = maxRows - rows.Count;
-
-            if (remaining <= 0)
-            {
-                trace.WriteLine ($"[parse] stopped at configured row limit ({maxRows})");
-
-                break;
-            }
-
-            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, remaining, out int afterFooter);
+            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, out int afterFooter);
 
             if (tableRows.Count > 0)
             {
@@ -631,7 +622,14 @@ public sealed partial class CliBackend : IBackend
         }
 
         rows = DedupePackages (rows);
-        trace.WriteLine ($"[parse] returned {rows.Count} rows (after dedupe)");
+
+        if (rows.Count > maxRows)
+        {
+            rows.RemoveRange (maxRows, rows.Count - maxRows);
+            trace.WriteLine ($"[parse] applied configured row limit ({maxRows}) after dedupe");
+        }
+
+        trace.WriteLine ($"[parse] returned {rows.Count} rows (after dedupe and limit)");
 
         return rows;
     }
@@ -641,13 +639,7 @@ public sealed partial class CliBackend : IBackend
     /// extracted and, via <paramref name="nextLineAfterFooter"/>, the line index immediately
     /// after the footer (or <c>-1</c> if no footer was encountered).
     /// </summary>
-    private static List<Package> ParseOneTable (
-        string [] lines,
-        int startIdx,
-        bool hasAvailable,
-        TextWriter trace,
-        int maxRows,
-        out int nextLineAfterFooter)
+    private static List<Package> ParseOneTable (string [] lines, int startIdx, bool hasAvailable, TextWriter trace, out int nextLineAfterFooter)
     {
         nextLineAfterFooter = -1;
         int sepIdx = -1;
@@ -753,13 +745,6 @@ public sealed partial class CliBackend : IBackend
                 AvailableVersion = hasAvailable && !string.IsNullOrWhiteSpace (available) ? available.Trim () : null,
                 Source = source.Trim ()
             });
-
-            if (rows.Count >= maxRows)
-            {
-                trace.WriteLine ($"[parse] stopped table at configured row limit ({maxRows})");
-
-                break;
-            }
         }
 
         return rows;

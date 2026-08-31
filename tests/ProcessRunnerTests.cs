@@ -69,6 +69,64 @@ public sealed class ProcessRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunWithCodeAsync_TimeoutKillsPipeHoldingDescendantAfterParentExited ()
+    {
+        string pidFile = Path.Combine (_tempDirectory, "orphan-pipe-child.pid");
+        FakeCommand command = CreateOrphaningScript ("orphan-pipe", pidFile, detachStandardHandles: false);
+        Task<(int Code, string Output)> run = CliBackend.RunWithCodeAsync (
+            command.Arguments,
+            command.Executable,
+            TimeSpan.FromSeconds (3),
+            TestContext.Current.CancellationToken);
+
+        int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
+        _childProcessIds.Add (childPid);
+
+        TimeoutException exception = await Assert.ThrowsAsync<TimeoutException> (() => run);
+        Assert.Contains ("deadline", exception.Message, StringComparison.OrdinalIgnoreCase);
+        await AssertProcessStopsAsync (childPid);
+    }
+
+    [Fact]
+    public async Task RunWithCodeAsync_CancellationKillsPipeHoldingDescendantAfterParentExited ()
+    {
+        string pidFile = Path.Combine (_tempDirectory, "cancel-orphan-pipe-child.pid");
+        FakeCommand command = CreateOrphaningScript ("cancel-orphan-pipe", pidFile, detachStandardHandles: false);
+        using CancellationTokenSource cancellation = new (TimeSpan.FromSeconds (15));
+        Task<(int Code, string Output)> run = CliBackend.RunWithCodeAsync (
+            command.Arguments,
+            command.Executable,
+            TimeSpan.FromMinutes (1),
+            cancellation.Token);
+
+        int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
+        _childProcessIds.Add (childPid);
+        await Task.Delay (TimeSpan.FromSeconds (2), TestContext.Current.CancellationToken);
+        cancellation.Cancel ();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException> (() => run);
+        await AssertProcessStopsAsync (childPid);
+    }
+
+    [Fact]
+    public async Task RunWithCodeAsync_SuccessKillsDetachedDescendantThatClosedPipes ()
+    {
+        string pidFile = Path.Combine (_tempDirectory, "orphan-detached-child.pid");
+        FakeCommand command = CreateOrphaningScript ("orphan-detached", pidFile, detachStandardHandles: true);
+
+        (int code, _) = await CliBackend.RunWithCodeAsync (
+            command.Arguments,
+            command.Executable,
+            TimeSpan.FromSeconds (10),
+            TestContext.Current.CancellationToken);
+
+        int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
+        _childProcessIds.Add (childPid);
+        Assert.Equal (0, code);
+        await AssertProcessStopsAsync (childPid);
+    }
+
+    [Fact]
     public async Task RunWithCodeAsync_DrainsFloodedPipesButBoundsRetainedOutput ()
     {
         const int floodCharacters = ProcessRunner.MaxCapturedCharactersPerStream * 2;
@@ -121,6 +179,23 @@ public sealed class ProcessRunnerTests : IDisposable
             windows: $"$childProcess = Start-Process pwsh -ArgumentList '-NoProfile','-Command','Start-Sleep 60' -PassThru; "
                      + $"[IO.File]::WriteAllText('{escapedPowerShellPidFile}', $childProcess.Id.ToString([CultureInfo]::InvariantCulture)); "
                      + "Wait-Process -Id $childProcess.Id");
+    }
+
+    private FakeCommand CreateOrphaningScript (string name, string pidFile, bool detachStandardHandles)
+    {
+        string escapedUnixPidFile = pidFile.Replace ("'", "'\\''", StringComparison.Ordinal);
+        string escapedPowerShellPidFile = pidFile.Replace ("'", "''", StringComparison.Ordinal);
+        string unixRedirection = detachStandardHandles ? " >/dev/null 2>&1" : string.Empty;
+        string windowsRedirection = detachStandardHandles
+                                        ? $" -RedirectStandardOutput '{escapedPowerShellPidFile}.out' -RedirectStandardError '{escapedPowerShellPidFile}.err'"
+                                        : string.Empty;
+
+        return CreateScript (
+            name,
+            unix: $"sleep 60{unixRedirection} & child=$!; printf '%s' \"$child\" > '{escapedUnixPidFile}'; sleep 1; exit 0",
+            windows: $"$childProcess = Start-Process pwsh -ArgumentList '-NoProfile','-Command','Start-Sleep 60' -PassThru{windowsRedirection}; "
+                     + $"[IO.File]::WriteAllText('{escapedPowerShellPidFile}', $childProcess.Id.ToString([CultureInfo]::InvariantCulture)); "
+                     + "Start-Sleep -Seconds 1; exit 0");
     }
 
     private FakeCommand CreateScript (string name, string unix, string windows)
