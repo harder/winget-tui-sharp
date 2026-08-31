@@ -53,7 +53,7 @@ internal static class ProcessRunner
                        timeout,
                        cancellationToken,
                        preSetSidDelayMilliseconds: 0,
-                       afterWaitWithoutReaping: null);
+                       testHooks: null);
     }
 
     internal static Task<(int Code, string Output)> RunWithPosixPreSetSidDelayForTestAsync (
@@ -70,7 +70,7 @@ internal static class ProcessRunner
             timeout,
             cancellationToken,
             preSetSidDelayMilliseconds,
-            afterWaitWithoutReaping: null);
+            testHooks: null);
 
     internal static Task<(int Code, string Output)> RunWithPosixWaitObserverForTestAsync (
         string executable,
@@ -86,7 +86,25 @@ internal static class ProcessRunner
             timeout,
             cancellationToken,
             preSetSidDelayMilliseconds: 0,
-            afterWaitWithoutReaping);
+            new (afterWaitWithoutReaping, null, null));
+
+    internal static Task<(int Code, string Output)> RunWithPosixLifecycleBarrierForTestAsync (
+        string executable,
+        IReadOnlyList<string> args,
+        Encoding outputEncoding,
+        TimeSpan timeout,
+        Action<int> afterWaitWithoutReaping,
+        Action beforeExternalTermination,
+        Action<bool> terminationDecision,
+        CancellationToken cancellationToken)
+        => RunPosixAsync (
+            executable,
+            args,
+            outputEncoding,
+            timeout,
+            cancellationToken,
+            preSetSidDelayMilliseconds: 0,
+            new (afterWaitWithoutReaping, beforeExternalTermination, terminationDecision));
 
     /// <summary>
     /// POSIX launch helper. It creates a new session and immediately replaces itself with the
@@ -218,7 +236,7 @@ internal static class ProcessRunner
         TimeSpan timeout,
         CancellationToken cancellationToken,
         int preSetSidDelayMilliseconds,
-        Action<int>? afterWaitWithoutReaping)
+        PosixTestHooks? testHooks)
     {
         WrapperLaunch helper = ResolvePosixHelperLaunch ();
         List<string> helperArguments = [.. helper.PrefixArguments];
@@ -232,10 +250,29 @@ internal static class ProcessRunner
         Task<string> stdoutTask = DrainBoundedAsync (child.StandardOutput);
         Task<string> stderrTask = DrainBoundedAsync (child.StandardError);
         Task allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
-        Task<int> exitTask = Task.Run (() => WaitCleanupAndReapPosixProcess (processGroupId, afterWaitWithoutReaping));
+        PosixProcessLifecycle lifecycle = new (processGroupId, testHooks?.TerminationDecision);
+        Task<int> exitTask = Task.Factory.StartNew (
+            () => lifecycle.WaitCleanupAndReap (testHooks?.AfterWaitWithoutReaping),
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
 
         using CancellationTokenSource deadline = new (timeout);
         using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (cancellationToken, deadline.Token);
+        using CancellationTokenRegistration terminationRegistration = lifetime.Token.Register (
+            () =>
+            {
+                try
+                {
+                    testHooks?.BeforeExternalTermination?.Invoke ();
+                }
+                catch
+                {
+                    // Test instrumentation must never alter cancellation or cleanup.
+                }
+
+                lifecycle.TerminateIfOwned ();
+            });
 
         try
         {
@@ -246,7 +283,6 @@ internal static class ProcessRunner
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
-            TerminatePosixGroup (processGroupId);
             await WaitBoundedNoThrowAsync (exitTask, CleanupTimeout).ConfigureAwait (false);
             await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
             cancellationToken.ThrowIfCancellationRequested ();
@@ -254,7 +290,7 @@ internal static class ProcessRunner
         }
         catch
         {
-            TerminatePosixGroup (processGroupId);
+            lifecycle.TerminateIfOwned ();
             await WaitBoundedNoThrowAsync (exitTask, CleanupTimeout).ConfigureAwait (false);
             await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
             throw;
@@ -382,29 +418,6 @@ internal static class ProcessRunner
         }
     }
 
-    private static int WaitCleanupAndReapPosixProcess (int pid, Action<int>? afterWaitWithoutReaping)
-    {
-        WaitForPosixExitWithoutReaping (pid);
-
-        try
-        {
-            afterWaitWithoutReaping?.Invoke (pid);
-        }
-        catch
-        {
-            TerminatePosixGroup (pid);
-            ReapPosixProcess (pid);
-            throw;
-        }
-
-        // Keep waitid, both group-kill attempts, and waitpid on one worker. The child was launched
-        // with posix_spawn rather than Process.Start, so the runtime's SIGCHLD reaper does not own
-        // it and cannot release the PID/PGID between WNOWAIT and cleanup.
-        TerminatePosixGroup (pid);
-
-        return ReapPosixProcess (pid);
-    }
-
     private static int ReapPosixProcess (int pid)
     {
         while (true)
@@ -523,6 +536,95 @@ internal static class ProcessRunner
     }
 
     private sealed record WrapperLaunch (string Executable, IReadOnlyList<string> PrefixArguments);
+
+    private sealed record PosixTestHooks (
+        Action<int>? AfterWaitWithoutReaping,
+        Action? BeforeExternalTermination,
+        Action<bool>? TerminationDecision);
+
+    private sealed class PosixProcessLifecycle
+    {
+        private readonly object _gate = new ();
+        private readonly int _processId;
+        private readonly Action<bool>? _terminationDecision;
+        private bool _reaped;
+
+        internal PosixProcessLifecycle (int processId, Action<bool>? terminationDecision)
+        {
+            _processId = processId;
+            _terminationDecision = terminationDecision;
+        }
+
+        internal int WaitCleanupAndReap (Action<int>? afterWaitWithoutReaping)
+        {
+            WaitForPosixExitWithoutReaping (_processId);
+
+            lock (_gate)
+            {
+                Exception? observerFailure = null;
+
+                try
+                {
+                    afterWaitWithoutReaping?.Invoke (_processId);
+                }
+                catch (Exception ex)
+                {
+                    observerFailure = ex;
+                }
+
+                // Keep waitid, both group-kill attempts, and waitpid under one ownership lock. The
+                // posix_spawn child is not in the runtime's child table, and cancellation must take
+                // this same lock before signaling, so no signal can follow the reaped transition.
+                TerminatePosixGroup (_processId);
+                ObserveTerminationDecision (willSignal: true);
+                int exitCode;
+
+                try
+                {
+                    exitCode = ReapPosixProcess (_processId);
+                }
+                finally
+                {
+                    _reaped = true;
+                }
+
+                if (observerFailure is not null)
+                {
+                    throw observerFailure;
+                }
+
+                return exitCode;
+            }
+        }
+
+        internal void TerminateIfOwned ()
+        {
+            lock (_gate)
+            {
+                if (_reaped)
+                {
+                    ObserveTerminationDecision (willSignal: false);
+
+                    return;
+                }
+
+                TerminatePosixGroup (_processId);
+                ObserveTerminationDecision (willSignal: true);
+            }
+        }
+
+        private void ObserveTerminationDecision (bool willSignal)
+        {
+            try
+            {
+                _terminationDecision?.Invoke (willSignal);
+            }
+            catch
+            {
+                // Test instrumentation must never alter process ownership or cleanup.
+            }
+        }
+    }
 
     private sealed class PosixChildProcess : IDisposable
     {

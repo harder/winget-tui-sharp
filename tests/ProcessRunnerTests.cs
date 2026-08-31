@@ -109,6 +109,67 @@ public sealed class ProcessRunnerTests : IDisposable
         Assert.False (File.Exists (marker));
     }
 
+    [Fact]
+    public async Task RunWithPosixLifecycleBarrier_CancellationDoesNotSignalAfterReap ()
+    {
+        if (OperatingSystem.IsWindows ())
+        {
+            return;
+        }
+
+        FakeCommand command = CreateScript ("reap-race", unix: "exit 0", windows: string.Empty);
+        TaskCompletionSource workerOwnsLifecycle = new (TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim releaseWorker = new ();
+        TaskCompletionSource externalTerminationStarted = new (TaskCreationOptions.RunContinuationsAsynchronously);
+        using CancellationTokenSource cancellation = new ();
+        List<bool> terminationDecisions = [];
+        object decisionsGate = new ();
+        Task<(int Code, string Output)> run = ProcessRunner.RunWithPosixLifecycleBarrierForTestAsync (
+            command.Executable,
+            command.Arguments,
+            Encoding.UTF8,
+            TimeSpan.FromSeconds (30),
+            _ =>
+            {
+                workerOwnsLifecycle.TrySetResult ();
+
+                if (!releaseWorker.Wait (TimeSpan.FromSeconds (10)))
+                {
+                    throw new TimeoutException ("The test did not release POSIX lifecycle cleanup.");
+                }
+            },
+            () => externalTerminationStarted.TrySetResult (),
+            willSignal =>
+            {
+                lock (decisionsGate)
+                {
+                    terminationDecisions.Add (willSignal);
+                }
+            },
+            cancellation.Token);
+
+        try
+        {
+            await workerOwnsLifecycle.Task.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken);
+            Task cancellationTask = Task.Run (cancellation.Cancel, TestContext.Current.CancellationToken);
+            await externalTerminationStarted.Task.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken);
+            releaseWorker.Set ();
+            await cancellationTask;
+        }
+        finally
+        {
+            releaseWorker.Set ();
+        }
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException> (
+            () => run.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken));
+
+        lock (decisionsGate)
+        {
+            Assert.Equal ([true, false], terminationDecisions);
+        }
+    }
+
     [Theory]
     [InlineData ("", "\"\"")]
     [InlineData ("plain", "plain")]
