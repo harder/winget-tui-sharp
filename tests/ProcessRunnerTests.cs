@@ -49,6 +49,66 @@ public sealed class ProcessRunnerTests : IDisposable
         Assert.Equal (payload, output);
     }
 
+    [Fact]
+    public async Task WaitForPosixExitWithoutReaping_KeepsExitedLeaderIdentityUntilGroupCleanup ()
+    {
+        if (OperatingSystem.IsWindows ())
+        {
+            return;
+        }
+
+        FakeCommand command = CreateScript ("waitable-leader", unix: "exit 7", windows: string.Empty);
+        bool observedWaitableLeader = false;
+
+        (int code, _) = await ProcessRunner.RunWithPosixWaitObserverForTestAsync (
+            command.Executable,
+            command.Arguments,
+            Encoding.UTF8,
+            TimeSpan.FromSeconds (10),
+            pid =>
+            {
+                // The runner already observed exit with WNOWAIT. A second WNOWAIT can succeed only
+                // while cleanup still owns the same unreaped leader identity.
+                ProcessRunner.WaitForPosixExitWithoutReapingForTest (pid);
+                observedWaitableLeader = true;
+            },
+            TestContext.Current.CancellationToken);
+
+        Assert.True (observedWaitableLeader);
+        Assert.Equal (7, code);
+    }
+
+    [Fact]
+    public async Task RunWithPosixPreSetSidDelay_CancellationKillsHelperBeforeTargetStarts ()
+    {
+        if (OperatingSystem.IsWindows ())
+        {
+            return;
+        }
+
+        string marker = Path.Combine (_tempDirectory, "pre-setsid-target-started");
+        string escapedMarker = marker.Replace ("'", "'\\''", StringComparison.Ordinal);
+        FakeCommand command = CreateScript (
+            "pre-setsid-cancel",
+            unix: $"printf 'started' > '{escapedMarker}'; sleep 60",
+            windows: string.Empty);
+        using CancellationTokenSource cancellation = new ();
+        Task<(int Code, string Output)> run = ProcessRunner.RunWithPosixPreSetSidDelayForTestAsync (
+            command.Executable,
+            command.Arguments,
+            Encoding.UTF8,
+            TimeSpan.FromSeconds (30),
+            preSetSidDelayMilliseconds: 2000,
+            cancellation.Token);
+
+        await Task.Delay (100, TestContext.Current.CancellationToken);
+        cancellation.Cancel ();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException> (
+            () => run.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken));
+        Assert.False (File.Exists (marker));
+    }
+
     [Theory]
     [InlineData ("", "\"\"")]
     [InlineData ("plain", "plain")]
@@ -372,6 +432,30 @@ public sealed class ProcessRunnerTests : IDisposable
 
     private static bool IsAlive (int pid)
     {
+        if (OperatingSystem.IsLinux ())
+        {
+            try
+            {
+                string stat = File.ReadAllText ($"/proc/{pid}/stat");
+                int commandEnd = stat.LastIndexOf (')');
+
+                // A container test runner may be PID 1 and leave killed orphan descendants as
+                // zombies. They cannot execute or hold pipes/resources, so count them as stopped.
+                if (commandEnd >= 0 && commandEnd + 2 < stat.Length && stat [commandEnd + 2] == 'Z')
+                {
+                    return false;
+                }
+            }
+            catch (FileNotFoundException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+        }
+
         try
         {
             using Process process = Process.GetProcessById (pid);

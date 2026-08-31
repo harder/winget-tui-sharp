@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -17,7 +18,9 @@ internal static class ProcessRunner
 
     private const string PosixExecFlag = "--internal-posix-contained-exec";
     private const int SigKill = 9;
-    private const int NoSuchProcess = 3;
+    private const int InterruptedSystemCall = 4;
+    private const int PosixIdTypePid = 1;
+    private const int PosixWaitExited = 0x00000004;
     private static readonly TimeSpan CleanupTimeout = TimeSpan.FromSeconds (5);
 
     internal static Task<(int Code, string Output)> RunAsync (
@@ -43,31 +46,87 @@ internal static class ProcessRunner
 
         return OperatingSystem.IsWindows ()
                    ? RunWindowsAsync (executable, args, outputEncoding, timeout, cancellationToken)
-                   : RunPosixAsync (executable, args, outputEncoding, timeout, cancellationToken);
+                   : RunPosixAsync (
+                       executable,
+                       args,
+                       outputEncoding,
+                       timeout,
+                       cancellationToken,
+                       preSetSidDelayMilliseconds: 0,
+                       afterWaitWithoutReaping: null);
     }
+
+    internal static Task<(int Code, string Output)> RunWithPosixPreSetSidDelayForTestAsync (
+        string executable,
+        IReadOnlyList<string> args,
+        Encoding outputEncoding,
+        TimeSpan timeout,
+        int preSetSidDelayMilliseconds,
+        CancellationToken cancellationToken)
+        => RunPosixAsync (
+            executable,
+            args,
+            outputEncoding,
+            timeout,
+            cancellationToken,
+            preSetSidDelayMilliseconds,
+            afterWaitWithoutReaping: null);
+
+    internal static Task<(int Code, string Output)> RunWithPosixWaitObserverForTestAsync (
+        string executable,
+        IReadOnlyList<string> args,
+        Encoding outputEncoding,
+        TimeSpan timeout,
+        Action<int> afterWaitWithoutReaping,
+        CancellationToken cancellationToken)
+        => RunPosixAsync (
+            executable,
+            args,
+            outputEncoding,
+            timeout,
+            cancellationToken,
+            preSetSidDelayMilliseconds: 0,
+            afterWaitWithoutReaping);
 
     /// <summary>
     /// POSIX launch helper. It creates a new session and immediately replaces itself with the
     /// target using execvp, so the target keeps the same PID/PGID and no second runtime remains.
     /// stdin/stdout/stderr and exact argv boundaries survive exec unchanged.
+    /// Linux PR_SET_PDEATHSIG is intentionally not used: Linux ties that signal to the particular
+    /// parent thread that created the child, and a managed worker thread may retire while the app
+    /// remains healthy. Normal completion/cancellation/timeout is contained. An uncatchable owner
+    /// death can leave the target/session alive, and a deliberately detached descendant escapes
+    /// normal group cleanup as well.
     /// </summary>
     internal static bool TryExecPosixContainedTarget (string [] args)
     {
-        if (OperatingSystem.IsWindows () || args.Length < 2 || args [0] != PosixExecFlag)
+        if (OperatingSystem.IsWindows ()
+            || args.Length < 3
+            || args [0] != PosixExecFlag
+            || !int.TryParse (args [1], NumberStyles.None, CultureInfo.InvariantCulture, out int preSetSidDelayMilliseconds)
+            || preSetSidDelayMilliseconds < 0)
         {
             return false;
         }
 
-        if (SetSessionId () != Environment.ProcessId)
+        if (preSetSidDelayMilliseconds > 0)
         {
-            Console.Error.WriteLine ($"Could not establish a contained process session: errno {Marshal.GetLastWin32Error ()}.");
+            Thread.Sleep (preSetSidDelayMilliseconds);
+        }
+
+        int sessionId = SetSessionId ();
+        int sessionError = sessionId < 0 ? Marshal.GetLastWin32Error () : 0;
+
+        if (sessionId != Environment.ProcessId)
+        {
+            Console.Error.WriteLine ($"Could not establish a contained process session: errno {sessionError}.");
             Environment.ExitCode = 125;
 
             return true;
         }
 
-        string executable = args [1];
-        string [] targetArgv = [executable, .. args.Skip (2)];
+        string executable = args [2];
+        string [] targetArgv = [executable, .. args.Skip (3)];
         IntPtr argv = IntPtr.Zero;
         IntPtr [] strings = new IntPtr [targetArgv.Length];
 
@@ -149,62 +208,55 @@ internal static class ProcessRunner
     internal static string BuildWindowsCommandLine (string executable, IReadOnlyList<string> args)
         => string.Join (' ', new [] { executable }.Concat (args).Select (QuoteWindowsArgument));
 
+    internal static void WaitForPosixExitWithoutReapingForTest (int pid)
+        => WaitForPosixExitWithoutReaping (pid);
+
     private static async Task<(int Code, string Output)> RunPosixAsync (
         string executable,
         IReadOnlyList<string> args,
         Encoding outputEncoding,
         TimeSpan timeout,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int preSetSidDelayMilliseconds,
+        Action<int>? afterWaitWithoutReaping)
     {
         WrapperLaunch helper = ResolvePosixHelperLaunch ();
-        ProcessStartInfo startInfo = CreateRedirectedStartInfo (helper.Executable, outputEncoding);
+        List<string> helperArguments = [.. helper.PrefixArguments];
+        helperArguments.Add (PosixExecFlag);
+        helperArguments.Add (preSetSidDelayMilliseconds.ToString (CultureInfo.InvariantCulture));
+        helperArguments.Add (executable);
+        helperArguments.AddRange (args);
 
-        foreach (string prefixArgument in helper.PrefixArguments)
-        {
-            startInfo.ArgumentList.Add (prefixArgument);
-        }
-
-        startInfo.ArgumentList.Add (PosixExecFlag);
-        startInfo.ArgumentList.Add (executable);
-
-        foreach (string arg in args)
-        {
-            startInfo.ArgumentList.Add (arg);
-        }
-
-        using Process process = new () { StartInfo = startInfo };
-        process.Start ();
-        int processGroupId = process.Id;
-        Task<string> stdoutTask = DrainBoundedAsync (process.StandardOutput);
-        Task<string> stderrTask = DrainBoundedAsync (process.StandardError);
+        using PosixChildProcess child = PosixChildProcess.Start (helper.Executable, helperArguments, outputEncoding);
+        int processGroupId = child.ProcessId;
+        Task<string> stdoutTask = DrainBoundedAsync (child.StandardOutput);
+        Task<string> stderrTask = DrainBoundedAsync (child.StandardError);
         Task allOutputTask = Task.WhenAll (stdoutTask, stderrTask);
+        Task<int> exitTask = Task.Run (() => WaitCleanupAndReapPosixProcess (processGroupId, afterWaitWithoutReaping));
 
         using CancellationTokenSource deadline = new (timeout);
         using CancellationTokenSource lifetime = CancellationTokenSource.CreateLinkedTokenSource (cancellationToken, deadline.Token);
 
         try
         {
-            await process.WaitForExitAsync (lifetime.Token).ConfigureAwait (false);
-            int exitCode = process.ExitCode;
-
-            // The exec'd target remains the session leader. Kill its group on success too, before
-            // waiting for pipe EOF, so an immediate parent exit cannot orphan a descendant.
-            TerminatePosixGroup (process, processGroupId);
-            await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+            int exitCode = await exitTask.WaitAsync (lifetime.Token).ConfigureAwait (false);
+            await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
 
             return (exitCode, string.Concat (await stdoutTask.ConfigureAwait (false), await stderrTask.ConfigureAwait (false)));
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
-            TerminatePosixGroup (process, processGroupId);
-            await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+            TerminatePosixGroup (processGroupId);
+            await WaitBoundedNoThrowAsync (exitTask, CleanupTimeout).ConfigureAwait (false);
+            await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
             cancellationToken.ThrowIfCancellationRequested ();
             throw ProcessTimeout (executable, args, timeout);
         }
         catch
         {
-            TerminatePosixGroup (process, processGroupId);
-            await FinishDrainAsync (process, allOutputTask).ConfigureAwait (false);
+            TerminatePosixGroup (processGroupId);
+            await WaitBoundedNoThrowAsync (exitTask, CleanupTimeout).ConfigureAwait (false);
+            await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
             throw;
         }
     }
@@ -247,17 +299,6 @@ internal static class ProcessRunner
         }
     }
 
-    private static ProcessStartInfo CreateRedirectedStartInfo (string executable, Encoding encoding) => new ()
-    {
-        FileName = executable,
-        RedirectStandardOutput = true,
-        RedirectStandardError = true,
-        UseShellExecute = false,
-        CreateNoWindow = true,
-        StandardOutputEncoding = encoding,
-        StandardErrorEncoding = encoding
-    };
-
     private static WrapperLaunch ResolvePosixHelperLaunch ()
     {
         string localAppHost = Path.Combine (AppContext.BaseDirectory, "winget-tui-sharp");
@@ -267,19 +308,22 @@ internal static class ProcessRunner
             return new (localAppHost, []);
         }
 
-        string? processPath = Environment.ProcessPath;
-
-        if (!string.IsNullOrEmpty (processPath)
-            && Path.GetFileNameWithoutExtension (processPath).Equals ("winget-tui-sharp", StringComparison.OrdinalIgnoreCase))
-        {
-            return new (processPath, []);
-        }
-
         string assemblyPath = Path.Combine (AppContext.BaseDirectory, "winget-tui-sharp.dll");
 
         if (File.Exists (assemblyPath))
         {
             return new ("dotnet", [assemblyPath]);
+        }
+
+        // Native AOT/single-file apphosts may be renamed by packaging. If no canonical apphost or
+        // framework-dependent DLL exists, the current executable is the only safe self-helper;
+        // Program still requires the private flag before entering exec mode.
+        string? processPath = Environment.ProcessPath;
+
+        if (!string.IsNullOrEmpty (processPath)
+            && !Path.GetFileNameWithoutExtension (processPath).Equals ("dotnet", StringComparison.OrdinalIgnoreCase))
+        {
+            return new (processPath, []);
         }
 
         throw new InvalidOperationException ("Could not locate the POSIX process-containment helper.");
@@ -292,37 +336,96 @@ internal static class ProcessRunner
         return new ($"Process '{executable}{command}' exceeded its {timeout.TotalSeconds:0.###}-second deadline and was terminated.");
     }
 
-    private static void TerminatePosixGroup (Process process, int processGroupId)
+    private static void TerminatePosixGroup (int processGroupId)
     {
-        // The helper PID is freshly allocated and cannot already name another process group. It
-        // calls setsid before exec, and the Process object is retained until this method returns.
-        // If the helper has not reached setsid, group kill returns ESRCH and direct tree-kill is
-        // sufficient because the target cannot have started. Deliberate target setsid is the only
-        // cooperative-contract escape.
+        // Until waitpid runs, the directly spawned child remains waitable and its PID cannot be
+        // reused. After setsid it also reserves the matching PGID through both group attempts. A
+        // target that deliberately creates a different session escapes this cooperative contract.
         bool safeGroup = processGroupId > 1 && processGroupId != GetProcessGroup ();
 
         if (safeGroup)
         {
-            int result = KillProcess (-processGroupId, SigKill);
-            int error = Marshal.GetLastWin32Error ();
-
-            if (result == 0 || error == NoSuchProcess)
-            {
-                TryKillDirectProcess (process);
-
-                return;
-            }
+            KillProcess (-processGroupId, SigKill);
         }
 
-        TryKillDirectProcess (process);
+        // Never query Process.HasExited here: that can reap the leader and release PGID identity.
+        KillProcess (processGroupId, SigKill);
 
-        // Close the only launch race: setsid may complete between the first group probe and the
-        // direct kill. A second group kill is safe because this freshly allocated PID cannot have
-        // named another process group before the helper, and a surviving descendant keeps the
-        // group id reserved after the target exits.
+        // Always retry, including ESRCH. setsid can complete between the first group attempt and
+        // direct PID kill; the unreaped child keeps the leader identity reserved.
         if (safeGroup)
         {
             KillProcess (-processGroupId, SigKill);
+        }
+    }
+
+    private static void WaitForPosixExitWithoutReaping (int pid)
+    {
+        int waitNoWait = OperatingSystem.IsMacOS () ? 0x00000020 : 0x01000000;
+        IntPtr info = Marshal.AllocHGlobal (256);
+
+        try
+        {
+            while (WaitId (PosixIdTypePid, (uint) pid, info, PosixWaitExited | waitNoWait) != 0)
+            {
+                int error = Marshal.GetLastWin32Error ();
+
+                if (error != InterruptedSystemCall)
+                {
+                    throw new Win32Exception (error, $"waitid(WEXITED|WNOWAIT) failed for process {pid}.");
+                }
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal (info);
+        }
+    }
+
+    private static int WaitCleanupAndReapPosixProcess (int pid, Action<int>? afterWaitWithoutReaping)
+    {
+        WaitForPosixExitWithoutReaping (pid);
+
+        try
+        {
+            afterWaitWithoutReaping?.Invoke (pid);
+        }
+        catch
+        {
+            TerminatePosixGroup (pid);
+            ReapPosixProcess (pid);
+            throw;
+        }
+
+        // Keep waitid, both group-kill attempts, and waitpid on one worker. The child was launched
+        // with posix_spawn rather than Process.Start, so the runtime's SIGCHLD reaper does not own
+        // it and cannot release the PID/PGID between WNOWAIT and cleanup.
+        TerminatePosixGroup (pid);
+
+        return ReapPosixProcess (pid);
+    }
+
+    private static int ReapPosixProcess (int pid)
+    {
+        while (true)
+        {
+            int result = WaitPid (pid, out int status, 0);
+
+            if (result == pid)
+            {
+                int signal = status & 0x7f;
+
+                return signal == 0 ? (status >> 8) & 0xff : 128 + signal;
+            }
+
+            int error = Marshal.GetLastWin32Error ();
+
+            if (result < 0 && error == InterruptedSystemCall)
+            {
+                continue;
+            }
+
+            throw new Win32Exception (error, $"waitpid failed for contained process {pid} (result {result}).");
         }
     }
 
@@ -390,6 +493,16 @@ internal static class ProcessRunner
         }
     }
 
+    private static async Task FinishPosixDrainAsync (PosixChildProcess child, Task outputTask)
+    {
+        if (!await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false))
+        {
+            child.StandardOutput.Dispose ();
+            child.StandardError.Dispose ();
+            await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false);
+        }
+    }
+
     private static async Task<bool> WaitBoundedNoThrowAsync (Task task, TimeSpan timeout)
     {
         try
@@ -400,6 +513,7 @@ internal static class ProcessRunner
         }
         catch (Exception ex) when (ex is TimeoutException
                                    or OperationCanceledException
+                                   or Win32Exception
                                    or IOException
                                    or ObjectDisposedException
                                    or InvalidOperationException)
@@ -408,21 +522,256 @@ internal static class ProcessRunner
         }
     }
 
-    private static void TryKillDirectProcess (Process process)
+    private sealed record WrapperLaunch (string Executable, IReadOnlyList<string> PrefixArguments);
+
+    private sealed class PosixChildProcess : IDisposable
     {
-        try
+        private const int FileDescriptorCloseOnExec = 1;
+        private const int DuplicateFileDescriptor = 0;
+        private const int SetFileDescriptorFlags = 2;
+        private const int FirstNonStandardDescriptor = 3;
+        // Darwin stores an opaque pointer here; glibc/musl store a small opaque structure. This
+        // allocation is intentionally larger than the definitions on supported macOS/Linux ABIs.
+        private const int FileActionsStorageBytes = 256;
+
+        private PosixChildProcess (int processId, StreamReader stdout, StreamReader stderr)
         {
-            if (!process.HasExited)
+            ProcessId = processId;
+            StandardOutput = stdout;
+            StandardError = stderr;
+        }
+
+        internal int ProcessId { get; }
+        internal StreamReader StandardOutput { get; }
+        internal StreamReader StandardError { get; }
+
+        internal static PosixChildProcess Start (string executable, IReadOnlyList<string> args, Encoding encoding)
+        {
+            SafeFileHandle? stdoutRead = null;
+            SafeFileHandle? stdoutWrite = null;
+            SafeFileHandle? stderrRead = null;
+            SafeFileHandle? stderrWrite = null;
+            StreamReader? stdoutReader = null;
+            StreamReader? stderrReader = null;
+            IntPtr fileActions = IntPtr.Zero;
+            bool fileActionsInitialized = false;
+            int processId = 0;
+
+            try
             {
-                process.Kill (entireProcessTree: true);
+                CreatePipe (out stdoutRead, out stdoutWrite);
+                CreatePipe (out stderrRead, out stderrWrite);
+                fileActions = Marshal.AllocHGlobal (FileActionsStorageBytes);
+                int actionError = PosixSpawnFileActionsInit (fileActions);
+
+                if (actionError != 0)
+                {
+                    throw new Win32Exception (actionError, "Could not initialize POSIX process file actions.");
+                }
+
+                fileActionsInitialized = true;
+                AddCloseAction (fileActions, stdoutRead);
+                AddCloseAction (fileActions, stderrRead);
+                AddDupAction (fileActions, stdoutWrite, 1);
+                AddDupAction (fileActions, stderrWrite, 2);
+                AddCloseActionUnlessSame (fileActions, stdoutWrite, 1);
+                AddCloseActionUnlessSame (fileActions, stderrWrite, 2);
+
+                using Utf8StringVector argv = new (new [] { executable }.Concat (args));
+                using Utf8StringVector environment = new (
+                    Environment.GetEnvironmentVariables ()
+                               .Cast<DictionaryEntry> ()
+                               .Select (entry => $"{entry.Key}={entry.Value}"));
+                int spawnError = PosixSpawnP (
+                    out processId,
+                    executable,
+                    fileActions,
+                    IntPtr.Zero,
+                    argv.Pointer,
+                    environment.Pointer);
+
+                if (spawnError != 0)
+                {
+                    throw new Win32Exception (spawnError, $"Could not create contained process '{executable}'.");
+                }
+
+                stdoutWrite.Dispose ();
+                stdoutWrite = null;
+                stderrWrite.Dispose ();
+                stderrWrite = null;
+                stdoutReader = new (new FileStream (stdoutRead, FileAccess.Read, 8192, isAsync: false), encoding, false, 8192);
+                stdoutRead = null;
+                stderrReader = new (new FileStream (stderrRead, FileAccess.Read, 8192, isAsync: false), encoding, false, 8192);
+                stderrRead = null;
+                PosixChildProcess result = new (processId, stdoutReader, stderrReader);
+                stdoutReader = null;
+                stderrReader = null;
+
+                return result;
+            }
+            catch
+            {
+                if (processId > 0)
+                {
+                    TerminatePosixGroup (processId);
+                    ReapPosixProcess (processId);
+                }
+
+                stdoutReader?.Dispose ();
+                stderrReader?.Dispose ();
+                throw;
+            }
+            finally
+            {
+                stdoutRead?.Dispose ();
+                stdoutWrite?.Dispose ();
+                stderrRead?.Dispose ();
+                stderrWrite?.Dispose ();
+
+                if (fileActionsInitialized)
+                {
+                    PosixSpawnFileActionsDestroy (fileActions);
+                }
+
+                if (fileActions != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal (fileActions);
+                }
             }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or NotSupportedException)
+
+        public void Dispose ()
         {
+            StandardOutput.Dispose ();
+            StandardError.Dispose ();
+        }
+
+        private static void CreatePipe (out SafeFileHandle read, out SafeFileHandle write)
+        {
+            int [] descriptors = new int [2];
+
+            if (Pipe (descriptors) != 0)
+            {
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not create a redirected POSIX process pipe.");
+            }
+
+            read = new ((IntPtr) descriptors [0], ownsHandle: true);
+            write = new ((IntPtr) descriptors [1], ownsHandle: true);
+
+            try
+            {
+                MoveAboveStandardDescriptors (ref read);
+                MoveAboveStandardDescriptors (ref write);
+                SetCloseOnExec (read);
+            }
+            catch
+            {
+                read.Dispose ();
+                write.Dispose ();
+                throw;
+            }
+        }
+
+        private static void MoveAboveStandardDescriptors (ref SafeFileHandle handle)
+        {
+            if ((long) handle.DangerousGetHandle () >= FirstNonStandardDescriptor)
+            {
+                return;
+            }
+
+            int duplicate = Fcntl (handle, DuplicateFileDescriptor, FirstNonStandardDescriptor);
+
+            if (duplicate < 0)
+            {
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not relocate a POSIX process pipe descriptor.");
+            }
+
+            SafeFileHandle relocated = new ((IntPtr) duplicate, ownsHandle: true);
+            handle.Dispose ();
+            handle = relocated;
+        }
+
+        private static void SetCloseOnExec (SafeFileHandle handle)
+        {
+            if (Fcntl (handle, SetFileDescriptorFlags, FileDescriptorCloseOnExec) != 0)
+            {
+                throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not protect a POSIX process pipe from inheritance.");
+            }
+        }
+
+        private static void AddCloseAction (IntPtr actions, SafeFileHandle handle)
+            => ThrowIfPosixError (
+                PosixSpawnFileActionsAddClose (actions, checked ((int) handle.DangerousGetHandle ())),
+                "Could not configure a POSIX pipe close action.");
+
+        private static void AddCloseActionUnlessSame (IntPtr actions, SafeFileHandle handle, int descriptor)
+        {
+            if (handle.DangerousGetHandle () != (IntPtr) descriptor)
+            {
+                AddCloseAction (actions, handle);
+            }
+        }
+
+        private static void AddDupAction (IntPtr actions, SafeFileHandle handle, int descriptor)
+            => ThrowIfPosixError (
+                PosixSpawnFileActionsAddDup2 (actions, checked ((int) handle.DangerousGetHandle ()), descriptor),
+                "Could not configure a POSIX pipe duplication action.");
+
+        private static void ThrowIfPosixError (int error, string message)
+        {
+            if (error != 0)
+            {
+                throw new Win32Exception (error, message);
+            }
         }
     }
 
-    private sealed record WrapperLaunch (string Executable, IReadOnlyList<string> PrefixArguments);
+    private sealed class Utf8StringVector : IDisposable
+    {
+        private readonly IntPtr [] _strings;
+
+        internal Utf8StringVector (IEnumerable<string> values)
+        {
+            string [] source = [.. values];
+            _strings = new IntPtr [source.Length];
+            Pointer = Marshal.AllocHGlobal ((source.Length + 1) * IntPtr.Size);
+
+            try
+            {
+                for (int i = 0; i < source.Length; i++)
+                {
+                    _strings [i] = Marshal.StringToCoTaskMemUTF8 (source [i]);
+                    Marshal.WriteIntPtr (Pointer, i * IntPtr.Size, _strings [i]);
+                }
+
+                Marshal.WriteIntPtr (Pointer, source.Length * IntPtr.Size, IntPtr.Zero);
+            }
+            catch
+            {
+                Dispose ();
+                throw;
+            }
+        }
+
+        internal IntPtr Pointer { get; private set; }
+
+        public void Dispose ()
+        {
+            foreach (IntPtr value in _strings)
+            {
+                if (value != IntPtr.Zero)
+                {
+                    Marshal.FreeCoTaskMem (value);
+                }
+            }
+
+            if (Pointer != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal (Pointer);
+                Pointer = IntPtr.Zero;
+            }
+        }
+    }
 
     private sealed class WindowsChildProcess : IDisposable
     {
@@ -440,11 +789,20 @@ internal static class ProcessRunner
         private const int StdInputHandle = -10;
 
         private readonly WindowsJob _job;
+        // Process owns this SafeHandle. Retaining the reference documents and guarantees that the
+        // managed handle acquired while the native process handle was live stays rooted.
+        private readonly SafeProcessHandle _managedProcessHandle;
         private bool _terminated;
 
-        private WindowsChildProcess (Process process, StreamReader stdout, StreamReader stderr, WindowsJob job)
+        private WindowsChildProcess (
+            Process process,
+            SafeProcessHandle managedProcessHandle,
+            StreamReader stdout,
+            StreamReader stderr,
+            WindowsJob job)
         {
             Process = process;
+            _managedProcessHandle = managedProcessHandle;
             StandardOutput = stdout;
             StandardError = stderr;
             _job = job;
@@ -472,8 +830,10 @@ internal static class ProcessRunner
             SafeFileHandle? nativeProcess = null;
             SafeFileHandle? nativeThread = null;
             IntPtr attributeList = IntPtr.Zero;
+            bool attributeListInitialized = false;
             IntPtr inheritedHandles = IntPtr.Zero;
             Process? process = null;
+            SafeProcessHandle? managedProcessHandle = null;
             StreamReader? stdoutReader = null;
             StreamReader? stderrReader = null;
 
@@ -491,6 +851,8 @@ internal static class ProcessRunner
                 {
                     throw new Win32Exception (Marshal.GetLastWin32Error (), "Could not initialize the process handle allow-list.");
                 }
+
+                attributeListInitialized = true;
 
                 IntPtr [] handles = [stdin.DangerousGetHandle (), stdoutWrite.DangerousGetHandle (), stderrWrite.DangerousGetHandle ()];
                 inheritedHandles = Marshal.AllocHGlobal (handles.Length * IntPtr.Size);
@@ -540,6 +902,12 @@ internal static class ProcessRunner
                 nativeThread = new (processInformation.Thread, ownsHandle: true);
                 job.Assign (nativeProcess);
                 process = Process.GetProcessById ((int) processInformation.ProcessId);
+                managedProcessHandle = process.SafeHandle;
+
+                if (managedProcessHandle.IsInvalid || managedProcessHandle.IsClosed)
+                {
+                    throw new InvalidOperationException ("Could not retain the contained process handle.");
+                }
 
                 if (ResumeThread (nativeThread) == uint.MaxValue)
                 {
@@ -554,8 +922,9 @@ internal static class ProcessRunner
                 stdoutRead = null;
                 stderrReader = new (new FileStream (stderrRead, FileAccess.Read, 8192, isAsync: false), encoding, false, 8192);
                 stderrRead = null;
-                WindowsChildProcess result = new (process, stdoutReader, stderrReader, job);
+                WindowsChildProcess result = new (process, managedProcessHandle, stdoutReader, stderrReader, job);
                 process = null;
+                managedProcessHandle = null;
                 stdoutReader = null;
                 stderrReader = null;
 
@@ -584,9 +953,13 @@ internal static class ProcessRunner
                 stderrRead?.Dispose ();
                 stderrWrite?.Dispose ();
 
-                if (attributeList != IntPtr.Zero)
+                if (attributeListInitialized)
                 {
                     DeleteProcThreadAttributeList (attributeList);
+                }
+
+                if (attributeList != IntPtr.Zero)
+                {
                     Marshal.FreeHGlobal (attributeList);
                 }
 
@@ -614,6 +987,7 @@ internal static class ProcessRunner
             StandardOutput.Dispose ();
             StandardError.Dispose ();
             Process.Dispose ();
+            GC.KeepAlive (_managedProcessHandle);
         }
 
         private static void CreatePipePair (
@@ -943,4 +1317,37 @@ internal static class ProcessRunner
 
     [DllImport ("libc", EntryPoint = "execvp", SetLastError = true)]
     private static extern int ExecVp ([MarshalAs (UnmanagedType.LPUTF8Str)] string file, IntPtr argv);
+
+    [DllImport ("libc", EntryPoint = "waitid", SetLastError = true)]
+    private static extern int WaitId (int idType, uint id, IntPtr info, int options);
+
+    [DllImport ("libc", EntryPoint = "waitpid", SetLastError = true)]
+    private static extern int WaitPid (int pid, out int status, int options);
+
+    [DllImport ("libc", EntryPoint = "pipe", SetLastError = true)]
+    private static extern int Pipe ([Out] int [] descriptors);
+
+    [DllImport ("libc", EntryPoint = "fcntl", SetLastError = true)]
+    private static extern int Fcntl (SafeFileHandle descriptor, int command, int argument);
+
+    [DllImport ("libc", EntryPoint = "posix_spawn_file_actions_init")]
+    private static extern int PosixSpawnFileActionsInit (IntPtr actions);
+
+    [DllImport ("libc", EntryPoint = "posix_spawn_file_actions_destroy")]
+    private static extern int PosixSpawnFileActionsDestroy (IntPtr actions);
+
+    [DllImport ("libc", EntryPoint = "posix_spawn_file_actions_addclose")]
+    private static extern int PosixSpawnFileActionsAddClose (IntPtr actions, int descriptor);
+
+    [DllImport ("libc", EntryPoint = "posix_spawn_file_actions_adddup2")]
+    private static extern int PosixSpawnFileActionsAddDup2 (IntPtr actions, int descriptor, int newDescriptor);
+
+    [DllImport ("libc", EntryPoint = "posix_spawnp")]
+    private static extern int PosixSpawnP (
+        out int pid,
+        [MarshalAs (UnmanagedType.LPUTF8Str)] string path,
+        IntPtr fileActions,
+        IntPtr attributes,
+        IntPtr arguments,
+        IntPtr environment);
 }
