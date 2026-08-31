@@ -370,16 +370,28 @@ public sealed class ProcessRunnerTests : IDisposable
     public async Task RunWithCodeAsync_SuccessKillsPipeHoldingDescendantAfterParentExitedImmediately ()
     {
         string pidFile = Path.Combine (_tempDirectory, "success-orphan-pipe-child.pid");
+        string releaseFile = pidFile + ".release";
         FakeCommand command = CreateOrphaningScript ("success-orphan-pipe", pidFile, detachStandardHandles: false);
-
-        (int code, _) = await CliBackend.RunWithCodeAsync (
+        Task<(int Code, string Output)> run = CliBackend.RunWithCodeAsync (
             command.Arguments,
             command.Executable,
             TimeSpan.FromSeconds (10),
             TestContext.Current.CancellationToken);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        TrackChild (childPid);
+        int code;
+
+        try
+        {
+            Assert.True (TrackChild (childPid), "The descendant exited before its stable process identity was captured.");
+            File.WriteAllText (releaseFile, "release");
+            (code, _) = await run;
+        }
+        finally
+        {
+            File.WriteAllText (releaseFile, "release");
+        }
+
         Assert.Equal (0, code);
         await AssertProcessStopsAsync (childPid);
     }
@@ -388,16 +400,28 @@ public sealed class ProcessRunnerTests : IDisposable
     public async Task RunWithCodeAsync_SuccessKillsDetachedDescendantThatClosedPipes ()
     {
         string pidFile = Path.Combine (_tempDirectory, "orphan-detached-child.pid");
+        string releaseFile = pidFile + ".release";
         FakeCommand command = CreateOrphaningScript ("orphan-detached", pidFile, detachStandardHandles: true);
-
-        (int code, _) = await CliBackend.RunWithCodeAsync (
+        Task<(int Code, string Output)> run = CliBackend.RunWithCodeAsync (
             command.Arguments,
             command.Executable,
             TimeSpan.FromSeconds (10),
             TestContext.Current.CancellationToken);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        TrackChild (childPid);
+        int code;
+
+        try
+        {
+            Assert.True (TrackChild (childPid), "The descendant exited before its stable process identity was captured.");
+            File.WriteAllText (releaseFile, "release");
+            (code, _) = await run;
+        }
+        finally
+        {
+            File.WriteAllText (releaseFile, "release");
+        }
+
         Assert.Equal (0, code);
         await AssertProcessStopsAsync (childPid);
     }
@@ -461,6 +485,8 @@ public sealed class ProcessRunnerTests : IDisposable
     {
         string escapedUnixPidFile = pidFile.Replace ("'", "'\\''", StringComparison.Ordinal);
         string escapedPowerShellPidFile = pidFile.Replace ("'", "''", StringComparison.Ordinal);
+        string escapedUnixReleaseFile = (pidFile + ".release").Replace ("'", "'\\''", StringComparison.Ordinal);
+        string escapedPowerShellReleaseFile = (pidFile + ".release").Replace ("'", "''", StringComparison.Ordinal);
         string unixRedirection = detachStandardHandles ? " >/dev/null 2>&1" : string.Empty;
         string windowsRedirection = detachStandardHandles
                                         ? $" -RedirectStandardOutput '{escapedPowerShellPidFile}.out' -RedirectStandardError '{escapedPowerShellPidFile}.err'"
@@ -468,10 +494,11 @@ public sealed class ProcessRunnerTests : IDisposable
 
         return CreateScript (
             name,
-            unix: $"sleep 60{unixRedirection} & child=$!; printf '%s' \"$child\" > '{escapedUnixPidFile}'; exit 0",
+            unix: $"sleep 60{unixRedirection} & child=$!; printf '%s' \"$child\" > '{escapedUnixPidFile}'; "
+                  + $"while [ ! -f '{escapedUnixReleaseFile}' ]; do sleep 0.01; done; exit 0",
             windows: $"$childProcess = Start-Process pwsh -ArgumentList '-NoProfile','-Command','Start-Sleep 60' -PassThru{windowsRedirection}; "
                      + $"[IO.File]::WriteAllText('{escapedPowerShellPidFile}', $childProcess.Id.ToString([CultureInfo]::InvariantCulture)); "
-                     + "exit 0");
+                     + $"while (!(Test-Path -LiteralPath '{escapedPowerShellReleaseFile}')) {{ Start-Sleep -Milliseconds 10 }}; exit 0");
     }
 
     private FakeCommand CreateNestedOrphanWithLongRunningRoot (string name, string pidFile)
@@ -569,20 +596,26 @@ public sealed class ProcessRunnerTests : IDisposable
         throw new TimeoutException ($"The fake process did not publish '{path}'.");
     }
 
-    private void TrackChild (int pid)
+    private bool TrackChild (int pid)
     {
         try
         {
             using Process process = Process.GetProcessById (pid);
             _childProcesses [pid] = new (pid, process.StartTime.ToUniversalTime ());
+
+            return true;
         }
         catch (ArgumentException)
         {
             // It already stopped; never retain a bare PID that could later be reused.
+
+            return false;
         }
         catch (InvalidOperationException)
         {
             // It exited while its stable start identity was being captured.
+
+            return false;
         }
     }
 
