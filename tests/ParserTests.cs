@@ -12,6 +12,25 @@ namespace WingetTuiSharp.Tests;
 /// </summary>
 public class ParserTests
 {
+    [Fact]
+    public void ParseSearchTable_CapsRowsAtSharedSearchLimit ()
+    {
+        StringBuilder output = new ();
+        output.AppendLine ($"{"Name",-16}{"Id",-24}{"Version",-10}Source");
+        output.AppendLine (new string ('-', 58));
+
+        for (int i = 0; i < AppState.SearchResultLimit + 25; i++)
+        {
+            output.AppendLine ($"{$"Package{i}",-16}{$"Example.Package{i}",-24}{"1.0",-10}winget");
+        }
+
+        IReadOnlyList<Package> rows = CliBackend.ParseSearchTable (output.ToString ());
+
+        Assert.Equal (AppState.SearchResultLimit, rows.Count);
+        Assert.Equal ("Example.Package0", rows [0].Id);
+        Assert.Equal ($"Example.Package{AppState.SearchResultLimit - 1}", rows [^1].Id);
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // ParseTable — the core table parser
     // ──────────────────────────────────────────────────────────────────────

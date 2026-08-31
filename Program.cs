@@ -199,22 +199,11 @@ static bool IsWingetAvailable ()
 {
     try
     {
-        using System.Diagnostics.Process p = new ()
-        {
-            StartInfo = new ()
-            {
-                FileName = "winget",
-                Arguments = "--version",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        p.Start ();
-        p.WaitForExit (1500);
+        (int code, _) = CliBackend.ProbeWingetAsync (TimeSpan.FromMilliseconds (1500), CancellationToken.None)
+                                  .GetAwaiter ()
+                                  .GetResult ();
 
-        return p.HasExited && p.ExitCode == 0;
+        return code == 0;
     }
     catch
     {

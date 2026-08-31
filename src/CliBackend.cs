@@ -1,7 +1,5 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
-using Process = System.Diagnostics.Process;
-using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
 
 namespace WingetTuiSharp;
 
@@ -16,7 +14,7 @@ public sealed partial class CliBackend : IBackend
     {
         string output = await RunAsync (SearchArgs (query, source), ct);
 
-        return ParseTable (output, hasAvailable: false);
+        return ParseSearchTable (output);
     }
 
     public async Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
@@ -45,6 +43,10 @@ public sealed partial class CliBackend : IBackend
             IReadOnlyList<string> names = ParseSourceNames (output);
 
             return names.Count > 0 ? names : ["winget", "msstore"];
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -324,6 +326,10 @@ public sealed partial class CliBackend : IBackend
 
             return string.IsNullOrEmpty (version) ? "CLI · winget" : $"CLI · winget {version}";
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch
         {
             return "CLI · winget";
@@ -527,38 +533,33 @@ public sealed partial class CliBackend : IBackend
         return names;
     }
 
-    public static async Task<(int Code, string Output)> RunWithCodeAsync (IReadOnlyList<string> args, CancellationToken ct)
+    public static Task<(int Code, string Output)> RunWithCodeAsync (IReadOnlyList<string> args, CancellationToken ct)
+        => RunWithCodeAsync (args, "winget", CommandTimeout (args), ct);
+
+    /// <summary>
+    /// Test/startup seam for selecting the executable and deadline. Production callers use the
+    /// public overload above, which remains hardcoded to winget.
+    /// </summary>
+    internal static Task<(int Code, string Output)> RunWithCodeAsync (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        CancellationToken ct)
+        => ProcessRunner.RunAsync (executable, args, ResolveEncoding (), timeout, ct);
+
+    internal static Task<(int Code, string Output)> ProbeWingetAsync (TimeSpan timeout, CancellationToken ct)
+        => RunWithCodeAsync (["--version"], "winget", timeout, ct);
+
+    private static TimeSpan CommandTimeout (IReadOnlyList<string> args)
     {
-        ProcessStartInfo psi = new ()
-        {
-            FileName = "winget",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
+        string command = args.Count > 0 ? args [0] : string.Empty;
 
-            // Don't force UTF-8. Modern winget on a UTF-8 codepage (chcp 65001) emits UTF-8;
-            // on the default English Windows codepage it emits the active OEM codepage. Letting
-            // .NET pick `Console.OutputEncoding` matches what the user would see if they ran
-            // winget in the same shell. Override via WINGETTUI_ENCODING if it's wrong.
-            StandardOutputEncoding = ResolveEncoding ()
-        };
+        bool isMutation = command is "install" or "download" or "uninstall" or "upgrade"
+                          || command == "pin" && (args.Count < 2 || args [1] != "list");
 
-        foreach (string a in args)
-        {
-            psi.ArgumentList.Add (a);
-        }
-
-        using Process p = new () { StartInfo = psi };
-        p.Start ();
-
-        Task<string> stdout = p.StandardOutput.ReadToEndAsync (ct);
-        Task<string> stderr = p.StandardError.ReadToEndAsync (ct);
-        await p.WaitForExitAsync (ct);
-
-        string combined = await stdout + await stderr;
-
-        return (p.ExitCode, combined);
+        return isMutation
+                   ? TimeSpan.FromMinutes (30)
+                   : TimeSpan.FromMinutes (2);
     }
 
     private static Encoding ResolveEncoding ()
@@ -588,6 +589,9 @@ public sealed partial class CliBackend : IBackend
     /// which filter caused each skipped row. Used by Program.cs --dump.
     /// </summary>
     public static IReadOnlyList<Package> ParseTableTraced (string output, bool hasAvailable, TextWriter trace)
+        => ParseTableTraced (output, hasAvailable, trace, int.MaxValue);
+
+    private static IReadOnlyList<Package> ParseTableTraced (string output, bool hasAvailable, TextWriter trace, int maxRows)
     {
         output = StripAnsi (output);
         string [] lines = SplitLines (output);
@@ -605,7 +609,16 @@ public sealed partial class CliBackend : IBackend
 
         while (nextTableStart >= 0 && nextTableStart < lines.Length)
         {
-            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, out int afterFooter);
+            int remaining = maxRows - rows.Count;
+
+            if (remaining <= 0)
+            {
+                trace.WriteLine ($"[parse] stopped at configured row limit ({maxRows})");
+
+                break;
+            }
+
+            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, remaining, out int afterFooter);
 
             if (tableRows.Count > 0)
             {
@@ -628,7 +641,13 @@ public sealed partial class CliBackend : IBackend
     /// extracted and, via <paramref name="nextLineAfterFooter"/>, the line index immediately
     /// after the footer (or <c>-1</c> if no footer was encountered).
     /// </summary>
-    private static List<Package> ParseOneTable (string [] lines, int startIdx, bool hasAvailable, TextWriter trace, out int nextLineAfterFooter)
+    private static List<Package> ParseOneTable (
+        string [] lines,
+        int startIdx,
+        bool hasAvailable,
+        TextWriter trace,
+        int maxRows,
+        out int nextLineAfterFooter)
     {
         nextLineAfterFooter = -1;
         int sepIdx = -1;
@@ -734,6 +753,13 @@ public sealed partial class CliBackend : IBackend
                 AvailableVersion = hasAvailable && !string.IsNullOrWhiteSpace (available) ? available.Trim () : null,
                 Source = source.Trim ()
             });
+
+            if (rows.Count >= maxRows)
+            {
+                trace.WriteLine ($"[parse] stopped table at configured row limit ({maxRows})");
+
+                break;
+            }
         }
 
         return rows;
@@ -934,6 +960,9 @@ public sealed partial class CliBackend : IBackend
     /// column boundaries. Stops at footer lines like "N upgrades available".
     /// </summary>
     public static IReadOnlyList<Package> ParseTable (string output, bool hasAvailable) => ParseTableTraced (output, hasAvailable, TextWriter.Null);
+
+    internal static IReadOnlyList<Package> ParseSearchTable (string output)
+        => ParseTableTraced (output, hasAvailable: false, TextWriter.Null, AppState.SearchResultLimit);
 
     private static List<(string Name, int Start)> ParseHeader (string header)
     {
