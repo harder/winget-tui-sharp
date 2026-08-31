@@ -14,6 +14,7 @@ internal static class ProcessRunner
 {
     internal const int MaxCapturedCharactersPerStream = 1024 * 1024;
     internal const string TruncationMarker = "\n...[output truncated]...\n";
+    internal const string DrainIncompleteMarker = "\n...[output drain incomplete]...\n";
     internal static readonly int MaxCombinedCapturedCharacters = 2 * (MaxCapturedCharactersPerStream + TruncationMarker.Length);
 
     private const string PosixExecFlag = "--internal-posix-contained-exec";
@@ -86,7 +87,7 @@ internal static class ProcessRunner
             timeout,
             cancellationToken,
             preSetSidDelayMilliseconds: 0,
-            new (afterWaitWithoutReaping, null, null));
+            new (afterWaitWithoutReaping, null, null, null));
 
     internal static Task<(int Code, string Output)> RunWithPosixLifecycleBarrierForTestAsync (
         string executable,
@@ -104,7 +105,23 @@ internal static class ProcessRunner
             timeout,
             cancellationToken,
             preSetSidDelayMilliseconds: 0,
-            new (afterWaitWithoutReaping, beforeExternalTermination, terminationDecision));
+            new (afterWaitWithoutReaping, beforeExternalTermination, terminationDecision, null));
+
+    internal static Task<(int Code, string Output)> RunWithPosixLaunchBarrierForTestAsync (
+        string executable,
+        IReadOnlyList<string> args,
+        Encoding outputEncoding,
+        TimeSpan timeout,
+        Action afterPipesCreatedBeforeCloseOnExec,
+        CancellationToken cancellationToken)
+        => RunPosixAsync (
+            executable,
+            args,
+            outputEncoding,
+            timeout,
+            cancellationToken,
+            preSetSidDelayMilliseconds: 0,
+            new (null, null, null, afterPipesCreatedBeforeCloseOnExec));
 
     /// <summary>
     /// POSIX launch helper. It creates a new session and immediately replaces itself with the
@@ -245,7 +262,11 @@ internal static class ProcessRunner
         helperArguments.Add (executable);
         helperArguments.AddRange (args);
 
-        using PosixChildProcess child = PosixChildProcess.Start (helper.Executable, helperArguments, outputEncoding);
+        using PosixChildProcess child = PosixChildProcess.Start (
+            helper.Executable,
+            helperArguments,
+            outputEncoding,
+            testHooks?.AfterPipesCreatedBeforeCloseOnExec);
         int processGroupId = child.ProcessId;
         Task<string> stdoutTask = DrainBoundedAsync (child.StandardOutput);
         Task<string> stderrTask = DrainBoundedAsync (child.StandardError);
@@ -277,22 +298,42 @@ internal static class ProcessRunner
         try
         {
             int exitCode = await exitTask.WaitAsync (lifetime.Token).ConfigureAwait (false);
-            await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
+            await FinishDrainAsync (
+                    null,
+                    child.StandardOutput,
+                    child.StandardError,
+                    allOutputTask,
+                    CleanupTimeout)
+                .ConfigureAwait (false);
 
-            return (exitCode, string.Concat (await stdoutTask.ConfigureAwait (false), await stderrTask.ConfigureAwait (false)));
+            return (exitCode, CombineCompletedOutput (stdoutTask, stderrTask));
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
-            await WaitBoundedNoThrowAsync (exitTask, CleanupTimeout).ConfigureAwait (false);
-            await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
+            long cleanupStarted = Stopwatch.GetTimestamp ();
+            await WaitBoundedNoThrowAsync (exitTask, RemainingCleanupTime (cleanupStarted, CleanupTimeout)).ConfigureAwait (false);
+            await FinishDrainAsync (
+                    null,
+                    child.StandardOutput,
+                    child.StandardError,
+                    allOutputTask,
+                    RemainingCleanupTime (cleanupStarted, CleanupTimeout))
+                .ConfigureAwait (false);
             cancellationToken.ThrowIfCancellationRequested ();
             throw ProcessTimeout (executable, args, timeout);
         }
         catch
         {
+            long cleanupStarted = Stopwatch.GetTimestamp ();
             lifecycle.TerminateIfOwned ();
-            await WaitBoundedNoThrowAsync (exitTask, CleanupTimeout).ConfigureAwait (false);
-            await FinishPosixDrainAsync (child, allOutputTask).ConfigureAwait (false);
+            await WaitBoundedNoThrowAsync (exitTask, RemainingCleanupTime (cleanupStarted, CleanupTimeout)).ConfigureAwait (false);
+            await FinishDrainAsync (
+                    null,
+                    child.StandardOutput,
+                    child.StandardError,
+                    allOutputTask,
+                    RemainingCleanupTime (cleanupStarted, CleanupTimeout))
+                .ConfigureAwait (false);
             throw;
         }
     }
@@ -316,21 +357,39 @@ internal static class ProcessRunner
             await child.Process.WaitForExitAsync (lifetime.Token).ConfigureAwait (false);
             int exitCode = child.Process.ExitCode;
             child.TerminateJob ();
-            await FinishDrainAsync (child.Process, allOutputTask).ConfigureAwait (false);
+            await FinishDrainAsync (
+                    child.Process,
+                    child.StandardOutput,
+                    child.StandardError,
+                    allOutputTask,
+                    CleanupTimeout)
+                .ConfigureAwait (false);
 
-            return (exitCode, string.Concat (await stdoutTask.ConfigureAwait (false), await stderrTask.ConfigureAwait (false)));
+            return (exitCode, CombineCompletedOutput (stdoutTask, stderrTask));
         }
         catch (OperationCanceledException) when (lifetime.IsCancellationRequested)
         {
             child.TerminateJob ();
-            await FinishDrainAsync (child.Process, allOutputTask).ConfigureAwait (false);
+            await FinishDrainAsync (
+                    child.Process,
+                    child.StandardOutput,
+                    child.StandardError,
+                    allOutputTask,
+                    CleanupTimeout)
+                .ConfigureAwait (false);
             cancellationToken.ThrowIfCancellationRequested ();
             throw ProcessTimeout (executable, args, timeout);
         }
         catch
         {
             child.TerminateJob ();
-            await FinishDrainAsync (child.Process, allOutputTask).ConfigureAwait (false);
+            await FinishDrainAsync (
+                    child.Process,
+                    child.StandardOutput,
+                    child.StandardError,
+                    allOutputTask,
+                    CleanupTimeout)
+                .ConfigureAwait (false);
             throw;
         }
     }
@@ -487,32 +546,62 @@ internal static class ProcessRunner
         }
     }
 
-    private static async Task FinishDrainAsync (Process process, Task outputTask)
+    internal static Task<bool> FinishDrainForTestAsync (
+        StreamReader stdout,
+        StreamReader stderr,
+        Task outputTask,
+        TimeSpan timeout)
+        => FinishDrainAsync (null, stdout, stderr, outputTask, timeout);
+
+    private static async Task<bool> FinishDrainAsync (
+        Process? process,
+        StreamReader stdout,
+        StreamReader stderr,
+        Task outputTask,
+        TimeSpan timeout)
     {
-        await WaitBoundedNoThrowAsync (process.WaitForExitAsync (), CleanupTimeout).ConfigureAwait (false);
+        long started = Stopwatch.GetTimestamp ();
 
-        if (!await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false))
+        if (process is not null)
         {
-            try
-            {
-                process.StandardOutput.Dispose ();
-                process.StandardError.Dispose ();
-            }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
-            {
-            }
-
-            await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false);
+            await WaitBoundedNoThrowAsync (process.WaitForExitAsync (), RemainingCleanupTime (started, timeout)).ConfigureAwait (false);
         }
+
+        await WaitBoundedNoThrowAsync (outputTask, RemainingCleanupTime (started, timeout)).ConfigureAwait (false);
+
+        if (!outputTask.IsCompleted)
+        {
+            TryDisposeReader (stdout);
+            TryDisposeReader (stderr);
+            await WaitBoundedNoThrowAsync (outputTask, RemainingCleanupTime (started, timeout)).ConfigureAwait (false);
+        }
+
+        return outputTask.IsCompleted;
     }
 
-    private static async Task FinishPosixDrainAsync (PosixChildProcess child, Task outputTask)
+    private static string CombineCompletedOutput (Task<string> stdoutTask, Task<string> stderrTask)
     {
-        if (!await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false))
+        string stdout = stdoutTask.IsCompletedSuccessfully ? stdoutTask.Result : DrainIncompleteMarker;
+        string stderr = stderrTask.IsCompletedSuccessfully ? stderrTask.Result : DrainIncompleteMarker;
+
+        return string.Concat (stdout, stderr);
+    }
+
+    private static TimeSpan RemainingCleanupTime (long started, TimeSpan timeout)
+    {
+        TimeSpan remaining = timeout - Stopwatch.GetElapsedTime (started);
+
+        return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+    }
+
+    private static void TryDisposeReader (StreamReader reader)
+    {
+        try
         {
-            child.StandardOutput.Dispose ();
-            child.StandardError.Dispose ();
-            await WaitBoundedNoThrowAsync (outputTask, CleanupTimeout).ConfigureAwait (false);
+            reader.Dispose ();
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or InvalidOperationException)
+        {
         }
     }
 
@@ -524,12 +613,7 @@ internal static class ProcessRunner
 
             return true;
         }
-        catch (Exception ex) when (ex is TimeoutException
-                                   or OperationCanceledException
-                                   or Win32Exception
-                                   or IOException
-                                   or ObjectDisposedException
-                                   or InvalidOperationException)
+        catch (Exception)
         {
             return task.IsCompleted;
         }
@@ -540,7 +624,8 @@ internal static class ProcessRunner
     private sealed record PosixTestHooks (
         Action<int>? AfterWaitWithoutReaping,
         Action? BeforeExternalTermination,
-        Action<bool>? TerminationDecision);
+        Action<bool>? TerminationDecision,
+        Action? AfterPipesCreatedBeforeCloseOnExec);
 
     private sealed class PosixProcessLifecycle
     {
@@ -628,6 +713,7 @@ internal static class ProcessRunner
 
     private sealed class PosixChildProcess : IDisposable
     {
+        private static readonly object LaunchGate = new ();
         private const int FileDescriptorCloseOnExec = 1;
         private const int DuplicateFileDescriptor = 0;
         private const int SetFileDescriptorFlags = 2;
@@ -647,7 +733,23 @@ internal static class ProcessRunner
         internal StreamReader StandardOutput { get; }
         internal StreamReader StandardError { get; }
 
-        internal static PosixChildProcess Start (string executable, IReadOnlyList<string> args, Encoding encoding)
+        internal static PosixChildProcess Start (
+            string executable,
+            IReadOnlyList<string> args,
+            Encoding encoding,
+            Action? afterPipesCreatedBeforeCloseOnExec)
+        {
+            lock (LaunchGate)
+            {
+                return StartLocked (executable, args, encoding, afterPipesCreatedBeforeCloseOnExec);
+            }
+        }
+
+        private static PosixChildProcess StartLocked (
+            string executable,
+            IReadOnlyList<string> args,
+            Encoding encoding,
+            Action? afterPipesCreatedBeforeCloseOnExec)
         {
             SafeFileHandle? stdoutRead = null;
             SafeFileHandle? stdoutWrite = null;
@@ -663,6 +765,11 @@ internal static class ProcessRunner
             {
                 CreatePipe (out stdoutRead, out stdoutWrite);
                 CreatePipe (out stderrRead, out stderrWrite);
+                afterPipesCreatedBeforeCloseOnExec?.Invoke ();
+                SetCloseOnExec (stdoutRead);
+                SetCloseOnExec (stdoutWrite);
+                SetCloseOnExec (stderrRead);
+                SetCloseOnExec (stderrWrite);
                 fileActions = Marshal.AllocHGlobal (FileActionsStorageBytes);
                 int actionError = PosixSpawnFileActionsInit (fileActions);
 
@@ -764,7 +871,6 @@ internal static class ProcessRunner
             {
                 MoveAboveStandardDescriptors (ref read);
                 MoveAboveStandardDescriptors (ref write);
-                SetCloseOnExec (read);
             }
             catch
             {

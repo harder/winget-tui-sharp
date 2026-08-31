@@ -7,7 +7,7 @@ namespace WingetTuiSharp.Tests;
 public sealed class ProcessRunnerTests : IDisposable
 {
     private readonly string _tempDirectory = Path.Combine (Path.GetTempPath (), $"winget-tui-process-tests-{Guid.NewGuid ():N}");
-    private readonly List<int> _childProcessIds = [];
+    private readonly Dictionary<int, TrackedProcess> _childProcesses = [];
 
     public ProcessRunnerTests () => Directory.CreateDirectory (_tempDirectory);
 
@@ -170,6 +170,101 @@ public sealed class ProcessRunnerTests : IDisposable
         }
     }
 
+    [Fact]
+    public async Task ConcurrentPosixLaunch_DoesNotStartSecondTargetOrCoupleFirstPipeEof ()
+    {
+        if (OperatingSystem.IsWindows ())
+        {
+            return;
+        }
+
+        FakeCommand firstCommand = CreateScript ("launch-a", unix: "printf 'first-output'", windows: string.Empty);
+        string secondMarker = Path.Combine (_tempDirectory, "launch-b-started");
+        string escapedMarker = secondMarker.Replace ("'", "'\\''", StringComparison.Ordinal);
+        FakeCommand secondCommand = CreateScript (
+            "launch-b",
+            unix: $"printf 'started' > '{escapedMarker}'; sleep 60",
+            windows: string.Empty);
+        TaskCompletionSource firstPipesCreated = new (TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim releaseFirstLaunch = new ();
+        using CancellationTokenSource secondCancellation = new ();
+        Task<(int Code, string Output)> firstRun = Task.Run (
+            () => ProcessRunner.RunWithPosixLaunchBarrierForTestAsync (
+                firstCommand.Executable,
+                firstCommand.Arguments,
+                Encoding.UTF8,
+                TimeSpan.FromSeconds (20),
+                () =>
+                {
+                    firstPipesCreated.TrySetResult ();
+
+                    if (!releaseFirstLaunch.Wait (TimeSpan.FromSeconds (10)))
+                    {
+                        throw new TimeoutException ("The test did not release the first POSIX launch.");
+                    }
+                },
+                TestContext.Current.CancellationToken));
+
+        await firstPipesCreated.Task.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken);
+        Task<(int Code, string Output)> secondRun = Task.Run (
+            () => CliBackend.RunWithCodeAsync (
+                secondCommand.Arguments,
+                secondCommand.Executable,
+                TimeSpan.FromSeconds (20),
+                secondCancellation.Token));
+
+        try
+        {
+            try
+            {
+                await Task.Delay (200, TestContext.Current.CancellationToken);
+                Assert.False (File.Exists (secondMarker));
+            }
+            finally
+            {
+                releaseFirstLaunch.Set ();
+            }
+
+            await WaitForFileAsync (secondMarker, TestContext.Current.CancellationToken);
+            (int firstCode, string firstOutput) = await firstRun.WaitAsync (
+                TimeSpan.FromSeconds (3),
+                TestContext.Current.CancellationToken);
+            Assert.Equal (0, firstCode);
+            Assert.Equal ("first-output", firstOutput);
+        }
+        finally
+        {
+            releaseFirstLaunch.Set ();
+            secondCancellation.Cancel ();
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException> (
+                () => secondRun.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken));
+        }
+    }
+
+    [Fact]
+    public async Task FinishDrain_DisposesActualReadersAndHonorsSingleCleanupBound ()
+    {
+        using MemoryStream stdoutStream = new ();
+        using MemoryStream stderrStream = new ();
+        using StreamReader stdout = new (stdoutStream);
+        using StreamReader stderr = new (stderrStream);
+        TaskCompletionSource neverCompletes = new (TaskCreationOptions.RunContinuationsAsynchronously);
+        Stopwatch stopwatch = Stopwatch.StartNew ();
+
+        bool completed = await ProcessRunner.FinishDrainForTestAsync (
+            stdout,
+            stderr,
+            neverCompletes.Task,
+            TimeSpan.FromMilliseconds (100));
+
+        stopwatch.Stop ();
+        Assert.False (completed);
+        Assert.False (stdoutStream.CanRead);
+        Assert.False (stderrStream.CanRead);
+        Assert.InRange (stopwatch.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds (2));
+    }
+
     [Theory]
     [InlineData ("", "\"\"")]
     [InlineData ("plain", "plain")]
@@ -204,7 +299,7 @@ public sealed class ProcessRunnerTests : IDisposable
             cancellation.Token);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        _childProcessIds.Add (childPid);
+        TrackChild (childPid);
         cancellation.Cancel ();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException> (() => run);
@@ -223,7 +318,7 @@ public sealed class ProcessRunnerTests : IDisposable
             TestContext.Current.CancellationToken);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        _childProcessIds.Add (childPid);
+        TrackChild (childPid);
 
         TimeoutException exception = await Assert.ThrowsAsync<TimeoutException> (() => run);
         Assert.Contains ("deadline", exception.Message, StringComparison.OrdinalIgnoreCase);
@@ -242,7 +337,7 @@ public sealed class ProcessRunnerTests : IDisposable
             TestContext.Current.CancellationToken);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        _childProcessIds.Add (childPid);
+        TrackChild (childPid);
         await WaitForFileAsync (pidFile + ".parent-exited", TestContext.Current.CancellationToken);
 
         TimeoutException exception = await Assert.ThrowsAsync<TimeoutException> (() => run);
@@ -263,7 +358,7 @@ public sealed class ProcessRunnerTests : IDisposable
             cancellation.Token);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        _childProcessIds.Add (childPid);
+        TrackChild (childPid);
         await WaitForFileAsync (pidFile + ".parent-exited", TestContext.Current.CancellationToken);
         cancellation.Cancel ();
 
@@ -284,7 +379,7 @@ public sealed class ProcessRunnerTests : IDisposable
             TestContext.Current.CancellationToken);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        _childProcessIds.Add (childPid);
+        TrackChild (childPid);
         Assert.Equal (0, code);
         await AssertProcessStopsAsync (childPid);
     }
@@ -302,7 +397,7 @@ public sealed class ProcessRunnerTests : IDisposable
             TestContext.Current.CancellationToken);
 
         int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
-        _childProcessIds.Add (childPid);
+        TrackChild (childPid);
         Assert.Equal (0, code);
         await AssertProcessStopsAsync (childPid);
     }
@@ -331,9 +426,9 @@ public sealed class ProcessRunnerTests : IDisposable
 
     public void Dispose ()
     {
-        foreach (int pid in _childProcessIds)
+        foreach (TrackedProcess process in _childProcesses.Values)
         {
-            KillIfAlive (pid);
+            KillIfAlive (process);
         }
 
         try
@@ -474,30 +569,61 @@ public sealed class ProcessRunnerTests : IDisposable
         throw new TimeoutException ($"The fake process did not publish '{path}'.");
     }
 
-    private static async Task AssertProcessStopsAsync (int pid)
+    private void TrackChild (int pid)
     {
+        try
+        {
+            using Process process = Process.GetProcessById (pid);
+            _childProcesses [pid] = new (pid, process.StartTime.ToUniversalTime ());
+        }
+        catch (ArgumentException)
+        {
+            // It already stopped; never retain a bare PID that could later be reused.
+        }
+        catch (InvalidOperationException)
+        {
+            // It exited while its stable start identity was being captured.
+        }
+    }
+
+    private async Task AssertProcessStopsAsync (int pid)
+    {
+        if (!_childProcesses.TryGetValue (pid, out TrackedProcess? identity))
+        {
+            return;
+        }
+
         DateTime deadline = DateTime.UtcNow.AddSeconds (10);
 
         while (DateTime.UtcNow < deadline)
         {
-            if (!IsAlive (pid))
+            if (!IsSameProcessAlive (identity))
             {
+                _childProcesses.Remove (pid);
+
                 return;
             }
 
             await Task.Delay (25, TestContext.Current.CancellationToken);
         }
 
-        Assert.False (IsAlive (pid), $"Descendant process {pid} survived cancellation/timeout.");
+        bool stillAlive = IsSameProcessAlive (identity);
+
+        if (!stillAlive)
+        {
+            _childProcesses.Remove (pid);
+        }
+
+        Assert.False (stillAlive, $"Descendant process {pid} survived cancellation/timeout.");
     }
 
-    private static bool IsAlive (int pid)
+    private static bool IsSameProcessAlive (TrackedProcess identity)
     {
         if (OperatingSystem.IsLinux ())
         {
             try
             {
-                string stat = File.ReadAllText ($"/proc/{pid}/stat");
+                string stat = File.ReadAllText ($"/proc/{identity.ProcessId}/stat");
                 int commandEnd = stat.LastIndexOf (')');
 
                 // A container test runner may be PID 1 and leave killed orphan descendants as
@@ -519,9 +645,9 @@ public sealed class ProcessRunnerTests : IDisposable
 
         try
         {
-            using Process process = Process.GetProcessById (pid);
+            using Process process = Process.GetProcessById (identity.ProcessId);
 
-            return !process.HasExited;
+            return !process.HasExited && process.StartTime.ToUniversalTime () == identity.StartTimeUtc;
         }
         catch (ArgumentException)
         {
@@ -529,13 +655,13 @@ public sealed class ProcessRunnerTests : IDisposable
         }
     }
 
-    private static void KillIfAlive (int pid)
+    private static void KillIfAlive (TrackedProcess identity)
     {
         try
         {
-            using Process process = Process.GetProcessById (pid);
+            using Process process = Process.GetProcessById (identity.ProcessId);
 
-            if (!process.HasExited)
+            if (!process.HasExited && process.StartTime.ToUniversalTime () == identity.StartTimeUtc)
             {
                 process.Kill (entireProcessTree: true);
                 process.WaitForExit (5000);
@@ -564,4 +690,5 @@ public sealed class ProcessRunnerTests : IDisposable
     }
 
     private sealed record FakeCommand (string Executable, IReadOnlyList<string> Arguments);
+    private sealed record TrackedProcess (int ProcessId, DateTime StartTimeUtc);
 }
