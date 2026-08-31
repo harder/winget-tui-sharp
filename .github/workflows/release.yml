@@ -111,8 +111,17 @@ jobs:
       # Sign the MSIX with Azure Trusted Signing when configured (see code-signing.md). vars.MSIX_PUBLISHER
       # must equal the certificate subject. Skipped when secrets are absent — the resulting MSIX is then
       # unsigned and installs only under Developer Mode, so configure signing before shipping B to users.
+      - name: Detect Azure Trusted Signing configuration
+        id: trusted-signing
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+        run: |
+          $configured = -not [string]::IsNullOrWhiteSpace($env:AZURE_CLIENT_ID)
+          "configured=$($configured.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
       - name: Sign MSIX (Azure Trusted Signing)
-        if: ${{ secrets.AZURE_CLIENT_ID != '' }}
+        if: steps.trusted-signing.outputs.configured == 'true'
         continue-on-error: true
         uses: azure/trusted-signing-action@v0.5.0
         with:

@@ -56,16 +56,37 @@ jobs:
       - name: Restore
         run: dotnet restore tests/WingetTuiSharp.Tests.csproj
 
-      - name: Build
+      - name: Build cross-platform application
+        run: >
+          dotnet build WingetTuiSharp.csproj
+          --no-restore
+          --configuration Release
+          --framework net10.0
+          /p:Version=${{ steps.version.outputs.ci_version }}
+          /p:InformationalVersion=${{ steps.version.outputs.ci_version }}
+
+      # Compile the WINGET_COM code path on every PR. Running that backend still requires
+      # a Windows machine with WinGet available and is outside this compile-only gate.
+      - name: Build Windows COM application
+        run: >
+          dotnet build WingetTuiSharp.csproj
+          --no-restore
+          --configuration Release
+          --framework net10.0-windows10.0.26100.0
+          /p:Version=${{ steps.version.outputs.ci_version }}
+          /p:InformationalVersion=${{ steps.version.outputs.ci_version }}
+
+      - name: Build tests
         run: >
           dotnet build tests/WingetTuiSharp.Tests.csproj
           --no-restore
+          --no-dependencies
           --configuration Release
           /p:Version=${{ steps.version.outputs.ci_version }}
           /p:InformationalVersion=${{ steps.version.outputs.ci_version }}
 
       - name: Test
-        run: dotnet test tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal
+        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 113
 
       # Mock-backend smoke: launch the binary with --mock for a couple seconds and verify
       # it exits cleanly (no stderr output, no crash). Catches regressions that compile
