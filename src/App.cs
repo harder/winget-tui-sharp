@@ -1888,7 +1888,9 @@ public sealed class App : Runnable
             return;
         }
 
-        MessageBox.Query (App, $"Verify: {p.Name}", body, "_OK");
+        TryShowReservedModal (
+            _foreground,
+            () => MessageBox.Query (App, $"Verify: {p.Name}", body, "_OK"));
     }
 
     /// <summary>
@@ -2104,6 +2106,18 @@ public sealed class App : Runnable
 
         return action (activeReservation);
     }
+
+    internal static bool TryShowReservedModal (
+        ForegroundWorkflowCoordinator coordinator,
+        Action showModal) =>
+        TryUseOperationReservation (
+            coordinator,
+            _ =>
+            {
+                showModal ();
+
+                return true;
+            });
 
     private string? PickVersion (Package p, IReadOnlyList<string> versions)
     {

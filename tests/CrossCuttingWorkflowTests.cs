@@ -210,6 +210,35 @@ public sealed class CrossCuttingWorkflowTests
     }
 
     [Fact]
+    public void ReservedInformationalModal_DoesNotOverlapAndAlwaysReleases ()
+    {
+        ForegroundWorkflowCoordinator coordinator = new ();
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Preflight, out ForegroundAdmission preflight));
+        bool shown = false;
+        Assert.False (App.TryShowReservedModal (coordinator, () => shown = true));
+        Assert.False (shown);
+        Assert.True (coordinator.Release (preflight));
+
+        Assert.True (App.TryShowReservedModal (
+            coordinator,
+            () =>
+            {
+                shown = true;
+                Assert.False (coordinator.TryBegin (ForegroundWorkflow.Export, out _));
+            }));
+        Assert.True (shown);
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Export, out ForegroundAdmission afterReturn));
+        Assert.True (coordinator.Release (afterReturn));
+
+        Assert.Throws<InvalidOperationException> (
+            () => App.TryShowReservedModal (
+                coordinator,
+                () => throw new InvalidOperationException ("verify modal failed")));
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Operation, out ForegroundAdmission afterThrow));
+        Assert.True (coordinator.Release (afterThrow));
+    }
+
+    [Fact]
     public void PinSnapshot_ApplyIsCaseInsensitiveAndClearsAbsentPins ()
     {
         Package pinned = new () { Id = "Vendor.Package", Name = "Package", PinState = PinState.Unpinned };
