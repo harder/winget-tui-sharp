@@ -1,4 +1,6 @@
 
+using System.Text;
+
 namespace WingetTuiSharp;
 
 /// <summary>
@@ -26,6 +28,7 @@ public sealed class AppState
     public HashSet<string> BatchSelected { get; } = new (StringComparer.OrdinalIgnoreCase);
     public PackageDetail? CurrentDetail { get; set; }
     private readonly BoundedDetailCache _detailCache = new ();
+    private readonly BoundedPinSnapshot _pinSnapshot = new ();
 
     public string SearchQuery { get; set; } = string.Empty;
     public string LocalFilter { get; set; } = string.Empty;
@@ -50,6 +53,9 @@ public sealed class AppState
     public bool DetailLoading => Volatile.Read (ref _detailLoadingOwners) > 0;
     public string StatusMessage { get; set; } = string.Empty;
     public bool StatusIsError { get; set; }
+    internal bool PinDataFresh => _pinSnapshot.IsFresh;
+    internal bool HasPinSnapshot => _pinSnapshot.HasSnapshot;
+    internal int PinSnapshotCount => _pinSnapshot.Count;
 
     /// <summary>Which backend is live + its winget version (e.g. "COM · winget 1.11.400"), for the header badge and help. Empty until resolved at startup.</summary>
     public string BackendDescription { get; set; } = string.Empty;
@@ -80,6 +86,15 @@ public sealed class AppState
     internal bool CacheDetail (string id, PackageDetail detail) => _detailCache.Set (id, detail);
     internal bool InvalidateCachedDetail (string id) => _detailCache.Remove (id);
     internal void ClearCachedDetails () => _detailCache.Clear ();
+
+    internal void RecordPinSnapshot (IReadOnlyDictionary<string, PinState> pins) =>
+        _pinSnapshot.Record (pins);
+
+    internal void MarkPinsStale ()
+    {
+        _pinSnapshot.MarkStale ();
+        PinFilter = PinFilter.All;
+    }
 
     /// <summary>
     /// Acquires independent loading ownership. Disposing one lease cannot clear another owner's
@@ -133,7 +148,7 @@ public sealed class AppState
                               || p.Id.Contains (filter, StringComparison.OrdinalIgnoreCase));
         }
 
-        if (Mode != AppMode.Search)
+        if (Mode != AppMode.Search && PinDataFresh)
         {
             q = PinFilter switch
             {
@@ -230,14 +245,21 @@ public sealed class AppState
         SourceFilter = idx >= 0 && idx + 1 < AvailableSources.Count ? AvailableSources [idx + 1] : null;
     }
 
-    public void CyclePinFilter ()
+    public bool CyclePinFilter ()
     {
+        if (!PinDataFresh)
+        {
+            return false;
+        }
+
         PinFilter = PinFilter switch
         {
             PinFilter.All => PinFilter.PinnedOnly,
             PinFilter.PinnedOnly => PinFilter.UnpinnedOnly,
             _ => PinFilter.All
         };
+
+        return true;
     }
 
     public void CycleMode (bool forward)
@@ -288,17 +310,247 @@ internal enum StatusOwner
 /// </summary>
 internal sealed class StatusOwnership
 {
-    internal bool TryWrite (StatusOwner owner, bool operationActive, Action write)
+    internal const int MaxDeferredErrorCharacters = 512;
+    internal const int MaxPublishedStatusCharacters = 1024;
+
+    private readonly object _gate = new ();
+    private long? _activeOperationId;
+    private string? _deferredError;
+
+    internal bool BeginOperation (long operationId)
+    {
+        lock (_gate)
+        {
+            if (_activeOperationId is not null)
+            {
+                return false;
+            }
+
+            _activeOperationId = operationId;
+            _deferredError = null;
+
+            return true;
+        }
+    }
+
+    internal bool TryWrite (
+        StatusOwner owner,
+        string message,
+        bool isError,
+        Action<string, bool> write)
     {
         ArgumentNullException.ThrowIfNull (write);
 
-        if (owner == StatusOwner.Ambient && operationActive)
+        lock (_gate)
         {
-            return false;
+            if (owner == StatusOwner.Ambient && _activeOperationId is not null)
+            {
+                // Latest error wins. This is one bounded scalar-safe slot, never a queue.
+                if (isError)
+                {
+                    _deferredError = TruncateScalarSafe (message, MaxDeferredErrorCharacters);
+                }
+
+                return false;
+            }
+
+            write (TruncateScalarSafe (message, MaxPublishedStatusCharacters), isError);
+
+            return true;
+        }
+    }
+
+    internal bool CompleteOperation (
+        long operationId,
+        string outcome,
+        bool outcomeIsError,
+        Action<string, bool> write)
+    {
+        ArgumentNullException.ThrowIfNull (write);
+
+        lock (_gate)
+        {
+            if (_activeOperationId != operationId)
+            {
+                return false;
+            }
+
+            const string DeferredLabel = " · Background error: ";
+            string published;
+
+            if (string.IsNullOrEmpty (_deferredError))
+            {
+                published = outcome;
+            }
+            else
+            {
+                int outcomeLimit = MaxPublishedStatusCharacters
+                                   - DeferredLabel.Length
+                                   - MaxDeferredErrorCharacters;
+                published = $"{TruncateScalarSafe (outcome, outcomeLimit)}{DeferredLabel}{_deferredError}";
+            }
+            bool publishedIsError = outcomeIsError || _deferredError is not null;
+            _activeOperationId = null;
+            _deferredError = null;
+            write (TruncateScalarSafe (published, MaxPublishedStatusCharacters), publishedIsError);
+
+            return true;
+        }
+    }
+
+    internal bool AbortOperation (long operationId)
+    {
+        lock (_gate)
+        {
+            if (_activeOperationId != operationId)
+            {
+                return false;
+            }
+
+            _activeOperationId = null;
+            _deferredError = null;
+
+            return true;
+        }
+    }
+
+    internal int DeferredErrorCount
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _deferredError is null ? 0 : 1;
+            }
+        }
+    }
+
+    internal void Clear ()
+    {
+        lock (_gate)
+        {
+            _activeOperationId = null;
+            _deferredError = null;
+        }
+    }
+
+    internal static string TruncateScalarSafe (string value, int maxCharacters)
+    {
+        if (value.Length <= maxCharacters)
+        {
+            return value;
         }
 
-        write ();
+        StringBuilder bounded = new (maxCharacters);
+        int contentLimit = Math.Max (0, maxCharacters - 1);
 
-        return true;
+        foreach (Rune rune in value.EnumerateRunes ())
+        {
+            if (bounded.Length + rune.Utf16SequenceLength > contentLimit)
+            {
+                break;
+            }
+
+            bounded.Append (rune);
+        }
+
+        bounded.Append ('…');
+
+        return bounded.ToString ();
     }
+}
+
+internal enum ForegroundWorkflow
+{
+    Operation,
+    Preflight,
+    Export
+}
+
+internal readonly record struct ForegroundAdmission (ForegroundWorkflow Workflow, long Id);
+
+/// <summary>Serializes user-visible foreground workflows with idempotent identity-based release.</summary>
+internal sealed class ForegroundWorkflowCoordinator
+{
+    private readonly object _gate = new ();
+    private ForegroundAdmission? _active;
+    private long _nextId;
+    private bool _stopped;
+
+    internal bool TryBegin (ForegroundWorkflow workflow, out ForegroundAdmission admission)
+    {
+        lock (_gate)
+        {
+            if (_stopped || _active is not null)
+            {
+                admission = default;
+
+                return false;
+            }
+
+            admission = new (workflow, ++_nextId);
+            _active = admission;
+
+            return true;
+        }
+    }
+
+    internal bool Release (ForegroundAdmission admission)
+    {
+        lock (_gate)
+        {
+            if (_active != admission)
+            {
+                return false;
+            }
+
+            _active = null;
+
+            return true;
+        }
+    }
+
+    internal bool IsCurrent (ForegroundAdmission admission)
+    {
+        lock (_gate)
+        {
+            return _active == admission;
+        }
+    }
+
+    internal void Stop ()
+    {
+        lock (_gate)
+        {
+            _stopped = true;
+            _active = null;
+        }
+    }
+}
+
+internal sealed class BoundedPinSnapshot
+{
+    internal const int MaxEntries = 4096;
+
+    private readonly Dictionary<string, PinState> _states = new (StringComparer.OrdinalIgnoreCase);
+
+    internal bool IsFresh { get; private set; }
+    internal bool HasSnapshot { get; private set; }
+    internal int Count => _states.Count;
+
+    internal void Record (IReadOnlyDictionary<string, PinState> pins)
+    {
+        _states.Clear ();
+
+        foreach ((string id, PinState state) in pins.OrderBy (entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                                                    .Take (MaxEntries))
+        {
+            _states [id] = state;
+        }
+
+        HasSnapshot = true;
+        IsFresh = true;
+    }
+
+    internal void MarkStale () => IsFresh = false;
 }

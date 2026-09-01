@@ -35,6 +35,7 @@ public sealed class App : Runnable
     private readonly BackgroundTaskTracker _background = new ();
     private readonly ExportWorkflowState _exportWorkflow = new ();
     private readonly StatusOwnership _statusOwnership = new ();
+    private readonly ForegroundWorkflowCoordinator _foreground = new ();
     private readonly object _progressGate = new ();
     private readonly TimeSpan? _smokeDelay;
     private CancellationTokenSource _viewCts;
@@ -46,9 +47,6 @@ public sealed class App : Runnable
     private CancellationTokenSource? _opCts;
     private CancellationTokenSource? _preflightCts;
 
-    // True while a short preflight fetch (version list / installer preview) is running, so a
-    // rapid second trigger can't queue a duplicate modal or race the status line.
-    private int _preflightBusy;
     private object? _spinnerTimer;
     private object? _smokeTimer;
     private bool _initialLoadDone;
@@ -282,6 +280,8 @@ public sealed class App : Runnable
 
         Volatile.Write (ref _uiAccepting, 0);
         _background.BeginStop ();
+        _foreground.Stop ();
+        _statusOwnership.Clear ();
         CancelSource (_viewCts);
         CancelSource (_detailCts);
         CancelSource (_preflightCts);
@@ -431,11 +431,19 @@ public sealed class App : Runnable
         string.Equals (currentStatus, activity, StringComparison.Ordinal);
 
     private bool SetStatus (string message, bool isError = false, StatusOwner owner = StatusOwner.Ambient) =>
-        _statusOwnership.TryWrite (owner, _opCts is not null, () =>
-                                                               {
-                                                                   _state.StatusMessage = message;
-                                                                   _state.StatusIsError = isError;
-                                                               });
+        _statusOwnership.TryWrite (owner, message, isError, WriteStatus);
+
+    private void WriteStatus (string message, bool isError)
+    {
+        _state.StatusMessage = message;
+        _state.StatusIsError = isError;
+    }
+
+    private bool CompleteOperationStatus (
+        ForegroundAdmission admission,
+        string outcome,
+        bool isError) =>
+        _statusOwnership.CompleteOperation (admission.Id, outcome, isError, WriteStatus);
 
     private void ReportRejectedBackgroundAdmission ()
     {
@@ -611,25 +619,38 @@ public sealed class App : Runnable
                                                          _ => await _state.Backend.ListInstalledAsync (src, ct)
                                                      };
 
+                                                     IReadOnlyDictionary<string, PinState>? pins = null;
+                                                     Exception? pinFailure = null;
+
                                                      try
                                                      {
-                                                         IReadOnlyDictionary<string, PinState> pins =
-                                                             await _state.Backend.ListPinsAsync (ct);
-                                                         ApplyPinStates (packages, pins);
+                                                         pins = await _state.Backend.ListPinsAsync (ct);
                                                      }
                                                      catch (OperationCanceledException) when (ct.IsCancellationRequested)
                                                      {
                                                          throw;
                                                      }
-                                                     catch
+                                                     catch (Exception ex)
                                                      {
-                                                         // Pin discovery is best-effort. Keep any states supplied directly by
-                                                         // the package listing backend when the separate snapshot is unavailable.
+                                                         pinFailure = ex;
                                                      }
 
                                                      await DispatchAsync (() =>
                                                                           {
                                                                               _state.Packages = packages.ToList ();
+
+                                                                              if (pins is not null)
+                                                                              {
+                                                                                  _state.RecordPinSnapshot (pins);
+                                                                                  ApplyPinStates (_state.Packages, pins);
+                                                                              }
+                                                                              else
+                                                                              {
+                                                                                  // Unknown is not unpinned. Preserve each backend row's state
+                                                                                  // and retain (but stale-mark) the last successful snapshot.
+                                                                                  _state.MarkPinsStale ();
+                                                                              }
+
                                                                               _state.ApplyFilter ();
                                                                               loading.Dispose ();
 
@@ -646,6 +667,15 @@ public sealed class App : Runnable
                                                                                   }
 
                                                                                   SetStatus (status);
+                                                                              }
+
+                                                                              if (pinFailure is not null)
+                                                                              {
+                                                                                  string warning =
+                                                                                      $"Pin status unavailable; pin actions and filtering are disabled: {pinFailure.Message}";
+                                                                                  SetStatus (
+                                                                                      keepMessage is null ? warning : $"{keepMessage} · {warning}",
+                                                                                      isError: true);
                                                                               }
 
                                                                               RefreshTable ();
@@ -1420,10 +1450,19 @@ public sealed class App : Runnable
                 case 'P':
                     if (_state.Mode != AppMode.Search)
                     {
-                        _state.CyclePinFilter ();
-                        _state.ApplyFilter ();
-                        RefreshTable ();
-                        RefreshStatusBar ();
+                        if (_state.CyclePinFilter ())
+                        {
+                            _state.ApplyFilter ();
+                            RefreshTable ();
+                            RefreshStatusBar ();
+                        }
+                        else
+                        {
+                            SetStatus (
+                                "Pin status is unavailable; refresh successfully before filtering pins",
+                                isError: true);
+                            RefreshStatusBar ();
+                        }
                     }
 
                     key.Handled = true;
@@ -1876,9 +1915,7 @@ public sealed class App : Runnable
     /// </summary>
     private void FetchThen<T> (string activity, Func<CancellationToken, Task<T>> fetch, Action<T> onResult)
     {
-        // Serialize preflight fetches and don't start one atop a running operation: prevents a
-        // rapid double-trigger from queuing a second modal behind the first.
-        if (_opCts is not null || Interlocked.CompareExchange (ref _preflightBusy, 1, 0) != 0)
+        if (!_foreground.TryBegin (ForegroundWorkflow.Preflight, out ForegroundAdmission admission))
         {
             return;
         }
@@ -1893,6 +1930,7 @@ public sealed class App : Runnable
                 loading.Dispose ();
             }
         }
+
         RefreshStatusBar ();
         CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource (
             _background.LifetimeToken,
@@ -1904,6 +1942,16 @@ public sealed class App : Runnable
         AppMode mode = _state.Mode;
         string? packageId = CurrentPackage ()?.Id;
 
+        void ReleasePreflight ()
+        {
+            ReleaseLoading ();
+
+            if (ReferenceEquals (Interlocked.CompareExchange (ref _preflightCts, null, request), request))
+            {
+                _foreground.Release (admission);
+            }
+        }
+
         bool admitted = _background.TryRun (async lifetimeToken =>
                                              {
                                                  try
@@ -1911,20 +1959,19 @@ public sealed class App : Runnable
                                                      T result = await fetch (ct);
                                                      await DispatchAsync (() =>
                                                                           {
-                                                                              ReleaseLoading ();
-                                                                              Interlocked.Exchange (ref _preflightBusy, 0);
-
-                                                                              if (PreflightIdentityMatches (_preflightCts, request))
-                                                                              {
-                                                                                  _preflightCts = null;
-                                                                              }
-
-                                                                              SetStatus (string.Empty);
-                                                                              RefreshStatusBar ();
-
-                                                                              // Clear the gate before onResult so its modal flow — and any
-                                                                              // RunOperation it starts — is not blocked by this preflight.
-                                                                              onResult (result);
+                                                                              CompletePreflight (
+                                                                                  () =>
+                                                                                  {
+                                                                                      ReleasePreflight ();
+                                                                                      SetStatus (string.Empty);
+                                                                                      RefreshStatusBar ();
+                                                                                  },
+                                                                                  () => onResult (result),
+                                                                                  ex =>
+                                                                                  {
+                                                                                      SetStatus ($"Error: {ex.Message}", isError: true);
+                                                                                      RefreshStatusBar ();
+                                                                                  });
                                                                           }, ct,
                                                                           () => viewGeneration == _state.ViewGeneration
                                                                                 && detailGeneration == _state.DetailGeneration
@@ -1940,9 +1987,7 @@ public sealed class App : Runnable
                                                  {
                                                      await DispatchAsync (() =>
                                                                           {
-                                                                              ReleaseLoading ();
-                                                                              Interlocked.Exchange (ref _preflightBusy, 0);
-                                                                              _preflightCts = null;
+                                                                              ReleasePreflight ();
                                                                               SetStatus ($"Error: {ex.Message}", isError: true);
                                                                               RefreshStatusBar ();
                                                                           }, ct,
@@ -1954,9 +1999,7 @@ public sealed class App : Runnable
                                                  {
                                                      await DispatchAsync (() =>
                                                                           {
-                                                                              ReleaseLoading ();
-                                                                              Interlocked.Exchange (ref _preflightBusy, 0);
-                                                                              _preflightCts = null;
+                                                                              ReleasePreflight ();
 
                                                                               if (PreflightOwnsActivity (_state.StatusMessage, activity))
                                                                               {
@@ -1968,13 +2011,7 @@ public sealed class App : Runnable
                                                                           () => PreflightIdentityMatches (_preflightCts, request));
 
                                                      ReleaseLoading ();
-
-                                                     if (ReferenceEquals (
-                                                             Interlocked.CompareExchange (ref _preflightCts, null, request),
-                                                             request))
-                                                     {
-                                                         Interlocked.Exchange (ref _preflightBusy, 0);
-                                                     }
+                                                     ReleasePreflight ();
 
                                                      CancelSource (request);
                                                      request.Dispose ();
@@ -1983,12 +2020,27 @@ public sealed class App : Runnable
 
         if (!admitted)
         {
-            ReleaseLoading ();
-            Interlocked.Exchange (ref _preflightBusy, 0);
-            _preflightCts = null;
+            ReleasePreflight ();
             CancelSource (request);
             request.Dispose ();
             ReportRejectedBackgroundAdmission ();
+        }
+    }
+
+    internal static void CompletePreflight (
+        Action release,
+        Action onResult,
+        Action<Exception> reportError)
+    {
+        release ();
+
+        try
+        {
+            onResult ();
+        }
+        catch (Exception ex)
+        {
+            reportError (ex);
         }
     }
 
@@ -2058,6 +2110,16 @@ public sealed class App : Runnable
             return;
         }
 
+        if (!_state.PinDataFresh)
+        {
+            SetStatus (
+                "Pin status is unavailable; refresh successfully before changing this pin",
+                isError: true);
+            RefreshStatusBar ();
+
+            return;
+        }
+
         bool pinned = p.PinState.IsPinned;
         string label = pinned ? "Unpin" : "Pin";
 
@@ -2110,15 +2172,22 @@ public sealed class App : Runnable
             return;
         }
 
-        if (!Confirm ("Batch Upgrade", $"Upgrade {_state.BatchSelected.Count} selected packages?"))
+        if (!_foreground.TryBegin (ForegroundWorkflow.Operation, out ForegroundAdmission admission))
         {
             return;
         }
 
-        // Share the single-operation gate so Esc cancels the batch (the in-flight item aborts via
-        // its token; the loop then stops on the next iteration). Refuse to start atop another op.
-        if (_opCts is not null)
+        if (!Confirm ("Batch Upgrade", $"Upgrade {_state.BatchSelected.Count} selected packages?"))
         {
+            _foreground.Release (admission);
+
+            return;
+        }
+
+        if (!_statusOwnership.BeginOperation (admission.Id))
+        {
+            _foreground.Release (admission);
+
             return;
         }
 
@@ -2193,20 +2262,13 @@ public sealed class App : Runnable
 
                                                      await DispatchAsync (() =>
                                                                       {
-                                                                          if (ReferenceEquals (_opCts, request))
-                                                                          {
-                                                                              _opCts = null;
-                                                                          }
-
                                                                           loading.Dispose ();
                                                                           _state.BatchSelected.Clear ();
-
-                                                                          if (cancelled)
-                                                                          {
-                                                                              SetStatus (
-                                                                                  "Cancelled",
-                                                                                  owner: StatusOwner.Operation);
-                                                                          }
+                                                                          string outcome = cancelled ? "Cancelled" : _state.StatusMessage;
+                                                                          bool outcomeIsError = !cancelled && _state.StatusIsError;
+                                                                          CompleteOperationStatus (admission, outcome, outcomeIsError);
+                                                                          _foreground.Release (admission);
+                                                                          _opCts = null;
 
                                                                           TriggerRefresh (_state.StatusMessage);
                                                                           }, lifetimeToken, () => ReferenceEquals (_opCts, request));
@@ -2220,6 +2282,9 @@ public sealed class App : Runnable
                                                          _opCts = null;
                                                      }
 
+                                                     _statusOwnership.AbortOperation (admission.Id);
+                                                     _foreground.Release (admission);
+
                                                      CancelSource (request);
                                                      request.Dispose ();
                                                  }
@@ -2229,18 +2294,28 @@ public sealed class App : Runnable
         {
             loading.Dispose ();
             _opCts = null;
+            CompleteOperationStatus (
+                admission,
+                "Too many background requests are still pending; wait and try again",
+                isError: true);
+            _foreground.Release (admission);
             CancelSource (request);
             request.Dispose ();
-            ReportRejectedBackgroundAdmission ();
+            RefreshStatusBar ();
         }
     }
 
     private void RunOperation (string activity, Func<IProgress<OpProgress>, CancellationToken, Task<OpResult>> op)
     {
-        // One operation at a time: a second request while one is in flight is ignored, which
-        // keeps _opCts (and the Esc-cancel target) unambiguous and avoids leaking a CTS.
-        if (_opCts is not null)
+        if (!_foreground.TryBegin (ForegroundWorkflow.Operation, out ForegroundAdmission admission))
         {
+            return;
+        }
+
+        if (!_statusOwnership.BeginOperation (admission.Id))
+        {
+            _foreground.Release (admission);
+
             return;
         }
 
@@ -2282,32 +2357,30 @@ public sealed class App : Runnable
 
                                                      await DispatchAsync (() =>
                                                                       {
-                                                                          if (ReferenceEquals (_opCts, request))
-                                                                          {
-                                                                              _opCts = null;
-                                                                          }
-
                                                                           loading.Dispose ();
                                                                           _state.OpProgress = null;
+                                                                          string outcome;
+                                                                          bool outcomeIsError;
 
                                                                           if (cancelled)
                                                                           {
-                                                                              SetStatus (
-                                                                                  "Cancelled",
-                                                                                  owner: StatusOwner.Operation);
+                                                                              outcome = "Cancelled";
+                                                                              outcomeIsError = false;
                                                                           }
                                                                           else
                                                                           {
-                                                                              SetStatus (
-                                                                                  result!.Success ? "Done" : result.Message,
-                                                                                  !result.Success,
-                                                                                  StatusOwner.Operation);
+                                                                              outcome = result!.Success ? "Done" : result.Message;
+                                                                              outcomeIsError = !result.Success;
 
                                                                               if (result.Operation.PackageId is { } id)
                                                                               {
                                                                                   _state.InvalidateCachedDetail (id);
                                                                               }
                                                                           }
+
+                                                                          CompleteOperationStatus (admission, outcome, outcomeIsError);
+                                                                          _foreground.Release (admission);
+                                                                          _opCts = null;
 
                                                                           TriggerRefresh (_state.StatusMessage);
                                                                           }, lifetimeToken, () => ReferenceEquals (_opCts, request));
@@ -2321,6 +2394,9 @@ public sealed class App : Runnable
                                                          _opCts = null;
                                                      }
 
+                                                     _statusOwnership.AbortOperation (admission.Id);
+                                                     _foreground.Release (admission);
+
                                                      CancelSource (request);
                                                      request.Dispose ();
                                                  }
@@ -2330,9 +2406,14 @@ public sealed class App : Runnable
         {
             loading.Dispose ();
             _opCts = null;
+            CompleteOperationStatus (
+                admission,
+                "Too many background requests are still pending; wait and try again",
+                isError: true);
+            _foreground.Release (admission);
             CancelSource (request);
             request.Dispose ();
-            ReportRejectedBackgroundAdmission ();
+            RefreshStatusBar ();
         }
     }
 
@@ -2498,7 +2579,7 @@ public sealed class App : Runnable
 
     private void ExportCsv ()
     {
-        if (!CanStartExport (_opCts is not null, _exportWorkflow.IsActive))
+        if (!_foreground.TryBegin (ForegroundWorkflow.Export, out ForegroundAdmission admission))
         {
             return;
         }
@@ -2513,6 +2594,7 @@ public sealed class App : Runnable
         }
         catch (Exception ex)
         {
+            _foreground.Release (admission);
             SetStatus ($"Export preparation failed: {ex.Message}", isError: true);
             RefreshStatusBar ();
 
@@ -2527,6 +2609,8 @@ public sealed class App : Runnable
                 () => _state.AcquireLoading (),
                 out ExportOperation operation))
         {
+            _foreground.Release (admission);
+
             return;
         }
 
@@ -2562,6 +2646,7 @@ public sealed class App : Runnable
                                                  finally
                                                  {
                                                      _exportWorkflow.Release (operation);
+                                                     _foreground.Release (admission);
                                                  }
                                              });
 
@@ -2569,14 +2654,16 @@ public sealed class App : Runnable
         {
             if (_exportWorkflow.RejectAdmission (operation, out string message))
             {
+                _foreground.Release (admission);
                 SetStatus (message, isError: true);
                 RefreshStatusBar ();
             }
+            else
+            {
+                _foreground.Release (admission);
+            }
         }
     }
-
-    internal static bool CanStartExport (bool operationActive, bool exportActive) =>
-        !operationActive && !exportActive;
 
     private void CompleteExport (
         ExportOperation operation,
