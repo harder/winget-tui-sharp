@@ -639,10 +639,12 @@ public sealed class App : Runnable
                                                                           {
                                                                               _state.Packages = packages.ToList ();
 
-                                                                              if (pins is not null)
+                                                                              bool pinsComplete = pins is not null
+                                                                                                  && _state.RecordPinSnapshot (pins);
+
+                                                                              if (pinsComplete)
                                                                               {
-                                                                                  _state.RecordPinSnapshot (pins);
-                                                                                  ApplyPinStates (_state.Packages, pins);
+                                                                                  _state.ApplyPinSnapshot (_state.Packages);
                                                                               }
                                                                               else
                                                                               {
@@ -669,10 +671,12 @@ public sealed class App : Runnable
                                                                                   SetStatus (status);
                                                                               }
 
-                                                                              if (pinFailure is not null)
+                                                                              if (!pinsComplete)
                                                                               {
+                                                                                  string reason = pinFailure?.Message
+                                                                                                  ?? "the pin snapshot exceeded its safety limits";
                                                                                   string warning =
-                                                                                      $"Pin status unavailable; pin actions and filtering are disabled: {pinFailure.Message}";
+                                                                                      $"Pin status unavailable; pin actions and filtering are disabled: {reason}";
                                                                                   SetStatus (
                                                                                       keepMessage is null ? warning : $"{keepMessage} · {warning}",
                                                                                       isError: true);
@@ -708,20 +712,6 @@ public sealed class App : Runnable
         {
             loading.Dispose ();
             ReportRejectedBackgroundAdmission ();
-        }
-    }
-
-    internal static void ApplyPinStates (
-        IEnumerable<Package> packages,
-        IReadOnlyDictionary<string, PinState> pins)
-    {
-        Dictionary<string, PinState> byId = new (pins, StringComparer.OrdinalIgnoreCase);
-
-        foreach (Package package in packages)
-        {
-            package.PinState = byId.TryGetValue (package.Id, out PinState state)
-                                   ? state
-                                   : PinState.Unpinned;
         }
     }
 
@@ -1678,7 +1668,15 @@ public sealed class App : Runnable
             ct => _state.Backend.ListVersionsAsync (p.Id, ct),
             versions =>
             {
-                string? chosen = versions.Count > 0 ? PickVersion (p, versions) : PromptForVersion (p);
+                string? chosen = null;
+                TryUseOperationReservation (
+                    _foreground,
+                    _ =>
+                    {
+                        chosen = versions.Count > 0 ? PickVersion (p, versions) : PromptForVersion (p);
+
+                        return !string.IsNullOrEmpty (chosen);
+                    });
 
                 if (!string.IsNullOrEmpty (chosen))
                 {
@@ -1715,11 +1713,23 @@ public sealed class App : Runnable
 
                 string body = lines.Count == 0 ? title : $"{title}\n\n{string.Join ("\n", lines)}";
 
-                if (Confirm ("Install", body))
-                {
-                    string activity = version is null ? $"Installing {p.Name}" : $"Installing {p.Name} {version}";
-                    RunOperation (activity, (prog, ct) => _state.Backend.InstallAsync (p.Id, version, settings, prog, ct));
-                }
+                TryUseOperationReservation (
+                    _foreground,
+                    reservation =>
+                    {
+                        if (!Confirm ("Install", body))
+                        {
+                            return false;
+                        }
+
+                        string activity = version is null ? $"Installing {p.Name}" : $"Installing {p.Name} {version}";
+                        RunOperation (
+                            reservation,
+                            activity,
+                            (prog, ct) => _state.Backend.InstallAsync (p.Id, version, settings, prog, ct));
+
+                        return true;
+                    });
             });
     }
 
@@ -1758,12 +1768,22 @@ public sealed class App : Runnable
             return;
         }
 
-        if (!Confirm ("Download", $"Download the installer for {p.Name} without installing it?"))
-        {
-            return;
-        }
+        TryUseOperationReservation (
+            _foreground,
+            reservation =>
+            {
+                if (!Confirm ("Download", $"Download the installer for {p.Name} without installing it?"))
+                {
+                    return false;
+                }
 
-        RunOperation ($"Downloading {p.Name}", (prog, ct) => _state.Backend.DownloadAsync (p.Id, null, prog, ct));
+                RunOperation (
+                    reservation,
+                    $"Downloading {p.Name}",
+                    (prog, ct) => _state.Backend.DownloadAsync (p.Id, null, prog, ct));
+
+                return true;
+            });
     }
 
     /// <summary>Open the advanced-options panel, then install the latest version with those options.</summary>
@@ -1774,7 +1794,15 @@ public sealed class App : Runnable
             return;
         }
 
-        InstallSettings? settings = PromptAdvancedOptions (p);
+        InstallSettings? settings = null;
+        TryUseOperationReservation (
+            _foreground,
+            _ =>
+            {
+                settings = PromptAdvancedOptions (p);
+
+                return settings is not null;
+            });
 
         if (settings is null)
         {
@@ -1843,10 +1871,19 @@ public sealed class App : Runnable
         // and this path is COM-only since Verify is). Other outcomes are informational only.
         if (v.Outcome == VerifyOutcome.Issues)
         {
-            if (MessageBox.Query (App, $"Verify: {p.Name}", body, "_Repair", "_Close") == 0)
-            {
-                RunRepair (p);
-            }
+            TryUseOperationReservation (
+                _foreground,
+                reservation =>
+                {
+                    if (MessageBox.Query (App, $"Verify: {p.Name}", body, "_Repair", "_Close") != 0)
+                    {
+                        return false;
+                    }
+
+                    RunRepair (p, reservation);
+
+                    return true;
+                });
 
             return;
         }
@@ -1873,26 +1910,36 @@ public sealed class App : Runnable
             return;
         }
 
-        if (!Confirm ("Repair", $"Repair {p.Name}? This re-runs the installer's repair to fix a damaged install."))
-        {
-            return;
-        }
+        TryUseOperationReservation (
+            _foreground,
+            reservation =>
+            {
+                if (!Confirm ("Repair", $"Repair {p.Name}? This re-runs the installer's repair to fix a damaged install."))
+                {
+                    return false;
+                }
 
-        RunRepair (p);
+                RunRepair (p, reservation);
+
+                return true;
+            });
     }
 
     /// <summary>
     /// Execute the repair (guard + run). Shared by the standalone action (which confirms first via
     /// <see cref="AskRepair"/>) and the Verify→Repair offer (which treats the button click as the confirm).
     /// </summary>
-    private void RunRepair (Package p)
+    private void RunRepair (Package p, OperationReservation reservation)
     {
         if (App is null || GuardTruncatedId (p, "repair"))
         {
             return;
         }
 
-        RunOperation ($"Repairing {p.Name}", (prog, ct) => _state.Backend.RepairAsync (p.Id, prog, ct));
+        RunOperation (
+            reservation,
+            $"Repairing {p.Name}",
+            (prog, ct) => _state.Backend.RepairAsync (p.Id, prog, ct));
     }
 
     private InstallSettings? PromptAdvancedOptions (Package p)
@@ -2044,6 +2091,20 @@ public sealed class App : Runnable
         }
     }
 
+    internal static bool TryUseOperationReservation (
+        ForegroundWorkflowCoordinator coordinator,
+        Func<OperationReservation, bool> action)
+    {
+        if (!coordinator.TryReserveOperation (out OperationReservation? reservation))
+        {
+            return false;
+        }
+
+        using OperationReservation activeReservation = reservation!;
+
+        return action (activeReservation);
+    }
+
     private string? PickVersion (Package p, IReadOnlyList<string> versions)
     {
         if (App is null)
@@ -2073,12 +2134,22 @@ public sealed class App : Runnable
                             ? $"Upgrade {p.Name}? (id was truncated by winget — matching by name)"
                             : $"Upgrade {p.Name}?";
 
-        if (!Confirm ("Upgrade", prompt))
-        {
-            return;
-        }
+        TryUseOperationReservation (
+            _foreground,
+            reservation =>
+            {
+                if (!Confirm ("Upgrade", prompt))
+                {
+                    return false;
+                }
 
-        RunOperation ($"Upgrading {p.Name}", (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct));
+                RunOperation (
+                    reservation,
+                    $"Upgrading {p.Name}",
+                    (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct));
+
+                return true;
+            });
     }
 
     /// <summary>
@@ -2095,12 +2166,22 @@ public sealed class App : Runnable
             return;
         }
 
-        if (!Confirm ("Uninstall", $"Uninstall {p.Name}? This cannot be undone."))
-        {
-            return;
-        }
+        TryUseOperationReservation (
+            _foreground,
+            reservation =>
+            {
+                if (!Confirm ("Uninstall", $"Uninstall {p.Name}? This cannot be undone."))
+                {
+                    return false;
+                }
 
-        RunOperation ($"Uninstalling {p.Name}", (prog, ct) => _state.Backend.UninstallAsync (p.Id, prog, ct));
+                RunOperation (
+                    reservation,
+                    $"Uninstalling {p.Name}",
+                    (prog, ct) => _state.Backend.UninstallAsync (p.Id, prog, ct));
+
+                return true;
+            });
     }
 
     private void TogglePin (Package? p)
@@ -2123,14 +2204,24 @@ public sealed class App : Runnable
         bool pinned = p.PinState.IsPinned;
         string label = pinned ? "Unpin" : "Pin";
 
-        if (!Confirm (label, $"{label} {p.Name}?"))
-        {
-            return;
-        }
+        TryUseOperationReservation (
+            _foreground,
+            reservation =>
+            {
+                if (!Confirm (label, $"{label} {p.Name}?"))
+                {
+                    return false;
+                }
 
-        RunOperation ($"{label}ning {p.Name}", (_, ct) => pinned
-                                                              ? _state.Backend.UnpinAsync (p.Id, ct)
-                                                              : _state.Backend.PinAsync (p.Id, ct));
+                RunOperation (
+                    reservation,
+                    $"{label}ning {p.Name}",
+                    (_, ct) => pinned
+                                   ? _state.Backend.UnpinAsync (p.Id, ct)
+                                   : _state.Backend.PinAsync (p.Id, ct));
+
+                return true;
+            });
     }
 
     private void ToggleBatchSelect (Package? p)
@@ -2172,18 +2263,29 @@ public sealed class App : Runnable
             return;
         }
 
-        if (!_foreground.TryBegin (ForegroundWorkflow.Operation, out ForegroundAdmission admission))
+        if (!_foreground.TryReserveOperation (out OperationReservation? reservation))
         {
             return;
         }
 
-        if (!Confirm ("Batch Upgrade", $"Upgrade {_state.BatchSelected.Count} selected packages?"))
+        using (OperationReservation activeReservation = reservation!)
         {
-            _foreground.Release (admission);
+            if (!Confirm ("Batch Upgrade", $"Upgrade {_state.BatchSelected.Count} selected packages?"))
+            {
+                return;
+            }
 
-            return;
+            if (!activeReservation.TryTransfer (out ForegroundAdmission admission))
+            {
+                return;
+            }
+
+            StartBatchUpgrade (admission);
         }
+    }
 
+    private void StartBatchUpgrade (ForegroundAdmission admission)
+    {
         if (!_statusOwnership.BeginOperation (admission.Id))
         {
             _foreground.Release (admission);
@@ -2305,9 +2407,12 @@ public sealed class App : Runnable
         }
     }
 
-    private void RunOperation (string activity, Func<IProgress<OpProgress>, CancellationToken, Task<OpResult>> op)
+    private void RunOperation (
+        OperationReservation reservation,
+        string activity,
+        Func<IProgress<OpProgress>, CancellationToken, Task<OpResult>> op)
     {
-        if (!_foreground.TryBegin (ForegroundWorkflow.Operation, out ForegroundAdmission admission))
+        if (!reservation.TryTransfer (out ForegroundAdmission admission))
         {
             return;
         }
@@ -2372,6 +2477,12 @@ public sealed class App : Runnable
                                                                               outcome = result!.Success ? "Done" : result.Message;
                                                                               outcomeIsError = !result.Success;
 
+                                                                              if (MarkPinsStaleAfterSuccessfulMutation (_state, result))
+                                                                              {
+                                                                                  _state.ApplyFilter ();
+                                                                                  RefreshTable ();
+                                                                              }
+
                                                                               if (result.Operation.PackageId is { } id)
                                                                               {
                                                                                   _state.InvalidateCachedDetail (id);
@@ -2415,6 +2526,18 @@ public sealed class App : Runnable
             request.Dispose ();
             RefreshStatusBar ();
         }
+    }
+
+    internal static bool MarkPinsStaleAfterSuccessfulMutation (AppState state, OpResult result)
+    {
+        if (!result.Success || result.Operation.Kind is not (OperationKind.Pin or OperationKind.Unpin))
+        {
+            return false;
+        }
+
+        state.MarkPinsStale ();
+
+        return true;
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Diagnostics;
 
 namespace WingetTuiSharp.Tests;
@@ -141,7 +142,75 @@ public sealed class CrossCuttingWorkflowTests
     }
 
     [Fact]
-    public void ApplyPinStates_IsCaseInsensitiveAndClearsAbsentPins ()
+    public void OperationReservation_BusySkipsConfirmationCancelReleasesAndTransferIsOnce ()
+    {
+        foreach (ForegroundWorkflow blocker in Enum.GetValues<ForegroundWorkflow> ())
+        {
+            ForegroundWorkflowCoordinator busy = new ();
+            Assert.True (busy.TryBegin (blocker, out ForegroundAdmission active));
+            bool confirmInvoked = false;
+            Assert.False (App.TryUseOperationReservation (
+                busy,
+                _ =>
+                {
+                    confirmInvoked = true;
+
+                    return true;
+                }));
+            Assert.False (confirmInvoked);
+            Assert.True (busy.Release (active));
+        }
+
+        ForegroundWorkflowCoordinator coordinator = new ();
+        Assert.False (App.TryUseOperationReservation (coordinator, _ => false));
+        Assert.True (coordinator.TryReserveOperation (out OperationReservation? afterCancel));
+        afterCancel!.Dispose ();
+
+        Assert.Throws<InvalidOperationException> (
+            () => App.TryUseOperationReservation (
+                coordinator,
+                _ => throw new InvalidOperationException ("modal failed")));
+        Assert.True (coordinator.TryReserveOperation (out OperationReservation? afterException));
+        afterException!.Dispose ();
+
+        ForegroundAdmission transferred = default;
+        Assert.True (App.TryUseOperationReservation (
+            coordinator,
+            reservation =>
+            {
+                Assert.True (reservation.TryTransfer (out transferred));
+                Assert.False (reservation.TryTransfer (out _));
+
+                return true;
+            }));
+        Assert.False (coordinator.TryBegin (ForegroundWorkflow.Export, out _));
+        Assert.True (coordinator.Release (transferred));
+    }
+
+    [Fact]
+    public void PreflightHandoff_ReservesOperationBeforeModalCallback ()
+    {
+        ForegroundWorkflowCoordinator coordinator = new ();
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Preflight, out ForegroundAdmission preflight));
+        Assert.True (coordinator.Release (preflight));
+        bool modalInvoked = false;
+
+        Assert.False (App.TryUseOperationReservation (
+            coordinator,
+            reservation =>
+            {
+                modalInvoked = true;
+                Assert.False (coordinator.TryBegin (ForegroundWorkflow.Export, out _));
+                Assert.NotNull (reservation);
+
+                return false;
+            }));
+        Assert.True (modalInvoked);
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Export, out _));
+    }
+
+    [Fact]
+    public void PinSnapshot_ApplyIsCaseInsensitiveAndClearsAbsentPins ()
     {
         Package pinned = new () { Id = "Vendor.Package", Name = "Package", PinState = PinState.Unpinned };
         Package removed = new () { Id = "Vendor.Removed", Name = "Removed", PinState = new (PinStateKind.Blocking) };
@@ -150,7 +219,9 @@ public sealed class CrossCuttingWorkflowTests
             ["vendor.package"] = new (PinStateKind.Gating, "2.0")
         };
 
-        App.ApplyPinStates ([pinned, removed], snapshot);
+        AppState state = new (new MockBackend ());
+        Assert.True (state.RecordPinSnapshot (snapshot));
+        Assert.True (state.ApplyPinSnapshot ([pinned, removed]));
 
         Assert.Equal (PinStateKind.Gating, pinned.PinState.Kind);
         Assert.Equal ("2.0", pinned.PinState.GatingVersion);
@@ -180,10 +251,10 @@ public sealed class CrossCuttingWorkflowTests
     public void PinSnapshot_SuccessFailureRecoveryAndUnpinClear ()
     {
         AppState state = new (new MockBackend ());
-        state.RecordPinSnapshot (new Dictionary<string, PinState>
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState>
         {
             ["Vendor.Pinned"] = new (PinStateKind.Blocking)
-        });
+        }));
         Assert.True (state.PinDataFresh);
         Assert.Equal (1, state.PinSnapshotCount);
 
@@ -192,22 +263,28 @@ public sealed class CrossCuttingWorkflowTests
         Assert.True (state.HasPinSnapshot);
         Assert.Equal (1, state.PinSnapshotCount);
 
-        state.RecordPinSnapshot (new Dictionary<string, PinState> ());
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState> ()));
         Assert.True (state.PinDataFresh);
         Assert.True (state.HasPinSnapshot);
         Assert.Equal (0, state.PinSnapshotCount);
     }
 
     [Fact]
-    public void PinSnapshot_IsBoundedAndWarningDefersUnderOperation ()
+    public void PinSnapshot_IncompleteSourceKeepsLastKnownAndWarningDefersUnderOperation ()
     {
         AppState state = new (new MockBackend ());
-        Dictionary<string, PinState> pins = Enumerable.Range (0, BoundedPinSnapshot.MaxEntries + 100)
-                                                      .ToDictionary (
-                                                          value => $"Package.{value:D6}",
-                                                          _ => new PinState (PinStateKind.Blocking));
-        state.RecordPinSnapshot (pins);
-        Assert.Equal (BoundedPinSnapshot.MaxEntries, state.PinSnapshotCount);
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState>
+        {
+            ["Last.Known"] = new (PinStateKind.Blocking)
+        }));
+        CountingPinDictionary pins = new (
+            BoundedPinSnapshot.MaxEntries + 100,
+            Enumerable.Range (0, BoundedPinSnapshot.MaxEntries + 100)
+                      .Select (value => Pair ($"Package.{value:D6}")));
+        Assert.False (state.RecordPinSnapshot (pins));
+        Assert.Equal (0, pins.EnumeratorRequests);
+        Assert.False (state.PinDataFresh);
+        Assert.Equal (1, state.PinSnapshotCount);
 
         StatusOwnership status = new ();
         Assert.True (status.BeginOperation (42));
@@ -219,6 +296,97 @@ public sealed class CrossCuttingWorkflowTests
         string published = string.Empty;
         status.CompleteOperation (42, "Done", false, (message, _) => published = message);
         Assert.Contains ("Pin status unavailable", published, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PinSnapshot_StreamingBoundsEnumerationKeysVersionsAndAggregateBudget ()
+    {
+        BoundedPinSnapshot snapshot = new ();
+        Assert.True (snapshot.TryRecord (new Dictionary<string, PinState>
+        {
+            ["Exact.Key"] = new (PinStateKind.Gating, new string ('v', 300) + "😀tail")
+        }));
+        Assert.True (snapshot.TryGet ("exact.key", out PinState retained));
+        Assert.InRange (retained.GatingVersion!.Length, 1, BoundedPinSnapshot.MaxGatingVersionCharacters);
+        Assert.False (char.IsHighSurrogate (retained.GatingVersion [^1]));
+
+        CountingPinDictionary tooManyDespiteCount = new (
+            reportedCount: 1,
+            Enumerable.Range (0, BoundedPinSnapshot.MaxEntries + 100)
+                      .Select (value => Pair ($"Overflow.{value}")));
+        Assert.False (snapshot.TryRecord (tooManyDespiteCount));
+        Assert.InRange (tooManyDespiteCount.MoveNextCount, 1, BoundedPinSnapshot.MaxEntries + 1);
+        Assert.False (snapshot.IsFresh);
+        Assert.Equal (1, snapshot.Count);
+
+        string hugeId = new string ('k', BoundedPinSnapshot.MaxKeyCharacters + 1);
+        Assert.False (snapshot.TryRecord (new Dictionary<string, PinState>
+        {
+            [hugeId] = new (PinStateKind.Blocking)
+        }));
+        Assert.Equal (1, snapshot.Count);
+
+        CountingPinDictionary aggregateFlood = new (
+            reportedCount: 100,
+            Enumerable.Range (0, 100)
+                      .Select (value => Pair (new string ((char) ('a' + value % 20), BoundedPinSnapshot.MaxKeyCharacters))));
+        Assert.False (snapshot.TryRecord (aggregateFlood));
+        Assert.InRange (
+            aggregateFlood.MoveNextCount,
+            1,
+            BoundedPinSnapshot.MaxAggregateCharacters / BoundedPinSnapshot.MaxKeyCharacters + 2);
+    }
+
+    [Fact]
+    public void PinSnapshot_AppliesRetainedCopyAndCompleteEmptySnapshotClearsUnpinned ()
+    {
+        AppState state = new (new MockBackend ());
+        Dictionary<string, PinState> source = new (StringComparer.OrdinalIgnoreCase)
+        {
+            ["Vendor.Package"] = new (PinStateKind.Blocking)
+        };
+        Assert.True (state.RecordPinSnapshot (source));
+        source ["Vendor.Package"] = PinState.Unpinned;
+        Package package = new () { Id = "Vendor.Package", Name = "Package" };
+        Assert.True (state.ApplyPinSnapshot ([package]));
+        Assert.True (package.PinState.IsPinned);
+
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState> ()));
+        Assert.True (state.ApplyPinSnapshot ([package]));
+        Assert.Equal (PinState.Unpinned, package.PinState);
+    }
+
+    [Fact]
+    public void SuccessfulPinMutationImmediatelyInvalidatesPinAuthorityAndFilter ()
+    {
+        AppState state = new (new MockBackend ())
+        {
+            Packages =
+            [
+                new () { Id = "Pinned", Name = "Pinned", PinState = new (PinStateKind.Blocking) },
+                new () { Id = "Other", Name = "Other" }
+            ],
+            PinFilter = PinFilter.PinnedOnly
+        };
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState>
+        {
+            ["Pinned"] = new (PinStateKind.Blocking)
+        }));
+        state.ApplyFilter ();
+        Assert.Single (state.Filtered);
+        OpResult result = new ()
+        {
+            Operation = new () { Kind = OperationKind.Unpin, PackageId = "Pinned" },
+            Success = true,
+            Message = "Unpinned"
+        };
+
+        Assert.True (App.MarkPinsStaleAfterSuccessfulMutation (state, result));
+        state.ApplyFilter ();
+        Assert.False (state.PinDataFresh);
+        Assert.Equal (PinFilter.All, state.PinFilter);
+        Assert.Equal (2, state.Filtered.Count);
+        Assert.False (state.CyclePinFilter ());
     }
 
     [Fact]
@@ -327,6 +495,49 @@ public sealed class CrossCuttingWorkflowTests
         Assert.NotNull (observed);
         Assert.Equal ("https://example.invalid/path", observed.FileName);
         Assert.True (observed.UseShellExecute);
+    }
+
+    private static KeyValuePair<string, PinState> Pair (string id) =>
+        new (id, new (PinStateKind.Blocking));
+
+    private sealed class CountingPinDictionary (
+        int reportedCount,
+        IEnumerable<KeyValuePair<string, PinState>> entries) : IReadOnlyDictionary<string, PinState>
+    {
+        public int Count => reportedCount;
+        public IEnumerable<string> Keys => throw new NotSupportedException ();
+        public IEnumerable<PinState> Values => throw new NotSupportedException ();
+        public PinState this [string key] => throw new KeyNotFoundException (key);
+        internal int EnumeratorRequests { get; private set; }
+        internal int MoveNextCount { get; private set; }
+
+        public bool ContainsKey (string key) => false;
+
+        public bool TryGetValue (string key, out PinState value)
+        {
+            value = default;
+
+            return false;
+        }
+
+        public IEnumerator<KeyValuePair<string, PinState>> GetEnumerator ()
+        {
+            EnumeratorRequests++;
+
+            return CountEntries ().GetEnumerator ();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator () => GetEnumerator ();
+
+        private IEnumerable<KeyValuePair<string, PinState>> CountEntries ()
+        {
+            foreach (KeyValuePair<string, PinState> entry in entries)
+            {
+                MoveNextCount++;
+
+                yield return entry;
+            }
+        }
     }
 
     private sealed class TrackingDisposable : IDisposable

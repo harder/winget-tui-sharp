@@ -87,8 +87,14 @@ public sealed class AppState
     internal bool InvalidateCachedDetail (string id) => _detailCache.Remove (id);
     internal void ClearCachedDetails () => _detailCache.Clear ();
 
-    internal void RecordPinSnapshot (IReadOnlyDictionary<string, PinState> pins) =>
-        _pinSnapshot.Record (pins);
+    internal bool RecordPinSnapshot (IReadOnlyDictionary<string, PinState> pins) =>
+        _pinSnapshot.TryRecord (pins);
+
+    internal bool ApplyPinSnapshot (IEnumerable<Package> packages) =>
+        _pinSnapshot.TryApply (packages);
+
+    internal bool TryGetSnapshotPin (string id, out PinState state) =>
+        _pinSnapshot.TryGet (id, out state);
 
     internal void MarkPinsStale ()
     {
@@ -469,6 +475,36 @@ internal enum ForegroundWorkflow
 
 internal readonly record struct ForegroundAdmission (ForegroundWorkflow Workflow, long Id);
 
+internal sealed class OperationReservation : IDisposable
+{
+    private readonly ForegroundWorkflowCoordinator _owner;
+    private int _state;
+
+    internal OperationReservation (ForegroundWorkflowCoordinator owner, ForegroundAdmission admission)
+    {
+        _owner = owner;
+        Admission = admission;
+    }
+
+    internal ForegroundAdmission Admission { get; }
+
+    /// <summary>Transfers release responsibility to the operation runner exactly once.</summary>
+    internal bool TryTransfer (out ForegroundAdmission admission)
+    {
+        admission = Admission;
+
+        return Interlocked.CompareExchange (ref _state, 1, 0) == 0;
+    }
+
+    public void Dispose ()
+    {
+        if (Interlocked.CompareExchange (ref _state, 2, 0) == 0)
+        {
+            _owner.Release (Admission);
+        }
+    }
+}
+
 /// <summary>Serializes user-visible foreground workflows with idempotent identity-based release.</summary>
 internal sealed class ForegroundWorkflowCoordinator
 {
@@ -493,6 +529,20 @@ internal sealed class ForegroundWorkflowCoordinator
 
             return true;
         }
+    }
+
+    internal bool TryReserveOperation (out OperationReservation? reservation)
+    {
+        if (!TryBegin (ForegroundWorkflow.Operation, out ForegroundAdmission admission))
+        {
+            reservation = null;
+
+            return false;
+        }
+
+        reservation = new (this, admission);
+
+        return true;
     }
 
     internal bool Release (ForegroundAdmission admission)
@@ -531,6 +581,9 @@ internal sealed class ForegroundWorkflowCoordinator
 internal sealed class BoundedPinSnapshot
 {
     internal const int MaxEntries = 4096;
+    internal const int MaxAggregateCharacters = 256 * 1024;
+    internal const int MaxKeyCharacters = 4096;
+    internal const int MaxGatingVersionCharacters = 256;
 
     private readonly Dictionary<string, PinState> _states = new (StringComparer.OrdinalIgnoreCase);
 
@@ -538,19 +591,115 @@ internal sealed class BoundedPinSnapshot
     internal bool HasSnapshot { get; private set; }
     internal int Count => _states.Count;
 
-    internal void Record (IReadOnlyDictionary<string, PinState> pins)
+    internal bool TryRecord (IReadOnlyDictionary<string, PinState> pins)
     {
+        ArgumentNullException.ThrowIfNull (pins);
+        int reportedCount;
+
+        try
+        {
+            reportedCount = pins.Count;
+        }
+        catch
+        {
+            IsFresh = false;
+
+            return false;
+        }
+
+        // A trustworthy Count lets a huge source fail without even asking it for an enumerator.
+        if (reportedCount < 0 || reportedCount > MaxEntries)
+        {
+            IsFresh = false;
+
+            return false;
+        }
+
+        Dictionary<string, PinState> candidate = new (
+            Math.Min (reportedCount, MaxEntries),
+            StringComparer.OrdinalIgnoreCase);
+        int aggregateCharacters = 0;
+        int inspected = 0;
+
+        try
+        {
+            foreach ((string id, PinState sourceState) in pins)
+            {
+                if (inspected++ >= MaxEntries
+                    || string.IsNullOrEmpty (id)
+                    || id.Length > MaxKeyCharacters)
+                {
+                    IsFresh = false;
+
+                    return false;
+                }
+
+                string? gatingVersion = sourceState.GatingVersion is null
+                                            ? null
+                                            : StatusOwnership.TruncateScalarSafe (
+                                                sourceState.GatingVersion,
+                                                MaxGatingVersionCharacters);
+                int entryCharacters = id.Length + (gatingVersion?.Length ?? 0);
+
+                if (entryCharacters > MaxAggregateCharacters - aggregateCharacters)
+                {
+                    IsFresh = false;
+
+                    return false;
+                }
+
+                aggregateCharacters += entryCharacters;
+                candidate [id] = sourceState with { GatingVersion = gatingVersion };
+            }
+        }
+        catch
+        {
+            IsFresh = false;
+
+            return false;
+        }
+
         _states.Clear ();
 
-        foreach ((string id, PinState state) in pins.OrderBy (entry => entry.Key, StringComparer.OrdinalIgnoreCase)
-                                                    .Take (MaxEntries))
+        foreach ((string id, PinState state) in candidate)
         {
-            _states [id] = state;
+            _states.Add (id, state);
         }
 
         HasSnapshot = true;
         IsFresh = true;
+
+        return true;
     }
 
     internal void MarkStale () => IsFresh = false;
+
+    internal bool TryGet (string id, out PinState state)
+    {
+        if (!IsFresh)
+        {
+            state = PinState.Unpinned;
+
+            return false;
+        }
+
+        return _states.TryGetValue (id, out state);
+    }
+
+    internal bool TryApply (IEnumerable<Package> packages)
+    {
+        if (!IsFresh)
+        {
+            return false;
+        }
+
+        foreach (Package package in packages)
+        {
+            package.PinState = _states.TryGetValue (package.Id, out PinState state)
+                                   ? state
+                                   : PinState.Unpinned;
+        }
+
+        return true;
+    }
 }
