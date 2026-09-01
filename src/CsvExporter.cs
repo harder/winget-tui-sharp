@@ -154,3 +154,181 @@ internal sealed record CsvSnapshot (
 }
 
 internal sealed record CsvRow (string Name, string Id, string Version, string AvailableVersion, string Source);
+
+/// <summary>
+/// Owns export single-flight identity, linked cancellation, and its loading lease independently
+/// from Terminal.Gui so lifecycle transitions can be exercised deterministically.
+/// </summary>
+internal sealed class ExportWorkflowState : IDisposable
+{
+    internal const string AdmissionRejectedMessage =
+        "Too many background requests are still pending; export was not started";
+
+    private readonly object _gate = new ();
+    private ExportOperation? _active;
+    private bool _disposed;
+
+    internal bool IsActive
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _active is not null;
+            }
+        }
+    }
+
+    internal bool TryBegin (
+        CancellationToken lifetimeToken,
+        string activity,
+        Func<IDisposable> acquireLoading,
+        out ExportOperation operation)
+    {
+        ArgumentNullException.ThrowIfNull (activity);
+        ArgumentNullException.ThrowIfNull (acquireLoading);
+
+        CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource (lifetimeToken);
+        IDisposable loading;
+
+        try
+        {
+            loading = acquireLoading ();
+        }
+        catch
+        {
+            cancellation.Dispose ();
+            throw;
+        }
+
+        ExportOperation candidate = new (cancellation, loading, activity);
+
+        lock (_gate)
+        {
+            if (_disposed || _active is not null || lifetimeToken.IsCancellationRequested)
+            {
+                candidate.Dispose ();
+                operation = null!;
+
+                return false;
+            }
+
+            _active = candidate;
+            operation = candidate;
+
+            return true;
+        }
+    }
+
+    internal bool IsCurrent (ExportOperation operation)
+    {
+        lock (_gate)
+        {
+            return ReferenceEquals (_active, operation);
+        }
+    }
+
+    internal ExportCompletion Complete (ExportOperation operation, string currentStatus)
+    {
+        bool wasCurrent;
+
+        lock (_gate)
+        {
+            wasCurrent = ReferenceEquals (_active, operation);
+
+            if (wasCurrent)
+            {
+                _active = null;
+            }
+        }
+
+        if (!wasCurrent)
+        {
+            return new (WasCurrent: false, OwnedStatus: false);
+        }
+
+        operation.Dispose ();
+
+        return new (
+            WasCurrent: true,
+            OwnedStatus: string.Equals (currentStatus, operation.Activity, StringComparison.Ordinal));
+    }
+
+    internal bool RejectAdmission (ExportOperation operation, out string message)
+    {
+        ExportCompletion completion = Complete (operation, operation.Activity);
+        message = AdmissionRejectedMessage;
+
+        return completion.WasCurrent;
+    }
+
+    internal void Release (ExportOperation operation) => Complete (operation, currentStatus: string.Empty);
+
+    internal void CancelActive ()
+    {
+        ExportOperation? active;
+
+        lock (_gate)
+        {
+            active = _active;
+        }
+
+        active?.Cancel ();
+    }
+
+    public void Dispose ()
+    {
+        ExportOperation? active;
+
+        lock (_gate)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            active = _active;
+            _active = null;
+        }
+
+        active?.Cancel ();
+        active?.Dispose ();
+    }
+}
+
+internal sealed class ExportOperation : IDisposable
+{
+    private CancellationTokenSource? _cancellation;
+    private IDisposable? _loading;
+
+    internal ExportOperation (CancellationTokenSource cancellation, IDisposable loading, string activity)
+    {
+        _cancellation = cancellation;
+        _loading = loading;
+        Activity = activity;
+    }
+
+    internal string Activity { get; }
+    internal CancellationToken Token => _cancellation?.Token ?? new (canceled: true);
+
+    internal void Cancel ()
+    {
+        try
+        {
+            _cancellation?.Cancel ();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Completion won the race and has already released the request.
+        }
+    }
+
+    public void Dispose ()
+    {
+        Interlocked.Exchange (ref _loading, null)?.Dispose ();
+        Interlocked.Exchange (ref _cancellation, null)?.Dispose ();
+    }
+}
+
+internal readonly record struct ExportCompletion (bool WasCurrent, bool OwnedStatus);

@@ -64,9 +64,22 @@ public sealed class AppState
     public int BumpViewGeneration () => ++ViewGeneration;
     public int BumpDetailGeneration () => ++DetailGeneration;
 
-    internal bool TryGetCachedDetail (string id, out PackageDetail detail) => _detailCache.TryGet (id, out detail);
+    internal bool TryGetCachedDetail (Package context, out PackageDetail detail)
+    {
+        if (!_detailCache.TryGet (context.Id, out detail))
+        {
+            return false;
+        }
+
+        detail.MergeContext (context);
+        detail.EnsureDetailHint ();
+        _detailCache.Set (context.Id, detail);
+
+        return true;
+    }
+
     internal bool CacheDetail (string id, PackageDetail detail) => _detailCache.Set (id, detail);
-    internal bool RemoveCachedDetail (string id) => _detailCache.Remove (id);
+    internal bool InvalidateCachedDetail (string id) => _detailCache.Remove (id);
     internal void ClearCachedDetails () => _detailCache.Clear ();
 
     /// <summary>

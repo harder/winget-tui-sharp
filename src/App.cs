@@ -34,6 +34,7 @@ public sealed class App : Runnable
     private readonly Label _searchHint;
     private readonly Label _backendLabel;
     private readonly BackgroundTaskTracker _background = new ();
+    private readonly ExportWorkflowState _exportWorkflow = new ();
     private readonly object _progressGate = new ();
     private readonly TimeSpan? _smokeDelay;
     private CancellationTokenSource _viewCts;
@@ -44,7 +45,6 @@ public sealed class App : Runnable
     // cover list/detail refreshes that already cancel implicitly on navigation.
     private CancellationTokenSource? _opCts;
     private CancellationTokenSource? _preflightCts;
-    private CancellationTokenSource? _exportCts;
 
     // True while a short preflight fetch (version list / installer preview) is running, so a
     // rapid second trigger can't queue a duplicate modal or race the status line.
@@ -289,7 +289,7 @@ public sealed class App : Runnable
         CancelSource (_detailCts);
         CancelSource (_preflightCts);
         CancelSource (_opCts);
-        CancelSource (_exportCts);
+        _exportWorkflow.CancelActive ();
 
         if (_smokeTimer is not null && App is { } app)
         {
@@ -347,8 +347,7 @@ public sealed class App : Runnable
         _preflightCts = null;
         _opCts?.Dispose ();
         _opCts = null;
-        _exportCts?.Dispose ();
-        _exportCts = null;
+        _exportWorkflow.Dispose ();
     }
 
     /// <summary>
@@ -1031,11 +1030,8 @@ public sealed class App : Runnable
             return;
         }
 
-        if (_state.TryGetCachedDetail (p.Id, out PackageDetail cached))
+        if (_state.TryGetCachedDetail (p, out PackageDetail cached))
         {
-            cached.MergeContext (p);
-            cached.EnsureDetailHint ();
-            _state.CacheDetail (p.Id, cached);
             _state.CurrentDetail = cached;
             _detailPanel.SetDetail (cached, false);
             RefreshStatusBar ();
@@ -2162,7 +2158,7 @@ public sealed class App : Runnable
                                                                           {
                                                                               if (result.Success)
                                                                               {
-                                                                                  _state.RemoveCachedDetail (id);
+                                                                                  _state.InvalidateCachedDetail (id);
                                                                               }
 
                                                                               _state.StatusMessage = result.Success
@@ -2284,7 +2280,7 @@ public sealed class App : Runnable
 
                                                                               if (result.Operation.PackageId is { } id)
                                                                               {
-                                                                                  _state.RemoveCachedDetail (id);
+                                                                                  _state.InvalidateCachedDetail (id);
                                                                               }
                                                                           }
 
@@ -2481,7 +2477,7 @@ public sealed class App : Runnable
 
     private void ExportCsv ()
     {
-        if (Volatile.Read (ref _exportCts) is not null)
+        if (_exportWorkflow.IsActive)
         {
             return;
         }
@@ -2505,10 +2501,16 @@ public sealed class App : Runnable
 
         string path = Path.Combine (Environment.CurrentDirectory, "winget-tui-export.csv");
         string activity = $"Exporting {snapshot.Rows.Count} rows…";
-        CancellationTokenSource request = CreateLifetimeLinkedSource ();
-        _exportCts = request;
-        CancellationToken ct = request.Token;
-        IDisposable loading = _state.AcquireLoading ();
+        if (!_exportWorkflow.TryBegin (
+                _background.LifetimeToken,
+                activity,
+                () => _state.AcquireLoading (),
+                out ExportOperation operation))
+        {
+            return;
+        }
+
+        CancellationToken ct = operation.Token;
         _state.StatusMessage = activity;
         _state.StatusIsError = false;
         RefreshStatusBar ();
@@ -2519,13 +2521,11 @@ public sealed class App : Runnable
                                                  {
                                                      await CsvExporter.WriteAtomicAsync (path, snapshot, ct);
                                                      await DispatchAsync (() => CompleteExport (
-                                                                                  request,
-                                                                                  loading,
-                                                                                  activity,
+                                                                                  operation,
                                                                                   FormatExportSuccess (snapshot, path),
                                                                                   isError: false),
                                                                           ct,
-                                                                          () => ReferenceEquals (_exportCts, request));
+                                                                          () => _exportWorkflow.IsCurrent (operation));
                                                  }
                                                  catch (OperationCanceledException) when (ct.IsCancellationRequested)
                                                  {
@@ -2534,49 +2534,44 @@ public sealed class App : Runnable
                                                  catch (Exception ex)
                                                  {
                                                      await DispatchAsync (() => CompleteExport (
-                                                                                  request,
-                                                                                  loading,
-                                                                                  activity,
+                                                                                  operation,
                                                                                   $"Export failed: {ex.Message}",
                                                                                   isError: true),
                                                                           lifetimeToken,
-                                                                          () => ReferenceEquals (_exportCts, request));
+                                                                          () => _exportWorkflow.IsCurrent (operation));
                                                  }
                                                  finally
                                                  {
-                                                     loading.Dispose ();
-                                                     Interlocked.CompareExchange (ref _exportCts, null, request);
-                                                     request.Dispose ();
+                                                     _exportWorkflow.Release (operation);
                                                  }
                                              });
 
         if (!admitted)
         {
-            loading.Dispose ();
-            Interlocked.CompareExchange (ref _exportCts, null, request);
-            request.Dispose ();
-            ReportRejectedBackgroundAdmission ();
+            if (_exportWorkflow.RejectAdmission (operation, out string message))
+            {
+                _state.StatusMessage = message;
+                _state.StatusIsError = true;
+                RefreshStatusBar ();
+            }
         }
     }
 
     private void CompleteExport (
-        CancellationTokenSource request,
-        IDisposable loading,
-        string activity,
+        ExportOperation operation,
         string message,
         bool isError)
     {
-        if (!ReferenceEquals (_exportCts, request))
+        ExportCompletion completion = _exportWorkflow.Complete (operation, _state.StatusMessage);
+
+        if (!completion.WasCurrent)
         {
             return;
         }
 
-        _exportCts = null;
-        loading.Dispose ();
-
         // A newer operation may own the status line even though this export still owns its task
         // identity. In that case completion must not erase or replace the newer message.
-        if (PreflightOwnsActivity (_state.StatusMessage, activity))
+        if (completion.OwnedStatus)
         {
             _state.StatusMessage = message;
             _state.StatusIsError = isError;

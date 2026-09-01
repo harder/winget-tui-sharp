@@ -22,6 +22,7 @@ internal sealed class BoundedDetailCache
     private readonly Dictionary<string, LinkedListNode<Entry>> _entries = new (StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<Entry> _recency = new ();
     private int _retainedCharacters;
+    private long _retainedCollectionValues;
 
     internal BoundedDetailCache (
         int maxEntries = DefaultMaxEntries,
@@ -55,8 +56,30 @@ internal sealed class BoundedDetailCache
         }
     }
 
+    internal int EstimatedCharacters => RetainedCharacters;
+
+    internal long RetainedCollectionValues
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _retainedCollectionValues;
+            }
+        }
+    }
+
     internal int MaxEntries => _maxEntries;
     internal int MaxRetainedCharacters => _maxRetainedCharacters;
+    internal long MaxRetainedCollectionValues => (long)_maxEntries * MaxCollectionValuesPerEntry;
+
+    internal CacheMetrics GetMetrics ()
+    {
+        lock (_gate)
+        {
+            return new (_entries.Count, _retainedCharacters, _retainedCollectionValues);
+        }
+    }
 
     internal bool TryGet (string key, out PackageDetail detail)
     {
@@ -102,10 +125,12 @@ internal sealed class BoundedDetailCache
                 return false;
             }
 
-            Entry entry = new (key, ownedDetail!, retainedCharacters);
+            int collectionValues = (int)CountCollectionValues (ownedDetail!);
+            Entry entry = new (key, ownedDetail!, retainedCharacters, collectionValues);
             LinkedListNode<Entry> node = _recency.AddFirst (entry);
             _entries.Add (key, node);
             _retainedCharacters += retainedCharacters;
+            _retainedCollectionValues += collectionValues;
 
             while (_entries.Count > _maxEntries || _retainedCharacters > _maxRetainedCharacters)
             {
@@ -113,6 +138,7 @@ internal sealed class BoundedDetailCache
                 _recency.RemoveLast ();
                 _entries.Remove (oldest.Value.Key);
                 _retainedCharacters -= oldest.Value.RetainedCharacters;
+                _retainedCollectionValues -= oldest.Value.CollectionValues;
             }
 
             return true;
@@ -136,6 +162,7 @@ internal sealed class BoundedDetailCache
             _entries.Clear ();
             _recency.Clear ();
             _retainedCharacters = 0;
+            _retainedCollectionValues = 0;
         }
     }
 
@@ -148,6 +175,7 @@ internal sealed class BoundedDetailCache
 
         _recency.Remove (node);
         _retainedCharacters -= node.Value.RetainedCharacters;
+        _retainedCollectionValues -= node.Value.CollectionValues;
 
         return true;
     }
@@ -248,10 +276,7 @@ internal sealed class BoundedDetailCache
 
     private static PackageDetail? TryCloneForRetention (PackageDetail detail)
     {
-        long collectionValues = (detail.Tags?.Count ?? 0)
-                                + (detail.Documentation?.Count ?? 0)
-                                + (detail.ProductCodes?.Count ?? 0)
-                                + (detail.PackageFamilyNames?.Count ?? 0);
+        long collectionValues = CountCollectionValues (detail);
 
         if (collectionValues > MaxCollectionValuesPerEntry)
         {
@@ -259,13 +284,22 @@ internal sealed class BoundedDetailCache
         }
 
         PackageDetail clone = Clone (detail);
-        collectionValues = (clone.Tags?.Count ?? 0)
-                           + (clone.Documentation?.Count ?? 0)
-                           + (clone.ProductCodes?.Count ?? 0)
-                           + (clone.PackageFamilyNames?.Count ?? 0);
+        collectionValues = CountCollectionValues (clone);
 
         return collectionValues <= MaxCollectionValuesPerEntry ? clone : null;
     }
 
-    private sealed record Entry (string Key, PackageDetail Detail, int RetainedCharacters);
+    private static long CountCollectionValues (PackageDetail detail) =>
+        (long)(detail.Tags?.Count ?? 0)
+        + (detail.Documentation?.Count ?? 0)
+        + (detail.ProductCodes?.Count ?? 0)
+        + (detail.PackageFamilyNames?.Count ?? 0);
+
+    internal readonly record struct CacheMetrics (int Count, int EstimatedCharacters, long CollectionValues);
+
+    private sealed record Entry (
+        string Key,
+        PackageDetail Detail,
+        int RetainedCharacters,
+        int CollectionValues);
 }

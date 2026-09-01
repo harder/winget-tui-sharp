@@ -473,18 +473,23 @@ public sealed class DetailPanel : FrameView
     }
 
     private void ClearMarkdownRows ()
+        => ClearDynamicViews (_markdownRows, markdownRow => Remove (markdownRow.View));
+
+    internal static void ClearDynamicViews<T> (IList<T> trackedViews, Func<T, IDisposable?> remove)
     {
         Exception? firstFailure = null;
 
-        while (_markdownRows.Count > 0)
+        while (trackedViews.Count > 0)
         {
-            int index = _markdownRows.Count - 1;
-            MarkdownRow markdownRow = _markdownRows [index];
-            _markdownRows.RemoveAt (index);
+            int index = trackedViews.Count - 1;
+            T trackedView = trackedViews [index];
+            trackedViews.RemoveAt (index);
 
             try
             {
-                RemoveAndDisposeDynamicView (markdownRow.View, () => Remove (markdownRow.View));
+                // Remove returning a view is Terminal.Gui's ownership-transfer signal. A null
+                // return (or exception) means the parent may still own it, so do not dispose it.
+                remove (trackedView)?.Dispose ();
             }
             catch (Exception ex)
             {
@@ -496,18 +501,6 @@ public sealed class DetailPanel : FrameView
         if (firstFailure is not null)
         {
             System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture (firstFailure).Throw ();
-        }
-    }
-
-    internal static void RemoveAndDisposeDynamicView (IDisposable view, Action remove)
-    {
-        try
-        {
-            remove ();
-        }
-        finally
-        {
-            view.Dispose ();
         }
     }
 
