@@ -4,7 +4,9 @@ namespace WingetTuiSharp;
 /// Hard memory limits applied at backend trust boundaries: 1,000 search rows; 10,000 local
 /// rows; 256 catalogs; 2,048 versions; 4,096 total metadata or verification items; 4 Ki UTF-16
 /// code units for ordinary display fields and exact operational identities; and 64 Ki for
-/// descriptions and installation notes. Oversized identities are rejected, never truncated.
+/// descriptions and installation notes. Aggregate retained text is capped at 8 Mi characters
+/// for package rows, 1 Mi for versions, 256 Ki for sources, and 1 Mi each for one package detail
+/// or verification result. Oversized identities are rejected, never truncated.
 /// </summary>
 internal static class BackendLimits
 {
@@ -18,17 +20,27 @@ internal static class BackendLimits
     internal const int IdentityCharacters = 4 * 1_024;
     internal const int SimpleTextCharacters = 4 * 1_024;
     internal const int RichTextCharacters = 64 * 1_024;
+    internal const int PackageResultCharacters = 8 * 1_024 * 1_024;
+    internal const int VersionResultCharacters = 1 * 1_024 * 1_024;
+    internal const int SourceResultCharacters = 256 * 1_024;
+    internal const int PackageDetailCharacters = 1 * 1_024 * 1_024;
+    internal const int VerificationCharacters = 1 * 1_024 * 1_024;
 
-    internal static List<T> Materialize<T> (IReadOnlyList<T> projected, int maximum)
+    internal static List<T> Materialize<T> (
+        IReadOnlyList<T> projected,
+        int maximum,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull (projected);
         ArgumentOutOfRangeException.ThrowIfNegative (maximum);
+        cancellationToken.ThrowIfCancellationRequested ();
 
         int count = Math.Min (projected.Count, maximum);
         List<T> copy = new (count);
 
         for (int i = 0; i < count; i++)
         {
+            cancellationToken.ThrowIfCancellationRequested ();
             copy.Add (projected [i]);
         }
 
@@ -76,6 +88,83 @@ internal static class BackendLimits
         }
 
         return value [..length];
+    }
+}
+
+/// <summary>
+/// Overflow-safe aggregate character allowance. Exact values are accepted whole or rejected;
+/// display values may be shortened without splitting a UTF-16 surrogate pair.
+/// </summary>
+internal sealed class CharacterBudget
+{
+    private int _remaining;
+
+    internal CharacterBudget (int maximumCharacters)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (maximumCharacters);
+        _remaining = maximumCharacters;
+    }
+
+    internal int Remaining => _remaining;
+
+    internal bool TryReserveExact (
+        string? first,
+        string? second = null,
+        string? third = null,
+        string? fourth = null,
+        string? fifth = null)
+    {
+        long requested = (long)(first?.Length ?? 0)
+                         + (second?.Length ?? 0)
+                         + (third?.Length ?? 0)
+                         + (fourth?.Length ?? 0)
+                         + (fifth?.Length ?? 0);
+
+        if (requested > _remaining)
+        {
+            return false;
+        }
+
+        _remaining -= (int)requested;
+        return true;
+    }
+
+    internal bool TryTakeExact (string value, out string? accepted)
+    {
+        ArgumentNullException.ThrowIfNull (value);
+
+        if (value.Length > _remaining)
+        {
+            accepted = null;
+            return false;
+        }
+
+        _remaining -= value.Length;
+        accepted = value;
+        return true;
+    }
+
+    internal string? TakeDisplay (string? value, int perFieldMaximum)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (perFieldMaximum);
+
+        if (value is null)
+        {
+            return null;
+        }
+
+        int length = Math.Min (value.Length, Math.Min (perFieldMaximum, _remaining));
+
+        if (length > 0
+            && length < value.Length
+            && char.IsHighSurrogate (value [length - 1])
+            && char.IsLowSurrogate (value [length]))
+        {
+            length--;
+        }
+
+        _remaining -= length;
+        return length == value.Length ? value : value [..length];
     }
 }
 

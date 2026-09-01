@@ -79,7 +79,10 @@ public sealed class BackendBoundaryTests
     {
         HugeProjectedList projected = new (int.MaxValue);
 
-        List<int> values = BackendLimits.Materialize (projected, 7);
+        List<int> values = BackendLimits.Materialize (
+            projected,
+            7,
+            TestContext.Current.CancellationToken);
 
         Assert.Equal ([0, 1, 2, 3, 4, 5, 6], values);
         Assert.Equal (7, projected.Reads);
@@ -127,6 +130,90 @@ public sealed class BackendBoundaryTests
         Assert.Equal (5, budget.Take (100));
         Assert.Equal (0, budget.Take (1));
         Assert.Equal (0, budget.Remaining);
+    }
+
+    [Fact]
+    public void CharacterBudget_BoundsAggregateBelowWorstCaseFieldMultiplication ()
+    {
+        long naiveWorstCase = (long)BackendLimits.LocalMatches
+                              * BackendLimits.SimpleTextCharacters
+                              * 5;
+        Assert.True (naiveWorstCase > BackendLimits.PackageResultCharacters);
+        Assert.True (
+            (long)BackendLimits.Versions * BackendLimits.IdentityCharacters
+            > BackendLimits.VersionResultCharacters);
+        Assert.True (
+            (long)BackendLimits.Catalogs * BackendLimits.IdentityCharacters
+            > BackendLimits.SourceResultCharacters);
+        Assert.True (
+            (long)BackendLimits.MetadataItems * BackendLimits.SimpleTextCharacters
+            > BackendLimits.PackageDetailCharacters);
+        Assert.True (
+            (long)BackendLimits.VerificationItems * BackendLimits.SimpleTextCharacters * 2
+            > BackendLimits.VerificationCharacters);
+
+        CharacterBudget budget = new (BackendLimits.PackageResultCharacters);
+        string maximumField = new ('x', BackendLimits.SimpleTextCharacters);
+        long retained = 0;
+
+        for (int i = 0; i < BackendLimits.LocalMatches * 5; i++)
+        {
+            retained += budget.TakeDisplay (maximumField, BackendLimits.SimpleTextCharacters)!.Length;
+        }
+
+        Assert.Equal (BackendLimits.PackageResultCharacters, retained);
+        Assert.Equal (0, budget.Remaining);
+    }
+
+    [Fact]
+    public void CharacterBudget_ExactReservationIsAtomicAtBoundary ()
+    {
+        CharacterBudget budget = new (5);
+        CharacterBudget rejected = new (5);
+
+        Assert.True (budget.TryReserveExact ("abc", "de"));
+        Assert.Equal (0, budget.Remaining);
+        Assert.False (budget.TryReserveExact ("x"));
+        Assert.Equal (0, budget.Remaining);
+        Assert.False (rejected.TryReserveExact ("abcd", "ef"));
+        Assert.Equal (5, rejected.Remaining);
+    }
+
+    [Fact]
+    public void CharacterBudget_DoesNotSplitSurrogateAtAggregateBoundary ()
+    {
+        CharacterBudget budget = new (4);
+
+        string? first = budget.TakeDisplay ("abc\U0001F680", BackendLimits.SimpleTextCharacters);
+        string? second = budget.TakeDisplay ("x", BackendLimits.SimpleTextCharacters);
+
+        Assert.Equal ("abc", first);
+        Assert.Equal ("x", second);
+        Assert.Equal (4, first!.Length + second!.Length);
+        Assert.Equal (0, budget.Remaining);
+    }
+
+    [Fact]
+    public void Materialize_StopsPromptlyWhenProjectionCancels ()
+    {
+        using CancellationTokenSource cancellation = new ();
+        CancellingProjectedList projected = new (100, cancelAfterReads: 3, cancellation);
+
+        Assert.ThrowsAny<OperationCanceledException> (
+            () => BackendLimits.Materialize (projected, 100, cancellation.Token));
+        Assert.Equal (3, projected.Reads);
+    }
+
+    [Fact]
+    public void Materialize_PreCancelledTokenDoesNotReadProjection ()
+    {
+        using CancellationTokenSource cancellation = new ();
+        cancellation.Cancel ();
+        CancellingProjectedList projected = new (100, cancelAfterReads: 100, cancellation);
+
+        Assert.ThrowsAny<OperationCanceledException> (
+            () => BackendLimits.Materialize (projected, 100, cancellation.Token));
+        Assert.Equal (0, projected.Reads);
     }
 
     [Fact]
@@ -207,6 +294,32 @@ public sealed class BackendBoundaryTests
             get
             {
                 Reads++;
+                return index;
+            }
+        }
+
+        public IEnumerator<int> GetEnumerator () => throw new InvalidOperationException ("Enumeration is forbidden.");
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator () => GetEnumerator ();
+    }
+
+    private sealed class CancellingProjectedList (
+        int count,
+        int cancelAfterReads,
+        CancellationTokenSource cancellation) : IReadOnlyList<int>
+    {
+        public int Reads { get; private set; }
+        public int Count { get; } = count;
+        public int this [int index]
+        {
+            get
+            {
+                Reads++;
+
+                if (Reads == cancelAfterReads)
+                {
+                    cancellation.Cancel ();
+                }
+
                 return index;
             }
         }
