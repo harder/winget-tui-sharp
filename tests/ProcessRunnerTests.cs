@@ -649,9 +649,20 @@ public sealed class ProcessRunnerTests : IDisposable
 
             if (File.Exists (path))
             {
-                string text = await File.ReadAllTextAsync (path, cancellationToken);
+                string? text = null;
 
-                if (int.TryParse (text, NumberStyles.None, CultureInfo.InvariantCulture, out int pid))
+                try
+                {
+                    text = await File.ReadAllTextAsync (path, cancellationToken);
+                }
+                catch (IOException)
+                {
+                    // The writer may have created the file but not released its handle yet.
+                    // Retry until the complete PID is readable or the deadline expires.
+                }
+
+                if (text is not null
+                    && int.TryParse (text, NumberStyles.None, CultureInfo.InvariantCulture, out int pid))
                 {
                     return pid;
                 }
@@ -758,6 +769,11 @@ public sealed class ProcessRunnerTests : IDisposable
             }
             catch (DirectoryNotFoundException)
             {
+                return false;
+            }
+            catch (IOException)
+            {
+                // procfs entries can disappear after the open but before the read completes.
                 return false;
             }
         }
