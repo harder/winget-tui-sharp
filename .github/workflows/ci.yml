@@ -48,7 +48,16 @@ jobs:
         run: dotnet build tests/WingetTuiSharp.Tests.csproj --no-restore --no-dependencies --configuration Release
 
       - name: Test
-        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 134
+        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 146
+
+      - name: Graceful mock smoke
+        run: |
+          timeout 15s dotnet bin/Release/net10.0/winget-tui-sharp.dll --smoke 2> smoke.err
+          if [ -s smoke.err ]; then
+            echo "::error::Mock run produced stderr output"
+            cat smoke.err
+            exit 1
+          fi
 
   build-and-test:
     needs: workflow-lint
@@ -111,17 +120,25 @@ jobs:
           /p:InformationalVersion=${{ steps.version.outputs.ci_version }}
 
       - name: Test
-        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 134
+        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 146
 
-      # Mock-backend smoke: launch the binary with --mock for a couple seconds and verify
-      # it exits cleanly (no stderr output, no crash). Catches regressions that compile
-      # cleanly but blow up at startup.
-      - name: Mock-run smoke
+      # The app self-stops through its normal shutdown path. The outer deadline is only a
+      # deadlock guard; force-kill is failure cleanup, never the successful path.
+      - name: Graceful mock smoke
         shell: pwsh
         run: |
-          $proc = Start-Process -FilePath "dotnet" -ArgumentList "bin/Release/net10.0/winget-tui-sharp.dll", "--mock" -PassThru -RedirectStandardError err.log
-          Start-Sleep -Seconds 2
-          if (!$proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+          $proc = Start-Process -FilePath "dotnet" -ArgumentList "bin/Release/net10.0/winget-tui-sharp.dll", "--smoke" -PassThru -RedirectStandardError err.log
+          if (!$proc.WaitForExit(15000)) {
+            Stop-Process -Id $proc.Id -Force
+            Write-Host "::error::Mock run did not complete graceful shutdown within 15 seconds"
+            exit 1
+          }
+          $proc.WaitForExit()
+          if ($proc.ExitCode -ne 0) {
+            Write-Host "::error::Mock run exited with code $($proc.ExitCode)"
+            if ((Get-Item err.log).Length -gt 0) { Get-Content err.log }
+            exit 1
+          }
           if ((Get-Item err.log).Length -gt 0) {
             Write-Host "::error::Mock run produced stderr output"
             Get-Content err.log

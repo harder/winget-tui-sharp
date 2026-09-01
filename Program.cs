@@ -118,6 +118,7 @@ if (args.Length > 0 && args [0] is "--comdiag")
 // These are preferences, not hard guarantees: a requested backend that can't run degrades
 // (with a stderr note) — --com on a non-Windows build → CLI, and any CLI path with no winget
 // on PATH → mock. Scripts that need a guaranteed backend should check that note.
+bool smokeMode = args.Any (a => a == "--smoke");
 IBackend backend = SelectBackend (args);
 
 // Theme selection: --theme=<amber|sage|moss|rose>. Defaults to Sage. An unrecognized id
@@ -137,17 +138,70 @@ if (themeArg is null || !Theme.TryApply (themeArg))
     Theme.Register ();
 }
 
-IApplication app = Application.Create ().Init ();
-App window = new (backend);
-app.Run (window);
-window.Dispose ();
-app.Dispose ();
+IApplication? app = null;
+App? window = null;
+int exitCode = 0;
+
+try
+{
+    app = Application.Create ().Init ();
+    window = new (backend, smokeMode ? TimeSpan.FromSeconds (1) : null);
+    app.Run (window);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine ($"Application failed: {ex.Message}");
+    exitCode = 1;
+}
+finally
+{
+    if (window is not null)
+    {
+        try
+        {
+            bool drained = await window.ShutdownAsync (TimeSpan.FromSeconds (5));
+
+            if (!drained)
+            {
+                Console.Error.WriteLine ("Shutdown timed out while waiting for background work.");
+                exitCode = 1;
+            }
+
+            if (window.BackgroundFailures.Count > 0 || window.DroppedBackgroundFailureCount > 0)
+            {
+                Console.Error.WriteLine (
+                    $"Background work failed {window.BackgroundFailures.Count + window.DroppedBackgroundFailureCount} time(s)." +
+                    (window.DroppedBackgroundFailureCount > 0
+                         ? $" {window.DroppedBackgroundFailureCount} additional failure(s) were not retained."
+                         : string.Empty));
+
+                foreach (Exception failure in window.BackgroundFailures)
+                {
+                    Console.Error.WriteLine ($"- {failure.GetType ().Name}: {failure.Message}");
+                }
+
+                exitCode = 1;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine ($"Shutdown failed: {ex.Message}");
+            exitCode = 1;
+        }
+
+        window.Dispose ();
+    }
+
+    app?.Dispose ();
+}
+
+Environment.ExitCode = exitCode;
 
 return;
 
 static IBackend SelectBackend (string [] args)
 {
-    bool wantMock = args.Any (a => a is "--mock" or "-m");
+    bool wantMock = args.Any (a => a is "--mock" or "-m" or "--smoke");
     bool wantCli = args.Any (a => a is "--cli");
     bool wantCom = args.Any (a => a is "--com");
 

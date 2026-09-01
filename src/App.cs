@@ -33,23 +33,35 @@ public sealed class App : Runnable
     private readonly StatusBar _statusBar;
     private readonly Label _searchHint;
     private readonly Label _backendLabel;
-    private CancellationTokenSource _viewCts = new ();
-    private CancellationTokenSource _detailCts = new ();
+    private readonly BackgroundTaskTracker _background = new ();
+    private readonly object _progressGate = new ();
+    private readonly TimeSpan? _smokeDelay;
+    private CancellationTokenSource _viewCts;
+    private CancellationTokenSource _detailCts;
 
     // Non-null only while an install/upgrade/uninstall (or batch) is in flight. Doubles as the
     // "an operation is running" gate for Esc-to-cancel — distinct from _viewCts/_detailCts, which
     // cover list/detail refreshes that already cancel implicitly on navigation.
     private CancellationTokenSource? _opCts;
+    private CancellationTokenSource? _preflightCts;
 
     // True while a short preflight fetch (version list / installer preview) is running, so a
     // rapid second trigger can't queue a duplicate modal or race the status line.
-    private bool _preflightBusy;
+    private int _preflightBusy;
     private object? _spinnerTimer;
+    private object? _smokeTimer;
     private bool _initialLoadDone;
+    private int _shutdownStarted;
+    private int _uiAccepting = 1;
+    private PendingProgress? _pendingProgress;
+    private bool _progressDispatcherRunning;
 
-    public App (IBackend backend)
+    public App (IBackend backend, TimeSpan? smokeDelay = null)
     {
         _state = new (backend);
+        _smokeDelay = smokeDelay;
+        _viewCts = CreateLifetimeLinkedSource ();
+        _detailCts = CreateLifetimeLinkedSource ();
         SchemeName = Theme.AppSchemeName;
         Title = "winget-tui (Terminal.Gui port)";
 
@@ -223,11 +235,205 @@ public sealed class App : Runnable
             StartSpinner ();
             LoadBackendDescription ();
             LoadSources ();
+
+            if (_smokeDelay is { } delay && App is { } app)
+            {
+                _smokeTimer = app.AddTimeout (delay, () =>
+                                                       {
+                                                           _smokeTimer = null;
+                                                           RequestGracefulStop ();
+
+                                                           return false;
+                                                       });
+            }
         }
         else if (!newIsRunning)
         {
+            BeginShutdown ();
             StopSpinner ();
         }
+    }
+
+    /// <summary>
+    /// Stops admission, cancels every application-owned lifetime, and waits a bounded amount of
+    /// time for admitted work. Safe to call repeatedly.
+    /// </summary>
+    public async Task<bool> ShutdownAsync (TimeSpan timeout)
+    {
+        BeginShutdown ();
+        bool drained = await _background.DrainAsync (timeout).ConfigureAwait (false);
+
+        if (drained)
+        {
+            DisposeCancellationSources ();
+            _background.Dispose ();
+        }
+
+        return drained;
+    }
+
+    public IReadOnlyList<Exception> BackgroundFailures => _background.Failures;
+    public int DroppedBackgroundFailureCount => _background.DroppedFailureCount;
+
+    private void BeginShutdown ()
+    {
+        if (Interlocked.Exchange (ref _shutdownStarted, 1) != 0)
+        {
+            return;
+        }
+
+        Volatile.Write (ref _uiAccepting, 0);
+        _background.BeginStop ();
+        CancelSource (_viewCts);
+        CancelSource (_detailCts);
+        CancelSource (_preflightCts);
+        CancelSource (_opCts);
+
+        if (_smokeTimer is not null && App is { } app)
+        {
+            app.RemoveTimeout (_smokeTimer);
+            _smokeTimer = null;
+        }
+    }
+
+    private void RequestGracefulStop ()
+    {
+        BeginShutdown ();
+        RequestStop ();
+    }
+
+    private CancellationTokenSource CreateLifetimeLinkedSource () =>
+        CancellationTokenSource.CreateLinkedTokenSource (_background.LifetimeToken);
+
+    private CancellationTokenSource ReplaceLifetimeLinkedSource (ref CancellationTokenSource source)
+    {
+        CancellationTokenSource replacement = CreateLifetimeLinkedSource ();
+        CancellationTokenSource previous = source;
+        source = replacement;
+        CancelSource (previous);
+        previous.Dispose ();
+
+        return replacement;
+    }
+
+    private static void CancelSource (CancellationTokenSource? source)
+    {
+        if (source is null)
+        {
+            return;
+        }
+
+        try
+        {
+            source.Cancel ();
+        }
+        catch (ObjectDisposedException)
+        {
+            // A worker may have completed and disposed its request source concurrently.
+        }
+        catch
+        {
+            // A third-party cancellation callback must not prevent the remaining shutdown work.
+        }
+    }
+
+    private void DisposeCancellationSources ()
+    {
+        _viewCts.Dispose ();
+        _detailCts.Dispose ();
+        _preflightCts?.Dispose ();
+        _preflightCts = null;
+        _opCts?.Dispose ();
+        _opCts = null;
+    }
+
+    /// <summary>
+    /// Queues a UI callback only while both the application lifetime and request are current.
+    /// Cancellation settles the returned task even if Terminal.Gui never runs its queued timeout.
+    /// </summary>
+    private async Task<bool> DispatchAsync (
+        Action action,
+        CancellationToken requestToken,
+        Func<bool>? isCurrent = null)
+    {
+        bool CanQueue () => UiCallbackCanQueue (
+            Volatile.Read (ref _uiAccepting) != 0,
+            _background.LifetimeToken,
+            requestToken);
+        bool CanExecute () => UiCallbackCanRun (
+            Volatile.Read (ref _uiAccepting) != 0,
+            _background.LifetimeToken,
+            requestToken,
+            isCurrent);
+
+        if (!CanQueue () || App is not { } app)
+        {
+            return false;
+        }
+
+        TaskCompletionSource<bool> completion = new (TaskCreationOptions.RunContinuationsAsynchronously);
+        using CancellationTokenSource cancellation = CancellationTokenSource.CreateLinkedTokenSource (
+            _background.LifetimeToken,
+            requestToken);
+        using CancellationTokenRegistration registration = cancellation.Token.Register (
+            () => completion.TrySetResult (false));
+
+        try
+        {
+            app.Invoke (() =>
+                        {
+                            if (!CanExecute ())
+                            {
+                                completion.TrySetResult (false);
+
+                                return;
+                            }
+
+                            try
+                            {
+                                action ();
+                                completion.TrySetResult (true);
+                            }
+                            catch (Exception ex)
+                            {
+                                completion.TrySetException (ex);
+                            }
+                        });
+        }
+        catch (Exception) when (!CanQueue ())
+        {
+            completion.TrySetResult (false);
+        }
+
+        return await completion.Task.ConfigureAwait (false);
+    }
+
+    internal static bool UiCallbackCanRun (
+        bool accepting,
+        CancellationToken lifetimeToken,
+        CancellationToken requestToken,
+        Func<bool>? isCurrent = null) =>
+        UiCallbackCanQueue (accepting, lifetimeToken, requestToken)
+        && (isCurrent?.Invoke () ?? true);
+
+    internal static bool UiCallbackCanQueue (
+        bool accepting,
+        CancellationToken lifetimeToken,
+        CancellationToken requestToken) =>
+        accepting
+        && !lifetimeToken.IsCancellationRequested
+        && !requestToken.IsCancellationRequested;
+
+    private void ReportRejectedBackgroundAdmission ()
+    {
+        if (Volatile.Read (ref _uiAccepting) == 0 || _background.LifetimeToken.IsCancellationRequested)
+        {
+            return;
+        }
+
+        _state.StatusMessage = "Too many background requests are still pending; wait and try again";
+        _state.StatusIsError = true;
+        RefreshStatusBar ();
     }
 
     /// <summary>
@@ -236,27 +442,31 @@ public sealed class App : Runnable
     /// </summary>
     private void LoadBackendDescription ()
     {
-        Task.Run (async () =>
-                  {
-                      string description;
+        _background.TryRun (async lifetimeToken =>
+                            {
+                                string description;
 
-                      try
-                      {
-                          description = await _state.Backend.DescribeAsync (CancellationToken.None);
-                      }
-                      catch
-                      {
-                          return;
-                      }
+                                try
+                                {
+                                    description = await _state.Backend.DescribeAsync (lifetimeToken);
+                                }
+                                catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested)
+                                {
+                                    return;
+                                }
+                                catch
+                                {
+                                    return;
+                                }
 
-                      App?.Invoke (() =>
-                                   {
-                                       _state.BackendDescription = description;
-                                       _backendLabel.Text = description;
-                                       _backendLabel.SetNeedsLayout ();
-                                       _backendLabel.SetNeedsDraw ();
-                                   });
-                  });
+                                await DispatchAsync (() =>
+                                                     {
+                                                         _state.BackendDescription = description;
+                                                         _backendLabel.Text = description;
+                                                         _backendLabel.SetNeedsLayout ();
+                                                         _backendLabel.SetNeedsDraw ();
+                                                     }, lifetimeToken);
+                            });
     }
 
     /// <summary>
@@ -267,36 +477,40 @@ public sealed class App : Runnable
     /// </summary>
     private void LoadSources ()
     {
-        Task.Run (async () =>
-                  {
-                      IReadOnlyList<string> sources;
+        _background.TryRun (async lifetimeToken =>
+                            {
+                                IReadOnlyList<string> sources;
 
-                      try
-                      {
-                          sources = await _state.Backend.ListSourcesAsync (CancellationToken.None);
-                      }
-                      catch
-                      {
-                          return;
-                      }
+                                try
+                                {
+                                    sources = await _state.Backend.ListSourcesAsync (lifetimeToken);
+                                }
+                                catch (OperationCanceledException) when (lifetimeToken.IsCancellationRequested)
+                                {
+                                    return;
+                                }
+                                catch
+                                {
+                                    return;
+                                }
 
-                      if (sources.Count == 0)
-                      {
-                          return;
-                      }
+                                if (sources.Count == 0)
+                                {
+                                    return;
+                                }
 
-                      App?.Invoke (() =>
-                                   {
-                                       _state.AvailableSources = sources;
+                                await DispatchAsync (() =>
+                                                     {
+                                                         _state.AvailableSources = sources;
 
-                                       if (_state.SourceFilter is { } current
-                                           && !sources.Any (s => string.Equals (s, current, StringComparison.OrdinalIgnoreCase)))
-                                       {
-                                           _state.SourceFilter = null;
-                                           RefreshStatusBar ();
-                                       }
-                                   });
-                  });
+                                                         if (_state.SourceFilter is { } current
+                                                             && !sources.Any (s => string.Equals (s, current, StringComparison.OrdinalIgnoreCase)))
+                                                         {
+                                                             _state.SourceFilter = null;
+                                                             RefreshStatusBar ();
+                                                         }
+                                                     }, lifetimeToken);
+                            });
     }
 
     private void StartSpinner ()
@@ -308,6 +522,13 @@ public sealed class App : Runnable
 
         _spinnerTimer = App.AddTimeout (TimeSpan.FromMilliseconds (100), () =>
                                                                         {
+                                                                            if (Volatile.Read (ref _uiAccepting) == 0)
+                                                                            {
+                                                                                _spinnerTimer = null;
+
+                                                                                return false;
+                                                                            }
+
                                                                             _statusBar.Tick++;
 
                                                                             if (_statusBar.IsLoading)
@@ -334,9 +555,8 @@ public sealed class App : Runnable
     // otherwise mask the brief result). Null on a normal refresh, which shows the usual messages.
     private void TriggerRefresh (string? keepMessage = null)
     {
-        _viewCts.Cancel ();
-        _viewCts = new ();
-        CancellationToken ct = _viewCts.Token;
+        CancellationTokenSource request = ReplaceLifetimeLinkedSource (ref _viewCts);
+        CancellationToken ct = request.Token;
         int gen = _state.BumpViewGeneration ();
         AppMode mode = _state.Mode;
         string? src = _state.SourceFilter;
@@ -353,7 +573,6 @@ public sealed class App : Runnable
         {
             _state.Packages = [];
             _state.ApplyFilter ();
-            _state.Loading = false;
             _state.StatusMessage = "Press / to search for packages";
             _state.StatusIsError = false;
             RefreshTable ();
@@ -363,7 +582,7 @@ public sealed class App : Runnable
             return;
         }
 
-        _state.Loading = true;
+        IDisposable loading = _state.AcquireLoading ();
         _state.StatusMessage = keepMessage ?? $"Loading {_state.Mode}…";
 
         // Keep the op's error styling (set by the caller) when preserving its message; a plain
@@ -372,61 +591,68 @@ public sealed class App : Runnable
         RefreshStatusBar ();
         SyncTabBar ();
 
-        Task.Run (async () =>
-                  {
-                      try
-                      {
-                          IReadOnlyList<Package> packages = mode switch
-                          {
-                              AppMode.Search => await _state.Backend.SearchAsync (query, src, ct),
-                              AppMode.Upgrades => await _state.Backend.ListUpgradesAsync (src, ct),
-                              _ => await _state.Backend.ListInstalledAsync (src, ct)
-                          };
+        bool admitted = _background.TryRun (async lifetimeToken =>
+                                             {
+                                                 try
+                                                 {
+                                                     IReadOnlyList<Package> packages = mode switch
+                                                     {
+                                                         AppMode.Search => await _state.Backend.SearchAsync (query, src, ct),
+                                                         AppMode.Upgrades => await _state.Backend.ListUpgradesAsync (src, ct),
+                                                         _ => await _state.Backend.ListInstalledAsync (src, ct)
+                                                     };
 
-                          if (ct.IsCancellationRequested || gen != _state.ViewGeneration)
-                          {
-                              return;
-                          }
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              _state.Packages = packages.ToList ();
+                                                                              _state.ApplyFilter ();
+                                                                              loading.Dispose ();
 
-                          App?.Invoke (() =>
-                                       {
-                                           _state.Packages = packages.ToList ();
-                                           _state.ApplyFilter ();
-                                           _state.Loading = false;
+                                                                              // Keep the op's result line visible after the reload rather than replacing it
+                                                                              // with a package count, so the user sees what just happened.
+                                                                              if (keepMessage is null)
+                                                                              {
+                                                                                  int n = _state.Filtered.Count;
+                                                                                  _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
 
-                                           // Keep the op's result line visible after the reload rather than replacing it
-                                           // with a package count, so the user sees what just happened.
-                                           if (keepMessage is null)
-                                           {
-                                               int n = _state.Filtered.Count;
-                                               _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
+                                                                                  if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
+                                                                                  {
+                                                                                      _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
+                                                                                  }
+                                                                              }
 
-                                               // A search that hit the result cap means there's more the user can't see;
-                                               // nudge them to narrow it (only the COM backend actually caps).
-                                               if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
-                                               {
-                                                   _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
-                                               }
-                                           }
-                                           RefreshTable ();
-                                           RefreshStatusBar ();
-                                           RestoreCursorOrSelectFirst (previousSelectedId);
-                                       });
-                      }
-                      catch (OperationCanceledException) { }
-                      catch (Exception ex)
-                      {
-                          string msg = $"Error: {ex.Message}";
+                                                                              RefreshTable ();
+                                                                              RefreshStatusBar ();
+                                                                              RestoreCursorOrSelectFirst (previousSelectedId);
+                                                                          }, ct, () => gen == _state.ViewGeneration);
+                                                 }
+                                                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                 {
+                                                     // Superseded view or application shutdown.
+                                                 }
+                                                 catch (Exception ex)
+                                                 {
+                                                     string msg = $"Error: {ex.Message}";
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              loading.Dispose ();
+                                                                              _state.StatusMessage = msg;
+                                                                              _state.StatusIsError = true;
+                                                                              RefreshStatusBar ();
+                                                                          }, ct, () => gen == _state.ViewGeneration);
+                                                 }
+                                                 finally
+                                                 {
+                                                     loading.Dispose ();
+                                                     await DispatchAsync (RefreshStatusBar, lifetimeToken);
+                                                 }
+                                             });
 
-                          App?.Invoke (() =>
-                                       {
-                                           _state.Loading = false;
-                                           _state.StatusMessage = msg;
-                                           _state.StatusIsError = true;
-                                           RefreshStatusBar ();
-                                       });
-                      }
-                  }, ct);
+        if (!admitted)
+        {
+            loading.Dispose ();
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 
     private void RefreshTable ()
@@ -809,62 +1035,72 @@ public sealed class App : Runnable
         _detailPanel.SetDetail (null, true);
         CancellationToken ct = _detailCts.Token;
         int gen = _state.BumpDetailGeneration ();
-        _state.DetailLoading = true;
+        IDisposable loading = _state.AcquireLoading (detail: true);
         RefreshStatusBar ();
 
-        Task.Run (async () =>
-                  {
-                      try
-                      {
-                          // Debounce: a fast scroll cancels `ct` (via CancelPendingDetailLoad on
-                          // the next selection change) before this delay elapses, so we only fetch
-                          // for the row the cursor settles on — not every row it passes over.
-                          await Task.Delay (DetailLoadDebounceMs, ct);
+        bool admitted = _background.TryRun (async lifetimeToken =>
+                                             {
+                                                 try
+                                                 {
+                                                     // Debounce: a fast scroll cancels `ct` (via CancelPendingDetailLoad on
+                                                     // the next selection change) before this delay elapses, so we only fetch
+                                                     // for the row the cursor settles on — not every row it passes over.
+                                                     await Task.Delay (DetailLoadDebounceMs, ct);
 
-                          PackageDetail? detail = await _state.Backend.ShowAsync (p.Id, ct);
+                                                     PackageDetail? detail = await _state.Backend.ShowAsync (p.Id, ct);
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              loading.Dispose ();
 
-                          if (ct.IsCancellationRequested || gen != _state.DetailGeneration)
-                          {
-                              return;
-                          }
+                                                                              // Fall back to a stub detail built from the list-row context when winget show
+                                                                              // can't resolve the package (truncated id, store-only entries with no manifest,
+                                                                              // packages with unusual characters in id like ".115Chrome").
+                                                                              PackageDetail final = detail ?? BuildStubDetail (p);
+                                                                              final.MergeContext (p);
+                                                                              final.EnsureDetailHint ();
+                                                                              _state.DetailCache [p.Id] = final;
+                                                                              _state.CurrentDetail = final;
+                                                                              _detailPanel.SetDetail (final, false);
+                                                                              RefreshStatusBar ();
+                                                                          }, ct,
+                                                                          () => gen == _state.DetailGeneration
+                                                                                && string.Equals (CurrentPackage ()?.Id, p.Id, StringComparison.OrdinalIgnoreCase));
+                                                 }
+                                                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                 {
+                                                     // Superseded selection or application shutdown.
+                                                 }
+                                                 catch (Exception ex)
+                                                 {
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              loading.Dispose ();
+                                                                              _state.StatusMessage = $"Detail error: {ex.Message}";
+                                                                              _state.StatusIsError = true;
+                                                                              RefreshStatusBar ();
+                                                                          }, ct,
+                                                                          () => gen == _state.DetailGeneration
+                                                                                && string.Equals (CurrentPackage ()?.Id, p.Id, StringComparison.OrdinalIgnoreCase));
+                                                 }
+                                                 finally
+                                                 {
+                                                     loading.Dispose ();
+                                                     await DispatchAsync (RefreshStatusBar, lifetimeToken);
+                                                 }
+                                             });
 
-                          App?.Invoke (() =>
-                                       {
-                                           _state.DetailLoading = false;
-
-                                           // Fall back to a stub detail built from the list-row context when winget show
-                                           // can't resolve the package (truncated id, store-only entries with no manifest,
-                                           // packages with unusual characters in id like ".115Chrome"). Mirrors upstream's
-                                           // "sparse detail fallback" pattern so the panel never goes blank.
-                                           PackageDetail final = detail ?? BuildStubDetail (p);
-                                           final.MergeContext (p);
-                                           final.EnsureDetailHint ();
-                                           _state.DetailCache [p.Id] = final;
-                                           _state.CurrentDetail = final;
-                                           _detailPanel.SetDetail (final, false);
-                                           RefreshStatusBar ();
-                                       });
-                      }
-                      catch (OperationCanceledException) { }
-                      catch (Exception ex)
-                      {
-                          App?.Invoke (() =>
-                                       {
-                                           _state.DetailLoading = false;
-                                           _state.StatusMessage = $"Detail error: {ex.Message}";
-                                           _state.StatusIsError = true;
-                                           RefreshStatusBar ();
-                                       });
-                       }
-                   }, ct);
+        if (!admitted)
+        {
+            loading.Dispose ();
+            _state.CurrentDetail = null;
+            _detailPanel.SetDetail (null, false);
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 
     private void CancelPendingDetailLoad ()
     {
-        _detailCts.Cancel ();
-        _detailCts.Dispose ();
-        _detailCts = new ();
-        _state.DetailLoading = false;
+        ReplaceLifetimeLinkedSource (ref _detailCts);
     }
 
     /// <summary>
@@ -1020,17 +1256,17 @@ public sealed class App : Runnable
                     return;
                 }
 
-                RequestStop ();
+                RequestGracefulStop ();
                 key.Handled = true;
 
                 return;
             case KeyCode.Q:
-                RequestStop ();
+                RequestGracefulStop ();
                 key.Handled = true;
 
                 return;
             case KeyCode.C | KeyCode.CtrlMask:
-                RequestStop ();
+                RequestGracefulStop ();
                 key.Handled = true;
 
                 return;
@@ -1608,89 +1844,105 @@ public sealed class App : Runnable
     {
         // Serialize preflight fetches and don't start one atop a running operation: prevents a
         // rapid double-trigger from queuing a second modal behind the first.
-        if (_opCts is not null || _preflightBusy)
+        if (_opCts is not null || Interlocked.CompareExchange (ref _preflightBusy, 1, 0) != 0)
         {
             return;
         }
 
-        _preflightBusy = true;
         _state.StatusMessage = activity;
-        _state.Loading = true;
+        IDisposable loading = _state.AcquireLoading ();
         _state.StatusIsError = false;
         RefreshStatusBar ();
-        CancellationToken ct = _detailCts.Token;
+        CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource (
+            _background.LifetimeToken,
+            _detailCts.Token);
+        _preflightCts = request;
+        CancellationToken ct = request.Token;
+        int viewGeneration = _state.ViewGeneration;
+        int detailGeneration = _state.DetailGeneration;
+        AppMode mode = _state.Mode;
+        string? packageId = CurrentPackage ()?.Id;
 
-        Task.Run (async () =>
-                  {
-                      T result;
+        bool admitted = _background.TryRun (async lifetimeToken =>
+                                             {
+                                                 try
+                                                 {
+                                                     T result = await fetch (ct);
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              loading.Dispose ();
+                                                                              Interlocked.Exchange (ref _preflightBusy, 0);
 
-                      try
-                      {
-                          result = await fetch (ct);
-                      }
-                      catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                      {
-                          App?.Invoke (() =>
-                                       {
-                                           _preflightBusy = false;
-                                           _state.Loading = false;
-                                           _state.StatusMessage = string.Empty;
-                                           _state.StatusIsError = false;
-                                           RefreshStatusBar ();
-                                       });
+                                                                              if (ReferenceEquals (_preflightCts, request))
+                                                                              {
+                                                                                  _preflightCts = null;
+                                                                              }
 
-                          return;
-                      }
-                      catch (Exception ex)
-                      {
-                          App?.Invoke (() =>
-                                       {
-                                           _preflightBusy = false;
-                                           _state.Loading = false;
-                                           _state.StatusMessage = $"Error: {ex.Message}";
-                                           _state.StatusIsError = true;
-                                           RefreshStatusBar ();
-                                       });
+                                                                              _state.StatusMessage = string.Empty;
+                                                                              _state.StatusIsError = false;
+                                                                              RefreshStatusBar ();
 
-                          return;
-                      }
+                                                                              // Clear the gate before onResult so its modal flow — and any
+                                                                              // RunOperation it starts — is not blocked by this preflight.
+                                                                              onResult (result);
+                                                                          }, ct,
+                                                                          () => viewGeneration == _state.ViewGeneration
+                                                                                && detailGeneration == _state.DetailGeneration
+                                                                                && mode == _state.Mode
+                                                                                && string.Equals (packageId, CurrentPackage ()?.Id, StringComparison.OrdinalIgnoreCase));
+                                                 }
+                                                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                 {
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              if (_state.StatusMessage == activity)
+                                                                              {
+                                                                                  _state.StatusMessage = string.Empty;
+                                                                                  _state.StatusIsError = false;
+                                                                              }
 
-                      if (ct.IsCancellationRequested)
-                      {
-                          App?.Invoke (() =>
-                                       {
-                                           _preflightBusy = false;
-                                           _state.Loading = false;
-                                           _state.StatusMessage = string.Empty;
-                                           _state.StatusIsError = false;
-                                           RefreshStatusBar ();
-                                       });
+                                                                              loading.Dispose ();
+                                                                              RefreshStatusBar ();
+                                                                          }, lifetimeToken,
+                                                                          () => ReferenceEquals (_preflightCts, request));
+                                                 }
+                                                 catch (Exception ex)
+                                                 {
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              loading.Dispose ();
+                                                                              _state.StatusMessage = $"Error: {ex.Message}";
+                                                                              _state.StatusIsError = true;
+                                                                              RefreshStatusBar ();
+                                                                          }, ct,
+                                                                          () => ReferenceEquals (_preflightCts, request)
+                                                                                && viewGeneration == _state.ViewGeneration
+                                                                                && detailGeneration == _state.DetailGeneration);
+                                                 }
+                                                 finally
+                                                 {
+                                                     loading.Dispose ();
+                                                     Interlocked.Exchange (ref _preflightBusy, 0);
 
-                          return;
-                      }
+                                                     if (ReferenceEquals (_preflightCts, request))
+                                                     {
+                                                         _preflightCts = null;
+                                                     }
 
-                      App?.Invoke (() =>
-                                   {
-                                       if (ct.IsCancellationRequested)
-                                       {
-                                           _preflightBusy = false;
-                                           _state.Loading = false;
-                                           _state.StatusMessage = string.Empty;
-                                           _state.StatusIsError = false;
-                                           RefreshStatusBar ();
+                                                     CancelSource (request);
+                                                     request.Dispose ();
+                                                 }
+                                             });
 
-                                           return;
-                                       }
-
-                                       // Clear the gate before onResult so its (modal) flow — and any
-                                       // RunOperation it starts — isn't blocked by this guard.
-                                       _preflightBusy = false;
-                                       _state.Loading = false;
-                                       _state.StatusMessage = string.Empty;
-                                       RefreshStatusBar ();
-                                       onResult (result);
-                                   });
-                  });
+        if (!admitted)
+        {
+            loading.Dispose ();
+            Interlocked.Exchange (ref _preflightBusy, 0);
+            _preflightCts = null;
+            CancelSource (request);
+            request.Dispose ();
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 
     private string? PickVersion (Package p, IReadOnlyList<string> versions)
@@ -1825,85 +2077,114 @@ public sealed class App : Runnable
             return;
         }
 
-        _opCts = new ();
-        CancellationToken ct = _opCts.Token;
+        CancellationTokenSource request = CreateLifetimeLinkedSource ();
+        _opCts = request;
+        CancellationToken ct = request.Token;
         string [] ids = [.. _state.BatchSelected];
+        IDisposable loading = _state.AcquireLoading ();
+        RefreshStatusBar ();
 
-        Task.Run (async () =>
-                  {
-                      bool cancelled = false;
+        bool admitted = _background.TryRun (async lifetimeToken =>
+                                             {
+                                                 try
+                                                 {
+                                                     bool cancelled = false;
 
-                      foreach (string id in ids)
-                      {
-                          if (ct.IsCancellationRequested)
-                          {
-                              cancelled = true;
+                                                 foreach (string id in ids)
+                                                 {
+                                                     if (ct.IsCancellationRequested)
+                                                     {
+                                                         cancelled = true;
 
-                              break;
-                          }
+                                                         break;
+                                                     }
 
-                          App?.Invoke (() =>
-                                       {
-                                           _state.StatusMessage = $"Upgrading {id}… · Esc to cancel";
-                                           _state.Loading = true;
-                                           RefreshStatusBar ();
-                                       });
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              _state.StatusMessage = $"Upgrading {id}… · Esc to cancel";
+                                                                              RefreshStatusBar ();
+                                                                          }, ct, () => ReferenceEquals (_opCts, request));
 
-                          OpResult result;
+                                                     OpResult result;
 
-                          try
-                          {
-                              // Per-item progress would fight the batch loop's own status line; the
-                              // loop reports "Upgrading {id}…" per package instead.
-                              result = await _state.Backend.UpgradeAsync (id, null, ct);
-                          }
-                          catch (OperationCanceledException)
-                          {
-                              cancelled = true;
+                                                     try
+                                                     {
+                                                         // Per-item progress would fight the batch loop's own status line; the
+                                                         // loop reports "Upgrading {id}…" per package instead.
+                                                         result = await _state.Backend.UpgradeAsync (id, null, ct);
+                                                     }
+                                                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                     {
+                                                         cancelled = true;
 
-                              break;
-                          }
-                          catch (Exception ex)
-                          {
-                              result = new ()
-                              {
-                                  Operation = new () { Kind = OperationKind.Upgrade, PackageId = id },
-                                  Success = false,
-                                  Message = ex.Message
-                              };
-                          }
+                                                         break;
+                                                     }
+                                                     catch (Exception ex)
+                                                     {
+                                                         result = new ()
+                                                         {
+                                                             Operation = new () { Kind = OperationKind.Upgrade, PackageId = id },
+                                                             Success = false,
+                                                             Message = ex.Message
+                                                         };
+                                                     }
 
-                          App?.Invoke (() =>
-                                       {
-                                           if (result.Success)
-                                           {
-                                               _state.DetailCache.Remove (id);
-                                           }
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              if (result.Success)
+                                                                              {
+                                                                                  _state.DetailCache.Remove (id);
+                                                                              }
 
-                                           _state.StatusMessage = result.Success
-                                                                      ? $"Upgraded {id}"
-                                                                      : $"Failed: {id}";
-                                           _state.StatusIsError = !result.Success;
-                                           RefreshStatusBar ();
-                                       });
-                      }
+                                                                              _state.StatusMessage = result.Success
+                                                                                                         ? $"Upgraded {id}"
+                                                                                                         : $"Failed: {id}";
+                                                                              _state.StatusIsError = !result.Success;
+                                                                              RefreshStatusBar ();
+                                                                          }, ct, () => ReferenceEquals (_opCts, request));
+                                                 }
 
-                      App?.Invoke (() =>
-                                   {
-                                       _opCts?.Dispose ();
-                                       _opCts = null;
-                                       _state.BatchSelected.Clear ();
-                                       _state.Loading = false;
+                                                     await DispatchAsync (() =>
+                                                                      {
+                                                                          if (ReferenceEquals (_opCts, request))
+                                                                          {
+                                                                              _opCts = null;
+                                                                          }
 
-                                       if (cancelled)
-                                       {
-                                           _state.StatusMessage = "Cancelled";
-                                           _state.StatusIsError = false;
-                                       }
+                                                                          loading.Dispose ();
+                                                                          _state.BatchSelected.Clear ();
 
-                                       TriggerRefresh (_state.StatusMessage);
-                                   });
-                  });
+                                                                          if (cancelled)
+                                                                          {
+                                                                              _state.StatusMessage = "Cancelled";
+                                                                              _state.StatusIsError = false;
+                                                                          }
+
+                                                                          TriggerRefresh (_state.StatusMessage);
+                                                                          }, lifetimeToken, () => ReferenceEquals (_opCts, request));
+                                                 }
+                                                 finally
+                                                 {
+                                                     loading.Dispose ();
+
+                                                     if (ReferenceEquals (_opCts, request))
+                                                     {
+                                                         _opCts = null;
+                                                     }
+
+                                                     CancelSource (request);
+                                                     request.Dispose ();
+                                                 }
+                                             });
+
+        if (!admitted)
+        {
+            loading.Dispose ();
+            _opCts = null;
+            CancelSource (request);
+            request.Dispose ();
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 
     private void RunOperation (string activity, Func<IProgress<OpProgress>, CancellationToken, Task<OpResult>> op)
@@ -1915,66 +2196,94 @@ public sealed class App : Runnable
             return;
         }
 
-        _opCts = new ();
-        CancellationToken ct = _opCts.Token;
+        CancellationTokenSource request = CreateLifetimeLinkedSource ();
+        _opCts = request;
+        CancellationToken ct = request.Token;
 
         _state.StatusMessage = $"{activity} · Esc to cancel";
-        _state.Loading = true;
+        IDisposable loading = _state.AcquireLoading ();
         _state.StatusIsError = false;
         _state.OpProgress = null;
         RefreshStatusBar ();
 
-        IProgress<OpProgress> progress = new UiProgress (this);
+        IProgress<OpProgress> progress = new UiProgress (this, request);
 
-        Task.Run (async () =>
-                  {
-                      OpResult? result = null;
-                      bool cancelled = false;
+        bool admitted = _background.TryRun (async lifetimeToken =>
+                                             {
+                                                 try
+                                                 {
+                                                     OpResult? result = null;
+                                                     bool cancelled = false;
 
-                      try
-                      {
-                          result = await op (progress, ct);
-                      }
-                      catch (OperationCanceledException)
-                      {
-                          cancelled = true;
-                      }
-                      catch (Exception ex)
-                      {
-                          result = new ()
-                          {
-                              Operation = new () { Kind = OperationKind.Install },
-                              Success = false,
-                              Message = ex.Message
-                          };
-                      }
+                                                 try
+                                                 {
+                                                     result = await op (progress, ct);
+                                                 }
+                                                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                 {
+                                                     cancelled = true;
+                                                 }
+                                                 catch (Exception ex)
+                                                 {
+                                                     result = new ()
+                                                     {
+                                                         Operation = new () { Kind = OperationKind.Install },
+                                                         Success = false,
+                                                         Message = ex.Message
+                                                     };
+                                                 }
 
-                      App?.Invoke (() =>
-                                   {
-                                       _opCts?.Dispose ();
-                                       _opCts = null;
-                                       _state.Loading = false;
-                                       _state.OpProgress = null;
+                                                     await DispatchAsync (() =>
+                                                                      {
+                                                                          if (ReferenceEquals (_opCts, request))
+                                                                          {
+                                                                              _opCts = null;
+                                                                          }
 
-                                       if (cancelled)
-                                       {
-                                           _state.StatusMessage = "Cancelled";
-                                           _state.StatusIsError = false;
-                                       }
-                                       else
-                                       {
-                                           _state.StatusMessage = result!.Success ? "Done" : result.Message;
-                                           _state.StatusIsError = !result.Success;
+                                                                          loading.Dispose ();
+                                                                          _state.OpProgress = null;
 
-                                           if (result.Operation.PackageId is { } id)
-                                           {
-                                               _state.DetailCache.Remove (id);
-                                           }
-                                       }
+                                                                          if (cancelled)
+                                                                          {
+                                                                              _state.StatusMessage = "Cancelled";
+                                                                              _state.StatusIsError = false;
+                                                                          }
+                                                                          else
+                                                                          {
+                                                                              _state.StatusMessage = result!.Success ? "Done" : result.Message;
+                                                                              _state.StatusIsError = !result.Success;
 
-                                       TriggerRefresh (_state.StatusMessage);
-                                   });
-                  });
+                                                                              if (result.Operation.PackageId is { } id)
+                                                                              {
+                                                                                  _state.DetailCache.Remove (id);
+                                                                              }
+                                                                          }
+
+                                                                          TriggerRefresh (_state.StatusMessage);
+                                                                          }, lifetimeToken, () => ReferenceEquals (_opCts, request));
+                                                 }
+                                                 finally
+                                                 {
+                                                     loading.Dispose ();
+
+                                                     if (ReferenceEquals (_opCts, request))
+                                                     {
+                                                         _opCts = null;
+                                                     }
+
+                                                     CancelSource (request);
+                                                     request.Dispose ();
+                                                 }
+                                             });
+
+        if (!admitted)
+        {
+            loading.Dispose ();
+            _opCts = null;
+            CancelSource (request);
+            request.Dispose ();
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 
     /// <summary>
@@ -1997,16 +2306,80 @@ public sealed class App : Runnable
         RefreshStatusBar ();
     }
 
-    private void ReportProgress (OpProgress value) => App?.Invoke (() => OnOpProgress (value));
+    private void ReportProgress (OpProgress value, CancellationTokenSource request, CancellationToken requestToken)
+    {
+        if (requestToken.IsCancellationRequested || !ReferenceEquals (Volatile.Read (ref _opCts), request))
+        {
+            return;
+        }
+
+        lock (_progressGate)
+        {
+            _pendingProgress = new (value, request, requestToken);
+
+            if (_progressDispatcherRunning)
+            {
+                return;
+            }
+
+            _progressDispatcherRunning = true;
+        }
+
+        if (!_background.TryRun (DrainProgressAsync))
+        {
+            lock (_progressGate)
+            {
+                _pendingProgress = null;
+                _progressDispatcherRunning = false;
+            }
+        }
+    }
+
+    private async Task DrainProgressAsync (CancellationToken lifetimeToken)
+    {
+        while (!lifetimeToken.IsCancellationRequested)
+        {
+            PendingProgress? pending;
+
+            lock (_progressGate)
+            {
+                pending = _pendingProgress;
+                _pendingProgress = null;
+
+                if (pending is null)
+                {
+                    _progressDispatcherRunning = false;
+
+                    return;
+                }
+            }
+
+            await DispatchAsync (() => OnOpProgress (pending.Value), pending.RequestToken,
+                                 () => ReferenceEquals (_opCts, pending.Request));
+        }
+
+        lock (_progressGate)
+        {
+            _pendingProgress = null;
+            _progressDispatcherRunning = false;
+        }
+    }
 
     /// <summary>
     /// <see cref="IProgress{T}"/> bridge that marshals backend progress (raised on a background
     /// or COM thread) onto the Terminal.Gui UI thread before touching view state.
     /// </summary>
-    private sealed class UiProgress (App owner) : IProgress<OpProgress>
+    private sealed class UiProgress (App owner, CancellationTokenSource request) : IProgress<OpProgress>
     {
-        public void Report (OpProgress value) => owner.ReportProgress (value);
+        private readonly CancellationToken _requestToken = request.Token;
+
+        public void Report (OpProgress value) => owner.ReportProgress (value, request, _requestToken);
     }
+
+    private sealed record PendingProgress (
+        OpProgress Value,
+        CancellationTokenSource Request,
+        CancellationToken RequestToken);
 
     private bool Confirm (string title, string message)
     {

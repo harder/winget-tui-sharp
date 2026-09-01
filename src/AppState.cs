@@ -44,8 +44,11 @@ public sealed class AppState
     public PinFilter PinFilter { get; set; } = PinFilter.All;
     public SortField SortField { get; set; } = SortField.None;
     public SortDir SortDir { get; set; } = SortDir.Asc;
-    public bool Loading { get; set; }
-    public bool DetailLoading { get; set; }
+    private int _loadingOwners;
+    private int _detailLoadingOwners;
+
+    public bool Loading => Volatile.Read (ref _loadingOwners) > 0;
+    public bool DetailLoading => Volatile.Read (ref _detailLoadingOwners) > 0;
     public string StatusMessage { get; set; } = string.Empty;
     public bool StatusIsError { get; set; }
 
@@ -60,6 +63,43 @@ public sealed class AppState
 
     public int BumpViewGeneration () => ++ViewGeneration;
     public int BumpDetailGeneration () => ++DetailGeneration;
+
+    /// <summary>
+    /// Acquires independent loading ownership. Disposing one lease cannot clear another owner's
+    /// spinner, and repeated disposal is harmless.
+    /// </summary>
+    public IDisposable AcquireLoading (bool detail = false)
+    {
+        if (detail)
+        {
+            Interlocked.Increment (ref _detailLoadingOwners);
+        }
+        else
+        {
+            Interlocked.Increment (ref _loadingOwners);
+        }
+
+        return new LoadingLease (this, detail);
+    }
+
+    private void ReleaseLoading (bool detail)
+    {
+        ref int owners = ref (detail ? ref _detailLoadingOwners : ref _loadingOwners);
+        int remaining = Interlocked.Decrement (ref owners);
+
+        if (remaining < 0)
+        {
+            Interlocked.Exchange (ref owners, 0);
+            throw new InvalidOperationException ("Loading ownership was released more than once.");
+        }
+    }
+
+    private sealed class LoadingLease (AppState owner, bool detail) : IDisposable
+    {
+        private AppState? _owner = owner;
+
+        public void Dispose () => Interlocked.Exchange (ref _owner, null)?.ReleaseLoading (detail);
+    }
 
     /// <summary>
     /// Recomputes Filtered based on LocalFilter, PinFilter, sort. Preserves selection by id when possible.
