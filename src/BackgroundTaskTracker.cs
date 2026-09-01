@@ -118,6 +118,13 @@ public sealed class BackgroundTaskTracker : IDisposable
         return await Task.WhenAny (all, Task.Delay (timeout)).ConfigureAwait (false) == all;
     }
 
+    /// <summary>
+    /// Drains without depending on the caller's synchronization context. Used after a UI loop has
+    /// stopped and therefore can no longer process posted async continuations.
+    /// </summary>
+    public bool DrainSynchronously (TimeSpan timeout) =>
+        DrainAsync (timeout).ConfigureAwait (false).GetAwaiter ().GetResult ();
+
     public void Dispose ()
     {
         lock (_gate)

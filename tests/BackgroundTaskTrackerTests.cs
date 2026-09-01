@@ -108,4 +108,52 @@ public sealed class BackgroundTaskTrackerTests
         Assert.Equal (16, tracker.Failures.Count);
         Assert.Equal (4, tracker.DroppedFailureCount);
     }
+
+    [Fact]
+    public void SynchronousDrainDoesNotDependOnStoppedSynchronizationContext ()
+    {
+        bool drained = false;
+        bool disposed = false;
+        int posts = 0;
+        Exception? threadFailure = null;
+        Thread thread = new (() =>
+                             {
+                                 try
+                                 {
+                                     SynchronizationContext.SetSynchronizationContext (new NeverPumpedContext (() => posts++));
+
+                                     using (BackgroundTaskTracker tracker = new ())
+                                     {
+                                         if (!tracker.TryRun (async _ => await Task.Delay (50)))
+                                         {
+                                             throw new InvalidOperationException ("Delayed task was not admitted.");
+                                         }
+
+                                         drained = tracker.DrainSynchronously (TimeSpan.FromSeconds (2));
+                                     }
+
+                                     disposed = true;
+                                 }
+                                 catch (Exception ex)
+                                 {
+                                     threadFailure = ex;
+                                 }
+                             })
+        {
+            IsBackground = true
+        };
+
+        thread.Start ();
+
+        Assert.True (thread.Join (TimeSpan.FromSeconds (3)), "Drain waited on a synchronization context that no longer pumps.");
+        Assert.Null (threadFailure);
+        Assert.True (drained);
+        Assert.True (disposed);
+        Assert.Equal (0, Volatile.Read (ref posts));
+    }
+
+    private sealed class NeverPumpedContext (Action onPost) : SynchronizationContext
+    {
+        public override void Post (SendOrPostCallback d, object? state) => onPost ();
+    }
 }

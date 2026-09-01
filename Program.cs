@@ -159,7 +159,13 @@ finally
     {
         try
         {
-            bool drained = await window.ShutdownAsync (TimeSpan.FromSeconds (5));
+            // Application.Run installs a UI synchronization context that is no longer pumped once
+            // Run returns. Block on the context-free shutdown task on this original thread instead
+            // of awaiting a continuation that could be posted to that stopped context.
+            bool drained = window.ShutdownAsync (TimeSpan.FromSeconds (5))
+                                 .ConfigureAwait (false)
+                                 .GetAwaiter ()
+                                 .GetResult ();
 
             if (!drained)
             {

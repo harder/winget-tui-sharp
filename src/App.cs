@@ -424,6 +424,12 @@ public sealed class App : Runnable
         && !lifetimeToken.IsCancellationRequested
         && !requestToken.IsCancellationRequested;
 
+    internal static bool PreflightIdentityMatches (object? currentRequest, object request) =>
+        ReferenceEquals (currentRequest, request);
+
+    internal static bool PreflightOwnsActivity (string currentStatus, string activity) =>
+        string.Equals (currentStatus, activity, StringComparison.Ordinal);
+
     private void ReportRejectedBackgroundAdmission ()
     {
         if (Volatile.Read (ref _uiAccepting) == 0 || _background.LifetimeToken.IsCancellationRequested)
@@ -1851,6 +1857,15 @@ public sealed class App : Runnable
 
         _state.StatusMessage = activity;
         IDisposable loading = _state.AcquireLoading ();
+        int loadingReleased = 0;
+        void ReleaseLoading ()
+        {
+            if (Interlocked.Exchange (ref loadingReleased, 1) == 0)
+            {
+                loading.Dispose ();
+            }
+        }
+
         _state.StatusIsError = false;
         RefreshStatusBar ();
         CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource (
@@ -1870,10 +1885,10 @@ public sealed class App : Runnable
                                                      T result = await fetch (ct);
                                                      await DispatchAsync (() =>
                                                                           {
-                                                                              loading.Dispose ();
+                                                                              ReleaseLoading ();
                                                                               Interlocked.Exchange (ref _preflightBusy, 0);
 
-                                                                              if (ReferenceEquals (_preflightCts, request))
+                                                                              if (PreflightIdentityMatches (_preflightCts, request))
                                                                               {
                                                                                   _preflightCts = null;
                                                                               }
@@ -1893,40 +1908,49 @@ public sealed class App : Runnable
                                                  }
                                                  catch (OperationCanceledException) when (ct.IsCancellationRequested)
                                                  {
-                                                     await DispatchAsync (() =>
-                                                                          {
-                                                                              if (_state.StatusMessage == activity)
-                                                                              {
-                                                                                  _state.StatusMessage = string.Empty;
-                                                                                  _state.StatusIsError = false;
-                                                                              }
-
-                                                                              loading.Dispose ();
-                                                                              RefreshStatusBar ();
-                                                                          }, lifetimeToken,
-                                                                          () => ReferenceEquals (_preflightCts, request));
+                                                     // Cleanup below uses the application lifetime rather than this
+                                                     // cancelled request, so it can repaint a still-running UI.
                                                  }
                                                  catch (Exception ex)
                                                  {
                                                      await DispatchAsync (() =>
                                                                           {
-                                                                              loading.Dispose ();
+                                                                              ReleaseLoading ();
+                                                                              Interlocked.Exchange (ref _preflightBusy, 0);
+                                                                              _preflightCts = null;
                                                                               _state.StatusMessage = $"Error: {ex.Message}";
                                                                               _state.StatusIsError = true;
                                                                               RefreshStatusBar ();
                                                                           }, ct,
-                                                                          () => ReferenceEquals (_preflightCts, request)
+                                                                          () => PreflightIdentityMatches (_preflightCts, request)
                                                                                 && viewGeneration == _state.ViewGeneration
                                                                                 && detailGeneration == _state.DetailGeneration);
                                                  }
                                                  finally
                                                  {
-                                                     loading.Dispose ();
-                                                     Interlocked.Exchange (ref _preflightBusy, 0);
+                                                     await DispatchAsync (() =>
+                                                                          {
+                                                                              ReleaseLoading ();
+                                                                              Interlocked.Exchange (ref _preflightBusy, 0);
+                                                                              _preflightCts = null;
 
-                                                     if (ReferenceEquals (_preflightCts, request))
+                                                                              if (PreflightOwnsActivity (_state.StatusMessage, activity))
+                                                                              {
+                                                                                  _state.StatusMessage = string.Empty;
+                                                                                  _state.StatusIsError = false;
+                                                                              }
+
+                                                                              RefreshStatusBar ();
+                                                                          }, lifetimeToken,
+                                                                          () => PreflightIdentityMatches (_preflightCts, request));
+
+                                                     ReleaseLoading ();
+
+                                                     if (ReferenceEquals (
+                                                             Interlocked.CompareExchange (ref _preflightCts, null, request),
+                                                             request))
                                                      {
-                                                         _preflightCts = null;
+                                                         Interlocked.Exchange (ref _preflightBusy, 0);
                                                      }
 
                                                      CancelSource (request);
@@ -1936,7 +1960,7 @@ public sealed class App : Runnable
 
         if (!admitted)
         {
-            loading.Dispose ();
+            ReleaseLoading ();
             Interlocked.Exchange (ref _preflightBusy, 0);
             _preflightCts = null;
             CancelSource (request);
