@@ -87,7 +87,7 @@ public sealed class ComBackend : IBackend
 
         // Cap a pathologically broad query (e.g. a one-letter term) so it can't materialize tens
         // of thousands of rows. The app already blocks empty queries; this guards the merely-broad
-        // ones. result.WasLimitExceeded below tells the UI to nudge the user to refine.
+        // ones. The UI infers truncation when the returned count reaches this shared cap.
         opts.ResultLimit = BackendLimits.SearchMatches;
 
         FindPackagesResult result = await catalog.FindPackagesAsync (opts).AsTask (ct);
@@ -99,23 +99,35 @@ public sealed class ComBackend : IBackend
             try
             {
                 CatalogPackage pkg = m.CatalogPackage;
-                string version = SafeVersion (SafeDefaultInstallVersion (pkg)) ?? LatestAvailableVersion (pkg) ?? string.Empty;
+                string? packageId = ExactIdentity (pkg.Id);
+                string? rawVersion = SafeVersion (SafeDefaultInstallVersion (pkg)) ?? LatestAvailableVersion (pkg);
+                string? rawSource = SourceOf (pkg);
 
                 // The search composite (RemotePackagesFromRemoteCatalogs) correlates installed
                 // status, so a search row knows whether it's installed and whether an upgrade is
                 // available — surfaced so the UI can offer Uninstall/Upgrade rather than Install.
                 string? installedVersion = SafeVersion (SafeInstalledVersion (pkg));
                 bool updateAvailable = installedVersion is not null && SafeIsUpdateAvailable (pkg);
+                string? availableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null;
+
+                if (packageId is null
+                    || !TryExactIdentity (rawVersion, out string? version)
+                    || !TryExactIdentity (installedVersion, out installedVersion)
+                    || !TryExactIdentity (availableVersion, out availableVersion)
+                    || !TryExactIdentity (rawSource, out string? packageSource))
+                {
+                    continue;
+                }
 
                 packages.Add (new ()
                 {
-                    Id = SimpleText (pkg.Id) ?? string.Empty,
+                    Id = packageId,
                     Name = SimpleText (pkg.Name) ?? string.Empty,
-                    Version = SimpleText (version) ?? string.Empty,
-                    Source = SimpleText (SourceOf (pkg)) ?? string.Empty,
+                    Version = version ?? string.Empty,
+                    Source = packageSource ?? string.Empty,
                     MatchField = SimpleText (NotableMatchField (m)),
-                    InstalledVersion = SimpleText (installedVersion),
-                    AvailableVersion = updateAvailable ? SimpleText (LatestAvailableVersion (pkg)) : null
+                    InstalledVersion = installedVersion,
+                    AvailableVersion = availableVersion
                 });
             }
             catch
@@ -197,14 +209,25 @@ public sealed class ComBackend : IBackend
                 }
 
                 string installed = SafeVersion (SafeInstalledVersion (pkg)) ?? string.Empty;
+                string? packageId = ExactIdentity (pkg.Id);
+                string? availableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null;
+                string? rawSource = SourceOf (pkg);
+
+                if (packageId is null
+                    || !TryExactIdentity (installed, out string? exactInstalled)
+                    || !TryExactIdentity (availableVersion, out availableVersion)
+                    || !TryExactIdentity (rawSource, out string? packageSource))
+                {
+                    continue;
+                }
 
                 packages.Add (new ()
                 {
-                    Id = SimpleText (pkg.Id) ?? string.Empty,
+                    Id = packageId,
                     Name = SimpleText (pkg.Name) ?? string.Empty,
-                    Version = SimpleText (installed) ?? string.Empty,
-                    Source = SimpleText (SourceOf (pkg)) ?? string.Empty,
-                    AvailableVersion = updateAvailable ? SimpleText (LatestAvailableVersion (pkg)) : null
+                    Version = exactInstalled ?? string.Empty,
+                    Source = packageSource ?? string.Empty,
+                    AvailableVersion = availableVersion
                 });
             }
             catch
@@ -256,14 +279,29 @@ public sealed class ComBackend : IBackend
 
         try
         {
+            string? packageId = ExactIdentity (pkg.Id);
+            string? rawVersion = SafeVersion (SafeInstalledVersion (pkg)) ?? SafeVersion (versionInfo);
+            string? rawAvailableVersion = LatestAvailableVersion (pkg);
+            string? rawInstalledVersion = SafeVersion (installed);
+            string? rawSource = SourceOf (pkg);
+
+            if (packageId is null
+                || !TryExactIdentity (rawVersion, out string? version)
+                || !TryExactIdentity (rawAvailableVersion, out string? availableVersion)
+                || !TryExactIdentity (rawInstalledVersion, out string? installedVersion)
+                || !TryExactIdentity (rawSource, out string? packageSource))
+            {
+                return null;
+            }
+
             return new ()
             {
-                Id = SimpleText (pkg.Id) ?? string.Empty,
-                Name = SimpleText (Coalesce (meta?.PackageName, pkg.Name)) ?? SimpleText (pkg.Id) ?? string.Empty,
-                Version = SimpleText (SafeVersion (SafeInstalledVersion (pkg)) ?? SafeVersion (versionInfo)) ?? string.Empty,
-                AvailableVersion = SimpleText (LatestAvailableVersion (pkg)),
-                InstalledVersion = SimpleText (SafeVersion (installed)),
-                Source = SimpleText (SourceOf (pkg)) ?? string.Empty,
+                Id = packageId,
+                Name = SimpleText (Coalesce (meta?.PackageName, pkg.Name)) ?? packageId,
+                Version = version ?? string.Empty,
+                AvailableVersion = availableVersion,
+                InstalledVersion = installedVersion,
+                Source = packageSource ?? string.Empty,
                 Publisher = SimpleText (NullIfEmpty (meta?.Publisher)),
                 Author = SimpleText (NullIfEmpty (meta?.Author)),
                 Copyright = SimpleText (NullIfEmpty (meta?.Copyright)),
@@ -315,9 +353,9 @@ public sealed class ComBackend : IBackend
             // AvailableVersions is newest-first. Indexed access via Materialize (AOT rule).
             foreach (PackageVersionId vid in Materialize (pkg.AvailableVersions, BackendLimits.Versions))
             {
-                string v = SimpleText (vid.Version) ?? string.Empty;
+                string? v = ExactIdentity (vid.Version);
 
-                if (!string.IsNullOrWhiteSpace (v) && seen.Add (v))
+                if (v is not null && seen.Add (v))
                 {
                     versions.Add (v);
                 }
@@ -373,13 +411,20 @@ public sealed class ComBackend : IBackend
                 return null;
             }
 
+            string? rawVersion = SafeVersion (versionInfo);
+
+            if (!TryExactIdentity (rawVersion, out string? exactVersion))
+            {
+                return null;
+            }
+
             return new InstallerPreview
             {
                 InstallerType = TypeName (installer.InstallerType),
                 Architecture = ArchName (installer.Architecture),
                 Scope = ScopeName (installer.Scope),
                 RequiresElevation = RequiresElevation (installer),
-                Version = SimpleText (SafeVersion (versionInfo))
+                Version = exactVersion
             };
         }
         catch
@@ -693,38 +738,42 @@ public sealed class ComBackend : IBackend
             // pass — rather than flagging the package because some *other* manifest installer (which
             // was never installed) didn't match. (The old code flattened all installers and reported
             // Issues if any one check failed, so multi-installer packages always looked corrupt.)
-            // Track each installer's checks plus whether any of its entries couldn't be read, so a
-            // "best" installer whose only failure is an unreadable entry reports Error ("couldn't
-            // verify"), not Issues ("may be corrupt").
-            List<(List<VerifyCheck> Checks, bool ReadError)> perInstaller = [];
-            bool hadReadError = false;
+            // Track whether every installer and status entry was observed. Partial data cannot
+            // choose a trustworthy "best" installer unless another fully observed installer has
+            // already proved the package healthy.
+            List<VerificationCandidate> perInstaller = [];
             CollectionBudget verificationBudget = new (BackendLimits.VerificationItems);
-            int installerCount = Math.Min (
-                result.PackageInstalledStatus.Count,
+            int projectedInstallerCount = result.PackageInstalledStatus.Count;
+            int requestedInstallerCount = Math.Min (
+                projectedInstallerCount,
                 BackendLimits.VerificationInstallers);
+            CollectionTake installerTake = verificationBudget.TakeBounded (requestedInstallerCount);
+            bool externalIncomplete = projectedInstallerCount > requestedInstallerCount || !installerTake.Complete;
 
             // Two nested projected vectors — indexed via Materialize (AOT rule).
             foreach (PackageInstallerInstalledStatus installer in Materialize (
                          result.PackageInstalledStatus,
-                         verificationBudget.Take (installerCount)))
+                         installerTake.Count))
             {
                 IReadOnlyList<InstalledStatus> entries;
+                CollectionTake entryTake;
 
                 try
                 {
+                    entryTake = verificationBudget.TakeBounded (installer.InstallerInstalledStatus.Count);
                     entries = Materialize (
                         installer.InstallerInstalledStatus,
-                        verificationBudget.Take (installer.InstallerInstalledStatus.Count));
+                        entryTake.Count);
                 }
                 catch
                 {
-                    hadReadError = true;
+                    externalIncomplete = true;
 
                     continue;
                 }
 
                 List<VerifyCheck> checks = [];
-                bool readError = false;
+                bool complete = entryTake.Complete;
 
                 foreach (InstalledStatus entry in entries)
                 {
@@ -741,37 +790,24 @@ public sealed class ComBackend : IBackend
                     catch
                     {
                         // Couldn't read this check (bad HRESULT projecting the entry). Record it as a
-                        // FAILING check AND flag the installer's data as incomplete — so the package
-                        // isn't reported Ok on partial data, and a best installer whose failures are
-                        // *only* read errors reports Error ("couldn't verify"), not Issues.
-                        readError = true;
-                        hadReadError = true;
+                        // failing display row and mark the installer incomplete. The evaluator then
+                        // returns Error unless another fully observed installer independently passes.
+                        complete = false;
                         checks.Add (new ("Status check", false, "could not read installed-status entry"));
                     }
                 }
 
-                if (checks.Count > 0)
+                if (checks.Count > 0 || !complete)
                 {
-                    perInstaller.Add ((checks, readError));
+                    perInstaller.Add (new (checks, complete));
                 }
             }
 
-            if (perInstaller.Count == 0)
-            {
-                // No installer yielded a readable check: can't honestly verify if a read errored.
-                return new () { Outcome = hadReadError ? VerifyOutcome.Error : VerifyOutcome.NotApplicable };
-            }
-
-            // Best-matching installer = the one with the fewest failing checks. All pass → installed
-            // correctly (show its clean checks). Otherwise, if its data was incomplete (a read error)
-            // we can't honestly call it corrupt → Error; a genuine failing check → Issues.
-            (List<VerifyCheck> Checks, bool ReadError) best = perInstaller.OrderBy (x => x.Checks.Count (c => !c.Ok)).First ();
-
-            VerifyOutcome outcome = best.Checks.TrueForAll (c => c.Ok) ? VerifyOutcome.Ok
-                                    : best.ReadError ? VerifyOutcome.Error
-                                    : VerifyOutcome.Issues;
-
-            return new () { Outcome = outcome, Checks = best.Checks };
+            // A complete passing installer still proves health under WinGet's any-installer
+            // semantics. Without one, omitted/read-failed/truncated data could change which
+            // installer is the best match and therefore must not produce a definitive result.
+            VerificationDecision decision = VerificationEvaluator.Decide (perInstaller, externalIncomplete);
+            return new () { Outcome = decision.Outcome, Checks = decision.Checks };
         }
         catch
         {
@@ -1009,7 +1045,7 @@ public sealed class ComBackend : IBackend
             {
                 try
                 {
-                    string? name = SimpleText (NullIfEmpty (r.Info?.Name));
+                    string? name = ExactIdentity (r.Info?.Name);
 
                     if (name is not null)
                     {
@@ -1315,5 +1351,10 @@ public sealed class ComBackend : IBackend
     private static string? SimpleText (string? value) => BackendLimits.SimpleText (value);
 
     private static string? RichText (string? value) => BackendLimits.RichText (value);
+
+    private static string? ExactIdentity (string? value) => BackendLimits.ExactIdentity (value);
+
+    private static bool TryExactIdentity (string? value, out string? exact)
+        => BackendLimits.TryExactIdentity (value, out exact);
 }
 #endif

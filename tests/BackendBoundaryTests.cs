@@ -105,6 +105,20 @@ public sealed class BackendBoundaryTests
     }
 
     [Fact]
+    public void ExactIdentity_PreservesBoundary_AndRejectsOversizeWithoutTruncating ()
+    {
+        string boundary = new ('i', BackendLimits.IdentityCharacters);
+        string oversized = boundary + "x";
+
+        Assert.Same (boundary, BackendLimits.ExactIdentity (boundary));
+        Assert.Null (BackendLimits.ExactIdentity (oversized));
+        Assert.True (BackendLimits.TryExactIdentity (null, out string? absent));
+        Assert.Null (absent);
+        Assert.False (BackendLimits.TryExactIdentity (oversized, out string? rejected));
+        Assert.Null (rejected);
+    }
+
+    [Fact]
     public void CollectionBudget_IsSharedAcrossNestedCollections ()
     {
         CollectionBudget budget = new (8);
@@ -113,6 +127,75 @@ public sealed class BackendBoundaryTests
         Assert.Equal (5, budget.Take (100));
         Assert.Equal (0, budget.Take (1));
         Assert.Equal (0, budget.Remaining);
+    }
+
+    [Fact]
+    public void Verification_HiddenFailureAfter4095Passes_IsError ()
+    {
+        CollectionBudget budget = new (BackendLimits.VerificationItems);
+        Assert.True (budget.TakeBounded (1).Complete);
+        CollectionTake statuses = budget.TakeBounded (BackendLimits.VerificationItems);
+        List<VerifyCheck> observed = Checks (statuses.Count, ok: true);
+
+        VerificationDecision decision = VerificationEvaluator.Decide (
+            [new (observed, statuses.Complete)],
+            externalIncomplete: false);
+
+        Assert.False (statuses.Complete);
+        Assert.Equal (VerifyOutcome.Error, decision.Outcome);
+    }
+
+    [Fact]
+    public void Verification_OmittedInstallerWithoutCompletePass_IsError ()
+    {
+        VerificationDecision decision = VerificationEvaluator.Decide (
+            [new ([new ("Registry", false, null)], Complete: true)],
+            externalIncomplete: true);
+
+        Assert.Equal (VerifyOutcome.Error, decision.Outcome);
+    }
+
+    [Fact]
+    public void Verification_CompletePassProvesOkDespiteOmittedInstaller ()
+    {
+        IReadOnlyList<VerifyCheck> passing = [new ("Registry", true, null)];
+
+        VerificationDecision decision = VerificationEvaluator.Decide (
+            [new (passing, Complete: true)],
+            externalIncomplete: true);
+
+        Assert.Equal (VerifyOutcome.Ok, decision.Outcome);
+        Assert.Same (passing, decision.Checks);
+    }
+
+    [Fact]
+    public void Verification_ExactSharedBudgetRetainsDefinitiveIssuesResult ()
+    {
+        CollectionBudget budget = new (BackendLimits.VerificationItems);
+        Assert.True (budget.TakeBounded (1).Complete);
+        CollectionTake statuses = budget.TakeBounded (BackendLimits.VerificationItems - 1);
+        List<VerifyCheck> observed = Checks (statuses.Count, ok: true);
+        observed [^1] = new ("Last", false, "failed");
+
+        VerificationDecision decision = VerificationEvaluator.Decide (
+            [new (observed, statuses.Complete)],
+            externalIncomplete: false);
+
+        Assert.True (statuses.Complete);
+        Assert.Equal (VerifyOutcome.Issues, decision.Outcome);
+        Assert.Same (observed, decision.Checks);
+    }
+
+    private static List<VerifyCheck> Checks (int count, bool ok)
+    {
+        List<VerifyCheck> checks = new (count);
+
+        for (int i = 0; i < count; i++)
+        {
+            checks.Add (new ($"Check {i}", ok, null));
+        }
+
+        return checks;
     }
 
     private sealed class HugeProjectedList (int count) : IReadOnlyList<int>
