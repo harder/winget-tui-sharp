@@ -217,6 +217,51 @@ public sealed class BackendBoundaryTests
     }
 
     [Fact]
+    public void BestEffortCleanup_DetachFailurePreservesPrimaryOutcomes_AndAlwaysRetains ()
+    {
+        int retained = 0;
+
+        int Successful ()
+        {
+            try
+            {
+                return 42;
+            }
+            finally
+            {
+                Cleanup ();
+            }
+        }
+
+        InvalidOperationException primaryFault = new ("primary");
+        OperationCanceledException primaryCancellation = new ("cancelled");
+
+        Assert.Equal (42, Successful ());
+        Assert.Same (primaryFault, Record.Exception (() => ThrowWithCleanup (primaryFault)));
+        Assert.Same (
+            primaryCancellation,
+            Record.Exception (() => ThrowWithCleanup (primaryCancellation)));
+        Assert.Equal (3, retained);
+
+        void ThrowWithCleanup (Exception primary)
+        {
+            try
+            {
+                throw primary;
+            }
+            finally
+            {
+                Cleanup ();
+            }
+        }
+
+        void Cleanup ()
+            => BestEffortCleanup.Run (
+                () => throw new InvalidOperationException ("detach"),
+                () => retained++);
+    }
+
+    [Fact]
     public void Verification_HiddenFailureAfter4095Passes_IsError ()
     {
         CollectionBudget budget = new (BackendLimits.VerificationItems);

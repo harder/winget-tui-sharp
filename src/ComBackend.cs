@@ -665,8 +665,9 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            asyncOp.Progress = null;
-            GC.KeepAlive (asyncOp);
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
         }
 
         return result.Status == InstallResultStatus.Ok
@@ -710,8 +711,9 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            asyncOp.Progress = null;
-            GC.KeepAlive (asyncOp);
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
         }
 
         return result.Status == InstallResultStatus.Ok
@@ -747,8 +749,9 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            asyncOp.Progress = null;
-            GC.KeepAlive (asyncOp);
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
         }
 
         return result.Status == UninstallResultStatus.Ok
@@ -813,8 +816,9 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            asyncOp.Progress = null;
-            GC.KeepAlive (asyncOp);
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
         }
 
         return result.Status == DownloadResultStatus.Ok
@@ -855,8 +859,9 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            asyncOp.Progress = null;
-            GC.KeepAlive (asyncOp);
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
         }
 
         if (result.Status == RepairResultStatus.Ok)

@@ -234,3 +234,29 @@ internal static class VerificationEvaluator
                    : new (VerifyOutcome.Issues, best.Checks);
     }
 }
+
+/// <summary>
+/// Runs non-critical cleanup without allowing it to replace the primary operation outcome. The
+/// final retention hook always runs, including when cleanup itself fails.
+/// </summary>
+internal static class BestEffortCleanup
+{
+    internal static void Run (Action cleanup, Action retention)
+    {
+        try
+        {
+            try
+            {
+                cleanup ();
+            }
+            catch
+            {
+                // Cleanup is deliberately best-effort; preserve success, fault, or cancellation.
+            }
+        }
+        finally
+        {
+            retention ();
+        }
+    }
+}
