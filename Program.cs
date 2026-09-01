@@ -23,11 +23,34 @@ if (args.Length > 0 && args [0] is "--dump")
     Console.WriteLine ($"Console.OutputEncoding: {Console.OutputEncoding.WebName}");
     Console.WriteLine ();
 
-    (int code, string output) = await CliBackend.RunWithCodeAsync (cmd, CancellationToken.None);
+    ProcessRunner.RunResult dumpResult = await CliBackend.RunDetailedWithCodeAsync (
+                                               cmd,
+                                               "winget",
+                                               TimeSpan.FromMinutes (2),
+                                               CancellationToken.None);
+    int code = dumpResult.Code;
+    string output = dumpResult.Output;
     Console.WriteLine ($"--- exit code: {code}");
     Console.WriteLine ($"--- output length: {output.Length} chars");
+    Console.WriteLine ($"--- output complete: {dumpResult.OutputComplete}");
+
+    if (!dumpResult.OutputComplete)
+    {
+        Console.WriteLine (
+            $"--- incomplete reasons: stdout-truncated={dumpResult.StdoutTruncated}, "
+            + $"stderr-truncated={dumpResult.StderrTruncated}, cleanup-incomplete={dumpResult.CleanupIncomplete}");
+    }
+
     Console.WriteLine ("--- output:");
     Console.WriteLine (output);
+
+    if (!dumpResult.OutputComplete)
+    {
+        Console.WriteLine ("--- parser skipped: incomplete bounded output cannot be parsed safely");
+
+        return;
+    }
+
     Console.WriteLine ("--- parser trace:");
 
     if (cmd [0] == "show")

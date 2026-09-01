@@ -48,6 +48,11 @@ public sealed partial class CliBackend : IBackend
         {
             throw;
         }
+        catch (BoundedOutputException)
+        {
+            // Partial source output must never be treated as a complete source snapshot.
+            throw;
+        }
         catch
         {
             return ["winget", "msstore"];
@@ -463,11 +468,58 @@ public sealed partial class CliBackend : IBackend
         return PinState.Unpinned;
     }
 
-    private static async Task<string> RunAsync (IReadOnlyList<string> args, CancellationToken ct)
-    {
-        (int _, string output) = await RunWithCodeAsync (args, ct);
+    private static Task<string> RunAsync (IReadOnlyList<string> args, CancellationToken ct) =>
+        RunParsedAsync (args, "winget", CommandTimeout (args), static output => output, ct);
 
-        return output;
+    internal static Task<T> RunParsedForTestAsync<T> (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        Func<string, T> parser,
+        CancellationToken ct) =>
+        RunParsedAsync (args, executable, timeout, parser, ct);
+
+    private static async Task<T> RunParsedAsync<T> (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        Func<string, T> parser,
+        CancellationToken ct)
+    {
+        ProcessRunner.RunResult result = await RunDetailedWithCodeAsync (args, executable, timeout, ct);
+        EnsureCompleteForParsing (result, args);
+
+        return parser (result.Output);
+    }
+
+    internal static void EnsureCompleteForParsing (ProcessRunner.RunResult result, IReadOnlyList<string> args)
+    {
+        if (result.OutputComplete)
+        {
+            return;
+        }
+
+        string command = args.Count == 0 ? "winget" : $"winget {args [0]}";
+        List<string> reasons = [];
+
+        if (result.StdoutTruncated)
+        {
+            reasons.Add ("stdout exceeded the bounded capture limit");
+        }
+
+        if (result.StderrTruncated)
+        {
+            reasons.Add ("stderr exceeded the bounded capture limit");
+        }
+
+        if (result.CleanupIncomplete)
+        {
+            reasons.Add ("output cleanup did not complete");
+        }
+
+        throw new BoundedOutputException (
+            $"Cannot parse incomplete output from '{command}': {string.Join ("; ", reasons)}. "
+            + "Refine the request or run winget directly for the complete result.");
     }
 
     /// <summary>
@@ -546,6 +598,13 @@ public sealed partial class CliBackend : IBackend
         TimeSpan timeout,
         CancellationToken ct)
         => ProcessRunner.RunAsync (executable, args, ResolveEncoding (), timeout, ct);
+
+    internal static Task<ProcessRunner.RunResult> RunDetailedWithCodeAsync (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        CancellationToken ct)
+        => ProcessRunner.RunDetailedAsync (executable, args, ResolveEncoding (), timeout, ct);
 
     internal static Task<(int Code, string Output)> ProbeWingetAsync (TimeSpan timeout, CancellationToken ct)
         => RunWithCodeAsync (["--version"], "winget", timeout, ct);
@@ -1302,3 +1361,5 @@ public sealed partial class CliBackend : IBackend
         };
     }
 }
+
+internal sealed class BoundedOutputException (string message) : Exception (message);

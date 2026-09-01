@@ -448,6 +448,92 @@ public sealed class ProcessRunnerTests : IDisposable
         Assert.Contains (new string ('B', 32), output, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RunDetailedWithCodeAsync_NormalOutputIsComplete ()
+    {
+        FakeCommand command = CreateScript (
+            "detailed-normal",
+            unix: "printf 'complete'",
+            windows: "[Console]::Out.Write('complete')");
+
+        ProcessRunner.RunResult result = await CliBackend.RunDetailedWithCodeAsync (
+                                             command.Arguments,
+                                             command.Executable,
+                                             TimeSpan.FromSeconds (10),
+                                             TestContext.Current.CancellationToken);
+
+        Assert.True (result.OutputComplete);
+        Assert.False (result.StdoutTruncated);
+        Assert.False (result.StderrTruncated);
+        Assert.False (result.CleanupIncomplete);
+        Assert.Equal ("complete", result.Output);
+    }
+
+    [Fact]
+    public async Task RunDetailedWithCodeAsync_FloodReportsIncompleteCapture ()
+    {
+        const int floodCharacters = ProcessRunner.MaxCapturedCharactersPerStream * 2;
+        FakeCommand command = CreateScript (
+            "detailed-flood",
+            unix: $"head -c {floodCharacters} /dev/zero | tr '\\0' A",
+            windows: $"[Console]::Out.Write('A' * {floodCharacters})");
+
+        ProcessRunner.RunResult result = await CliBackend.RunDetailedWithCodeAsync (
+                                             command.Arguments,
+                                             command.Executable,
+                                             TimeSpan.FromSeconds (30),
+                                             TestContext.Current.CancellationToken);
+
+        Assert.False (result.OutputComplete);
+        Assert.True (result.StdoutTruncated);
+        Assert.False (result.StderrTruncated);
+        Assert.Contains (ProcessRunner.TruncationMarker, result.Output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EnsureCompleteForParsing_RejectsEveryIncompleteReason ()
+    {
+        ProcessRunner.RunResult [] results =
+        [
+            new (0, "partial", StdoutTruncated: true, StderrTruncated: false, CleanupIncomplete: false),
+            new (0, "partial", StdoutTruncated: false, StderrTruncated: true, CleanupIncomplete: false),
+            new (0, "partial", StdoutTruncated: false, StderrTruncated: false, CleanupIncomplete: true)
+        ];
+
+        foreach (ProcessRunner.RunResult result in results)
+        {
+            BoundedOutputException exception = Assert.Throws<BoundedOutputException> (
+                () => CliBackend.EnsureCompleteForParsing (result, ["search"]));
+            Assert.Contains ("incomplete output", exception.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Fact]
+    public async Task RunParsedForTestAsync_DoesNotInvokeParserForTruncatedOutput ()
+    {
+        const int floodCharacters = ProcessRunner.MaxCapturedCharactersPerStream * 2;
+        FakeCommand command = CreateScript (
+            "parsed-flood",
+            unix: $"head -c {floodCharacters} /dev/zero | tr '\\0' A",
+            windows: $"[Console]::Out.Write('A' * {floodCharacters})");
+        bool parserCalled = false;
+
+        await Assert.ThrowsAsync<BoundedOutputException> (
+            () => CliBackend.RunParsedForTestAsync (
+                command.Arguments,
+                command.Executable,
+                TimeSpan.FromSeconds (30),
+                _ =>
+                {
+                    parserCalled = true;
+
+                    return 0;
+                },
+                TestContext.Current.CancellationToken));
+
+        Assert.False (parserCalled);
+    }
+
     public void Dispose ()
     {
         foreach (TrackedProcess process in _childProcesses.Values)

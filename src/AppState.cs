@@ -23,7 +23,6 @@ public sealed class AppState
 
     public List<Package> Packages { get; set; } = [];
     public List<Package> Filtered { get; private set; } = [];
-    public Dictionary<string, PinState> Pins { get; } = new (StringComparer.OrdinalIgnoreCase);
     public HashSet<string> BatchSelected { get; } = new (StringComparer.OrdinalIgnoreCase);
     public PackageDetail? CurrentDetail { get; set; }
     private readonly BoundedDetailCache _detailCache = new ();
@@ -275,4 +274,31 @@ public sealed class AppState
             PinFilter.UnpinnedOnly => " \U0001F4CC hide ",
             _ => " \U0001F4CC all "
         };
+}
+
+internal enum StatusOwner
+{
+    Ambient,
+    Operation
+}
+
+/// <summary>
+/// Gives the in-flight package operation exclusive ownership of the shared status line. Ambient
+/// workflows may continue to run, but their feedback cannot hide operation progress or results.
+/// </summary>
+internal sealed class StatusOwnership
+{
+    internal bool TryWrite (StatusOwner owner, bool operationActive, Action write)
+    {
+        ArgumentNullException.ThrowIfNull (write);
+
+        if (owner == StatusOwner.Ambient && operationActive)
+        {
+            return false;
+        }
+
+        write ();
+
+        return true;
+    }
 }

@@ -26,7 +26,6 @@ public sealed class App : Runnable
     private readonly TabBar _tabBar;
     private readonly Logo _logo;
     private readonly TextField _filterInput;
-    private readonly TextField _versionInput;
     private readonly FrameView _listFrame;
     private readonly SortableTableView _packageTable;
     private readonly DetailPanel _detailPanel;
@@ -35,6 +34,7 @@ public sealed class App : Runnable
     private readonly Label _backendLabel;
     private readonly BackgroundTaskTracker _background = new ();
     private readonly ExportWorkflowState _exportWorkflow = new ();
+    private readonly StatusOwnership _statusOwnership = new ();
     private readonly object _progressGate = new ();
     private readonly TimeSpan? _smokeDelay;
     private CancellationTokenSource _viewCts;
@@ -150,9 +150,6 @@ public sealed class App : Runnable
         };
 
         Add (_logo, _tabBar, _backendLabel, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar);
-
-        // --- Version input dialog field (lives inside MessageBox-like popover; we use a separate field) ---
-        _versionInput = new ();
 
         WireEvents ();
         RefreshTable ();
@@ -433,6 +430,13 @@ public sealed class App : Runnable
     internal static bool PreflightOwnsActivity (string currentStatus, string activity) =>
         string.Equals (currentStatus, activity, StringComparison.Ordinal);
 
+    private bool SetStatus (string message, bool isError = false, StatusOwner owner = StatusOwner.Ambient) =>
+        _statusOwnership.TryWrite (owner, _opCts is not null, () =>
+                                                               {
+                                                                   _state.StatusMessage = message;
+                                                                   _state.StatusIsError = isError;
+                                                               });
+
     private void ReportRejectedBackgroundAdmission ()
     {
         if (Volatile.Read (ref _uiAccepting) == 0 || _background.LifetimeToken.IsCancellationRequested)
@@ -440,8 +444,7 @@ public sealed class App : Runnable
             return;
         }
 
-        _state.StatusMessage = "Too many background requests are still pending; wait and try again";
-        _state.StatusIsError = true;
+        SetStatus ("Too many background requests are still pending; wait and try again", isError: true);
         RefreshStatusBar ();
     }
 
@@ -582,8 +585,7 @@ public sealed class App : Runnable
         {
             _state.Packages = [];
             _state.ApplyFilter ();
-            _state.StatusMessage = "Press / to search for packages";
-            _state.StatusIsError = false;
+            SetStatus ("Press / to search for packages");
             RefreshTable ();
             RefreshStatusBar ();
             SyncTabBar ();
@@ -592,11 +594,9 @@ public sealed class App : Runnable
         }
 
         IDisposable loading = _state.AcquireLoading ();
-        _state.StatusMessage = keepMessage ?? $"Loading {_state.Mode}…";
-
-        // Keep the op's error styling (set by the caller) when preserving its message; a plain
-        // refresh is never an error.
-        _state.StatusIsError = keepMessage is not null && _state.StatusIsError;
+        SetStatus (
+            keepMessage ?? $"Loading {_state.Mode}…",
+            keepMessage is not null && _state.StatusIsError);
         RefreshStatusBar ();
         SyncTabBar ();
 
@@ -611,6 +611,22 @@ public sealed class App : Runnable
                                                          _ => await _state.Backend.ListInstalledAsync (src, ct)
                                                      };
 
+                                                     try
+                                                     {
+                                                         IReadOnlyDictionary<string, PinState> pins =
+                                                             await _state.Backend.ListPinsAsync (ct);
+                                                         ApplyPinStates (packages, pins);
+                                                     }
+                                                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                     {
+                                                         throw;
+                                                     }
+                                                     catch
+                                                     {
+                                                         // Pin discovery is best-effort. Keep any states supplied directly by
+                                                         // the package listing backend when the separate snapshot is unavailable.
+                                                     }
+
                                                      await DispatchAsync (() =>
                                                                           {
                                                                               _state.Packages = packages.ToList ();
@@ -622,12 +638,14 @@ public sealed class App : Runnable
                                                                               if (keepMessage is null)
                                                                               {
                                                                                   int n = _state.Filtered.Count;
-                                                                                  _state.StatusMessage = n == 1 ? "1 package" : $"{n} packages";
+                                                                                  string status = n == 1 ? "1 package" : $"{n} packages";
 
                                                                                   if (mode == AppMode.Search && packages.Count >= AppState.SearchResultLimit)
                                                                                   {
-                                                                                      _state.StatusMessage = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
+                                                                                      status = $"{AppState.SearchResultLimit}+ matches — refine your search to narrow";
                                                                                   }
+
+                                                                                  SetStatus (status);
                                                                               }
 
                                                                               RefreshTable ();
@@ -645,8 +663,7 @@ public sealed class App : Runnable
                                                      await DispatchAsync (() =>
                                                                           {
                                                                               loading.Dispose ();
-                                                                              _state.StatusMessage = msg;
-                                                                              _state.StatusIsError = true;
+                                                                              SetStatus (msg, isError: true);
                                                                               RefreshStatusBar ();
                                                                           }, ct, () => gen == _state.ViewGeneration);
                                                  }
@@ -661,6 +678,20 @@ public sealed class App : Runnable
         {
             loading.Dispose ();
             ReportRejectedBackgroundAdmission ();
+        }
+    }
+
+    internal static void ApplyPinStates (
+        IEnumerable<Package> packages,
+        IReadOnlyDictionary<string, PinState> pins)
+    {
+        Dictionary<string, PinState> byId = new (pins, StringComparer.OrdinalIgnoreCase);
+
+        foreach (Package package in packages)
+        {
+            package.PinState = byId.TryGetValue (package.Id, out PinState state)
+                                   ? state
+                                   : PinState.Unpinned;
         }
     }
 
@@ -1082,8 +1113,7 @@ public sealed class App : Runnable
                                                      await DispatchAsync (() =>
                                                                           {
                                                                               loading.Dispose ();
-                                                                              _state.StatusMessage = $"Detail error: {ex.Message}";
-                                                                              _state.StatusIsError = true;
+                                                                              SetStatus ($"Detail error: {ex.Message}", isError: true);
                                                                               RefreshStatusBar ();
                                                                           }, ct,
                                                                           () => gen == _state.DetailGeneration
@@ -1256,7 +1286,7 @@ public sealed class App : Runnable
                 if (_opCts is { } opCts)
                 {
                     opCts.Cancel ();
-                    _state.StatusMessage = "Cancelling…";
+                    SetStatus ("Cancelling…", owner: StatusOwner.Operation);
                     RefreshStatusBar ();
                     key.Handled = true;
 
@@ -1572,8 +1602,9 @@ public sealed class App : Runnable
             return false;
         }
 
-        _state.StatusMessage = $"Cannot {verb}: id was truncated by winget — pick the same package from another view (e.g. Installed) for the full id.";
-        _state.StatusIsError = true;
+        SetStatus (
+            $"Cannot {verb}: id was truncated by winget — pick the same package from another view (e.g. Installed) for the full id.",
+            isError: true);
         RefreshStatusBar ();
 
         return true;
@@ -1731,8 +1762,7 @@ public sealed class App : Runnable
             {
                 if (verification is null)
                 {
-                    _state.StatusMessage = "Verify is only available on the COM backend.";
-                    _state.StatusIsError = false;
+                    SetStatus ("Verify is only available on the COM backend.");
                     RefreshStatusBar ();
 
                     return;
@@ -1798,8 +1828,7 @@ public sealed class App : Runnable
 
         if (!_state.Backend.CanRepair)
         {
-            _state.StatusMessage = "Repair is only available on the COM backend.";
-            _state.StatusIsError = false;
+            SetStatus ("Repair is only available on the COM backend.");
             RefreshStatusBar ();
 
             return;
@@ -1834,12 +1863,10 @@ public sealed class App : Runnable
             return null;
         }
 
-        AdvancedInstallDialog dlg = new (p.Name);
+        using AdvancedInstallDialog dlg = new (p.Name);
         App.Run (dlg);
-        InstallSettings? result = dlg.Result;
-        dlg.Dispose ();
 
-        return result;
+        return dlg.Result;
     }
 
     /// <summary>
@@ -1856,7 +1883,7 @@ public sealed class App : Runnable
             return;
         }
 
-        _state.StatusMessage = activity;
+        SetStatus (activity);
         IDisposable loading = _state.AcquireLoading ();
         int loadingReleased = 0;
         void ReleaseLoading ()
@@ -1866,8 +1893,6 @@ public sealed class App : Runnable
                 loading.Dispose ();
             }
         }
-
-        _state.StatusIsError = false;
         RefreshStatusBar ();
         CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource (
             _background.LifetimeToken,
@@ -1894,8 +1919,7 @@ public sealed class App : Runnable
                                                                                   _preflightCts = null;
                                                                               }
 
-                                                                              _state.StatusMessage = string.Empty;
-                                                                              _state.StatusIsError = false;
+                                                                              SetStatus (string.Empty);
                                                                               RefreshStatusBar ();
 
                                                                               // Clear the gate before onResult so its modal flow — and any
@@ -1919,8 +1943,7 @@ public sealed class App : Runnable
                                                                               ReleaseLoading ();
                                                                               Interlocked.Exchange (ref _preflightBusy, 0);
                                                                               _preflightCts = null;
-                                                                              _state.StatusMessage = $"Error: {ex.Message}";
-                                                                              _state.StatusIsError = true;
+                                                                              SetStatus ($"Error: {ex.Message}", isError: true);
                                                                               RefreshStatusBar ();
                                                                           }, ct,
                                                                           () => PreflightIdentityMatches (_preflightCts, request)
@@ -1937,8 +1960,7 @@ public sealed class App : Runnable
 
                                                                               if (PreflightOwnsActivity (_state.StatusMessage, activity))
                                                                               {
-                                                                                  _state.StatusMessage = string.Empty;
-                                                                                  _state.StatusIsError = false;
+                                                                                  SetStatus (string.Empty);
                                                                               }
 
                                                                               RefreshStatusBar ();
@@ -1977,12 +1999,10 @@ public sealed class App : Runnable
             return null;
         }
 
-        VersionPickerDialog dlg = new (p.Name, versions);
+        using VersionPickerDialog dlg = new (p.Name, versions);
         App.Run (dlg);
-        string? value = dlg.Result;
-        dlg.Dispose ();
 
-        return value;
+        return dlg.Result;
     }
 
     private void AskUpgrade (Package? p)
@@ -2126,7 +2146,9 @@ public sealed class App : Runnable
 
                                                      await DispatchAsync (() =>
                                                                           {
-                                                                              _state.StatusMessage = $"Upgrading {id}… · Esc to cancel";
+                                                                              SetStatus (
+                                                                                  $"Upgrading {id}… · Esc to cancel",
+                                                                                  owner: StatusOwner.Operation);
                                                                               RefreshStatusBar ();
                                                                           }, ct, () => ReferenceEquals (_opCts, request));
 
@@ -2161,10 +2183,10 @@ public sealed class App : Runnable
                                                                                   _state.InvalidateCachedDetail (id);
                                                                               }
 
-                                                                              _state.StatusMessage = result.Success
-                                                                                                         ? $"Upgraded {id}"
-                                                                                                         : $"Failed: {id}";
-                                                                              _state.StatusIsError = !result.Success;
+                                                                              SetStatus (
+                                                                                  result.Success ? $"Upgraded {id}" : $"Failed: {id}",
+                                                                                  !result.Success,
+                                                                                  StatusOwner.Operation);
                                                                               RefreshStatusBar ();
                                                                           }, ct, () => ReferenceEquals (_opCts, request));
                                                  }
@@ -2181,8 +2203,9 @@ public sealed class App : Runnable
 
                                                                           if (cancelled)
                                                                           {
-                                                                              _state.StatusMessage = "Cancelled";
-                                                                              _state.StatusIsError = false;
+                                                                              SetStatus (
+                                                                                  "Cancelled",
+                                                                                  owner: StatusOwner.Operation);
                                                                           }
 
                                                                           TriggerRefresh (_state.StatusMessage);
@@ -2225,9 +2248,8 @@ public sealed class App : Runnable
         _opCts = request;
         CancellationToken ct = request.Token;
 
-        _state.StatusMessage = $"{activity} · Esc to cancel";
+        SetStatus ($"{activity} · Esc to cancel", owner: StatusOwner.Operation);
         IDisposable loading = _state.AcquireLoading ();
-        _state.StatusIsError = false;
         _state.OpProgress = null;
         RefreshStatusBar ();
 
@@ -2270,13 +2292,16 @@ public sealed class App : Runnable
 
                                                                           if (cancelled)
                                                                           {
-                                                                              _state.StatusMessage = "Cancelled";
-                                                                              _state.StatusIsError = false;
+                                                                              SetStatus (
+                                                                                  "Cancelled",
+                                                                                  owner: StatusOwner.Operation);
                                                                           }
                                                                           else
                                                                           {
-                                                                              _state.StatusMessage = result!.Success ? "Done" : result.Message;
-                                                                              _state.StatusIsError = !result.Success;
+                                                                              SetStatus (
+                                                                                  result!.Success ? "Done" : result.Message,
+                                                                                  !result.Success,
+                                                                                  StatusOwner.Operation);
 
                                                                               if (result.Operation.PackageId is { } id)
                                                                               {
@@ -2425,12 +2450,10 @@ public sealed class App : Runnable
             return null;
         }
 
-        VersionInputDialog dlg = new (p.Name);
+        using VersionInputDialog dlg = new (p.Name);
         App.Run (dlg);
-        string? value = dlg.Result as string;
-        dlg.Dispose ();
 
-        return value;
+        return dlg.Result as string;
     }
 
     private void ShowHelp ()
@@ -2440,9 +2463,8 @@ public sealed class App : Runnable
             return;
         }
 
-        HelpDialog dlg = new (_state.BackendDescription, StartupDiagnostics.ComFallbackReason);
+        using HelpDialog dlg = new (_state.BackendDescription, StartupDiagnostics.ComFallbackReason);
         App.Run (dlg);
-        dlg.Dispose ();
     }
 
     private void ShowThemePicker ()
@@ -2452,10 +2474,9 @@ public sealed class App : Runnable
             return;
         }
 
-        ThemePickerDialog dlg = new ();
+        using ThemePickerDialog dlg = new ();
         App.Run (dlg);
         string? chosen = dlg.Result;
-        dlg.Dispose ();
 
         if (chosen is not null && chosen != Theme.CurrentPaletteName)
         {
@@ -2477,7 +2498,7 @@ public sealed class App : Runnable
 
     private void ExportCsv ()
     {
-        if (_exportWorkflow.IsActive)
+        if (!CanStartExport (_opCts is not null, _exportWorkflow.IsActive))
         {
             return;
         }
@@ -2492,8 +2513,7 @@ public sealed class App : Runnable
         }
         catch (Exception ex)
         {
-            _state.StatusMessage = $"Export preparation failed: {ex.Message}";
-            _state.StatusIsError = true;
+            SetStatus ($"Export preparation failed: {ex.Message}", isError: true);
             RefreshStatusBar ();
 
             return;
@@ -2511,8 +2531,7 @@ public sealed class App : Runnable
         }
 
         CancellationToken ct = operation.Token;
-        _state.StatusMessage = activity;
-        _state.StatusIsError = false;
+        SetStatus (activity);
         RefreshStatusBar ();
 
         bool admitted = _background.TryRun (async lifetimeToken =>
@@ -2550,12 +2569,14 @@ public sealed class App : Runnable
         {
             if (_exportWorkflow.RejectAdmission (operation, out string message))
             {
-                _state.StatusMessage = message;
-                _state.StatusIsError = true;
+                SetStatus (message, isError: true);
                 RefreshStatusBar ();
             }
         }
     }
+
+    internal static bool CanStartExport (bool operationActive, bool exportActive) =>
+        !operationActive && !exportActive;
 
     private void CompleteExport (
         ExportOperation operation,
@@ -2573,8 +2594,7 @@ public sealed class App : Runnable
         // identity. In that case completion must not erase or replace the newer message.
         if (completion.OwnedStatus)
         {
-            _state.StatusMessage = message;
-            _state.StatusIsError = isError;
+            SetStatus (message, isError);
         }
 
         RefreshStatusBar ();
@@ -2597,8 +2617,7 @@ public sealed class App : Runnable
     {
         if (string.IsNullOrWhiteSpace (url))
         {
-            _state.StatusMessage = "No URL available";
-            _state.StatusIsError = false;
+            SetStatus ("No URL available");
             RefreshStatusBar ();
 
             return;
@@ -2606,8 +2625,7 @@ public sealed class App : Runnable
 
         if (!TryNormalizeOpenableUrl (url, out string normalizedUrl))
         {
-            _state.StatusMessage = "Blocked non-http(s) URL";
-            _state.StatusIsError = true;
+            SetStatus ("Blocked non-http(s) URL", isError: true);
             RefreshStatusBar ();
 
             return;
@@ -2615,15 +2633,12 @@ public sealed class App : Runnable
 
         try
         {
-            ProcessStartInfo psi = new (normalizedUrl) { UseShellExecute = true };
-            Process.Start (psi);
-            _state.StatusMessage = $"Opened {normalizedUrl}";
-            _state.StatusIsError = false;
+            LaunchUrl (normalizedUrl, psi => Process.Start (psi));
+            SetStatus ($"Opened {normalizedUrl}");
         }
         catch (Exception ex)
         {
-            _state.StatusMessage = $"Open failed: {ex.Message}";
-            _state.StatusIsError = true;
+            SetStatus ($"Open failed: {ex.Message}", isError: true);
         }
 
         RefreshStatusBar ();
@@ -2631,6 +2646,16 @@ public sealed class App : Runnable
 
     internal static string EscapeCsvCell (string value)
         => CsvExporter.EscapeCell (value);
+
+    internal static void LaunchUrl (
+        string normalizedUrl,
+        Func<ProcessStartInfo, IDisposable?> launcher)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace (normalizedUrl);
+        ArgumentNullException.ThrowIfNull (launcher);
+        ProcessStartInfo psi = new (normalizedUrl) { UseShellExecute = true };
+        using IDisposable? launched = launcher (psi);
+    }
 
     internal static bool TryNormalizeOpenableUrl (string? url, out string normalizedUrl)
     {
