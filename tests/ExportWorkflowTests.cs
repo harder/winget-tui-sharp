@@ -131,11 +131,29 @@ public sealed class ExportWorkflowTests
         Assert.False (currentCompletion.OwnedStatus);
     }
 
+    [Fact]
+    public void OperationDispose_DisposesCancellationSourceWhenLoadingLeaseThrows ()
+    {
+        CancellationTokenSource cancellation = new ();
+        ExportOperation operation = new (cancellation, new ThrowingDisposable (), "exporting");
+
+        Assert.Throws<InvalidOperationException> (operation.Dispose);
+        Assert.Throws<ObjectDisposedException> (() => _ = cancellation.Token);
+
+        // Both fields were exchanged before callbacks ran, so retry cannot double-dispose.
+        operation.Dispose ();
+    }
+
     private sealed class DisposableProbe : IDisposable
     {
         internal int DisposeCount { get; private set; }
 
         public void Dispose () => DisposeCount++;
+    }
+
+    private sealed class ThrowingDisposable : IDisposable
+    {
+        public void Dispose () => throw new InvalidOperationException ("lease cleanup failed");
     }
 
     private sealed class TempDirectory : IDisposable

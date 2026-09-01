@@ -107,8 +107,107 @@ public sealed class CsvExporterTests
         Assert.True (snapshot.WasTruncated);
     }
 
+    [Fact]
+    public async Task CreateSnapshot_PerCellBoundaryDoesNotSplitSurrogatePair ()
+    {
+        string name = new string ('x', CsvExporter.MaxCellCharacters - 1) + "😀tail";
+        CsvSnapshot snapshot = CsvExporter.CreateSnapshot ([Package (string.Empty, name, string.Empty)]);
+        string truncated = snapshot.Rows [0].Name;
+
+        Assert.Equal (CsvExporter.MaxCellCharacters - 1, truncated.Length);
+        AssertValidUtf16 (truncated);
+        Assert.DoesNotContain ('\uFFFD', truncated);
+        Assert.Equal (1, snapshot.TruncatedCellCount);
+
+        using TempDirectory temp = new ();
+        string path = Path.Combine (temp.Path, "scalar-safe.csv");
+        await CsvExporter.WriteAtomicAsync (path, snapshot, TestContext.Current.CancellationToken);
+        string csv = await File.ReadAllTextAsync (path, TestContext.Current.CancellationToken);
+        AssertValidUtf16 (csv);
+        Assert.DoesNotContain ('\uFFFD', csv);
+        Assert.Contains ($"\"{truncated}\",\"\",\"\",\"\",\"winget\"", csv);
+    }
+
+    [Fact]
+    public async Task CreateSnapshot_AggregateBoundaryDoesNotSplitSurrogatePair ()
+    {
+        const int remainingForTarget = 100;
+        List<Package> packages = CreateFillerPackages (CsvExporter.MaxSnapshotCharacters - remainingForTarget);
+        packages.Add (new ()
+        {
+            Id = string.Empty,
+            Name = new string ('z', remainingForTarget - 1) + "😀tail",
+            Version = string.Empty,
+            Source = string.Empty
+        });
+
+        CsvSnapshot snapshot = CsvExporter.CreateSnapshot (packages);
+        CsvRow target = snapshot.Rows [^1];
+
+        Assert.Equal (remainingForTarget - 1, target.Name.Length);
+        Assert.Equal (CsvExporter.MaxSnapshotCharacters - 1, snapshot.RetainedCharacters);
+        AssertValidUtf16 (target.Name);
+        Assert.DoesNotContain ('\uFFFD', target.Name);
+        Assert.True (snapshot.TruncatedCellCount > 0);
+
+        using TempDirectory temp = new ();
+        string path = Path.Combine (temp.Path, "aggregate-safe.csv");
+        await CsvExporter.WriteAtomicAsync (path, snapshot, TestContext.Current.CancellationToken);
+        string csv = await File.ReadAllTextAsync (path, TestContext.Current.CancellationToken);
+        AssertValidUtf16 (csv);
+        Assert.DoesNotContain ('\uFFFD', csv);
+        Assert.EndsWith ($"\"{target.Name}\",\"\",\"\",\"\",\"\"{Environment.NewLine}", csv);
+    }
+
     private static Package Package (string id, string name, string version = "1.0") =>
         new () { Id = id, Name = name, Version = version, Source = "winget" };
+
+    private static List<Package> CreateFillerPackages (int characters)
+    {
+        List<Package> packages = [];
+        int remaining = characters;
+
+        while (remaining > 0)
+        {
+            string [] cells = new string [5];
+
+            for (int index = 0; index < cells.Length; index++)
+            {
+                int length = Math.Min (remaining, CsvExporter.MaxCellCharacters);
+                cells [index] = new string ((char)('a' + index), length);
+                remaining -= length;
+            }
+
+            packages.Add (new ()
+            {
+                Name = cells [0],
+                Id = cells [1],
+                Version = cells [2],
+                AvailableVersion = cells [3],
+                Source = cells [4]
+            });
+        }
+
+        return packages;
+    }
+
+    private static void AssertValidUtf16 (string value)
+    {
+        for (int index = 0; index < value.Length; index++)
+        {
+            char current = value [index];
+
+            if (char.IsHighSurrogate (current))
+            {
+                Assert.True (index + 1 < value.Length && char.IsLowSurrogate (value [index + 1]));
+                index++;
+            }
+            else
+            {
+                Assert.False (char.IsLowSurrogate (current));
+            }
+        }
+    }
 
     private sealed class TempDirectory : IDisposable
     {

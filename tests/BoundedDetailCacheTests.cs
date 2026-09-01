@@ -65,7 +65,7 @@ public sealed class BoundedDetailCacheTests
     {
         BoundedDetailCache cache = new (maxEntries: 10, maxRetainedCharacters: 500);
         Assert.True (cache.Set ("a", Detail ("a", "short")));
-        int before = cache.RetainedCharacters;
+        long before = cache.RetainedCharacters;
         Assert.True (cache.TryGet ("a", out PackageDetail returned));
 
         returned.Description = new string ('z', 100);
@@ -112,9 +112,9 @@ public sealed class BoundedDetailCacheTests
     {
         BoundedDetailCache cache = new (maxEntries: 10, maxRetainedCharacters: 1_000);
         cache.Set ("a", Detail ("a", "one"));
-        int firstCharacters = cache.RetainedCharacters;
+        long firstCharacters = cache.RetainedCharacters;
         cache.Set ("b", Detail ("b", "two"));
-        int bothCharacters = cache.RetainedCharacters;
+        long bothCharacters = cache.RetainedCharacters;
         Assert.True (cache.Remove ("A"));
         Assert.False (cache.Remove ("missing"));
         Assert.Equal (1, cache.Count);
@@ -141,6 +141,49 @@ public sealed class BoundedDetailCacheTests
             Assert.InRange (cache.Count, 0, cache.MaxEntries);
             Assert.InRange (cache.RetainedCharacters, 0, cache.MaxRetainedCharacters);
         }
+    }
+
+    [Fact]
+    public void IntMaxBudget_StructuralOversizeRejectsWithoutOverflowOrNullDereference ()
+    {
+        BoundedDetailCache cache = new (
+            maxEntries: int.MaxValue,
+            maxRetainedCharacters: int.MaxValue);
+        PackageDetail detail = new ()
+        {
+            Id = "oversize",
+            Name = "oversize",
+            Tags = Enumerable.Repeat (string.Empty, BoundedDetailCache.MaxCollectionValuesPerEntry + 1).ToArray ()
+        };
+
+        Assert.False (cache.Set ("oversize", detail));
+        BoundedDetailCache.CacheMetrics metrics = cache.GetMetrics ();
+        Assert.Equal (0, metrics.Count);
+        Assert.Equal (0, metrics.EstimatedCharacters);
+        Assert.Equal (0, metrics.CollectionValues);
+        Assert.True (cache.MaxRetainedCollectionValues > int.MaxValue);
+    }
+
+    [Fact]
+    public void ExactBudgetAddAndOversizeReplacement_CannotWrapOrBypassEviction ()
+    {
+        const int budget = 64;
+        BoundedDetailCache cache = new (maxEntries: 4, maxRetainedCharacters: budget);
+        PackageDetail exact = Detail ("a", new string ('x', budget - 3));
+        Assert.True (cache.Set ("a", exact));
+        Assert.Equal (budget, cache.EstimatedCharacters);
+
+        Assert.True (cache.Set ("b", Detail ("b")));
+        Assert.False (cache.TryGet ("a", out _));
+        Assert.True (cache.TryGet ("b", out _));
+        Assert.InRange (cache.EstimatedCharacters, 0, cache.MaxRetainedCharacters);
+
+        Assert.False (cache.Set ("B", Detail ("b", new string ('y', budget))));
+        Assert.False (cache.TryGet ("b", out _));
+        BoundedDetailCache.CacheMetrics metrics = cache.GetMetrics ();
+        Assert.Equal (0, metrics.Count);
+        Assert.Equal (0, metrics.EstimatedCharacters);
+        Assert.Equal (0, metrics.CollectionValues);
     }
 
     [Fact]

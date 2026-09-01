@@ -37,10 +37,10 @@ internal static class CsvExporter
             {
                 string value = values [cell];
                 int allowed = Math.Min (MaxCellCharacters, MaxSnapshotCharacters - retainedCharacters);
+                values [cell] = TakeUtf16Prefix (value, allowed, out bool truncated);
 
-                if (value.Length > allowed)
+                if (truncated)
                 {
-                    values [cell] = value [..allowed];
                     truncatedCells++;
                 }
 
@@ -72,6 +72,7 @@ internal static class CsvExporter
         string fileName = Path.GetFileName (destination);
         string tempPath = Path.Combine (directory, $".{fileName}.{Guid.NewGuid ():N}.tmp");
         bool committed = false;
+        Exception? primaryFailure = null;
 
         try
         {
@@ -112,13 +113,43 @@ internal static class CsvExporter
             File.Move (tempPath, destination, overwrite: true);
             committed = true;
         }
+        catch (Exception ex)
+        {
+            primaryFailure = ex;
+            throw;
+        }
         finally
         {
             if (!committed && File.Exists (tempPath))
             {
-                File.Delete (tempPath);
+                try
+                {
+                    File.Delete (tempPath);
+                }
+                catch when (primaryFailure is not null)
+                {
+                    // Preserve the cancellation/write exception that caused cleanup. When no
+                    // primary failure exists, surface cleanup failure instead of hiding a temp.
+                }
             }
         }
+    }
+
+    private static string TakeUtf16Prefix (string value, int allowedCharacters, out bool truncated)
+    {
+        int length = Math.Min (value.Length, allowedCharacters);
+
+        if (length > 0
+            && length < value.Length
+            && char.IsHighSurrogate (value [length - 1])
+            && char.IsLowSurrogate (value [length]))
+        {
+            length--;
+        }
+
+        truncated = length < value.Length;
+
+        return truncated ? value [..length] : value;
     }
 
     internal static string EscapeCell (string value)
@@ -203,21 +234,31 @@ internal sealed class ExportWorkflowState : IDisposable
 
         ExportOperation candidate = new (cancellation, loading, activity);
 
+        bool accepted;
+
         lock (_gate)
         {
-            if (_disposed || _active is not null || lifetimeToken.IsCancellationRequested)
+            accepted = !_disposed && _active is null && !lifetimeToken.IsCancellationRequested;
+
+            if (accepted)
             {
-                candidate.Dispose ();
-                operation = null!;
-
-                return false;
+                _active = candidate;
             }
-
-            _active = candidate;
-            operation = candidate;
-
-            return true;
         }
+
+        if (!accepted)
+        {
+            // Loading leases are supplied by the caller and may run arbitrary disposal code.
+            // Keep that callback outside the coordinator lock.
+            candidate.Dispose ();
+            operation = null!;
+
+            return false;
+        }
+
+        operation = candidate;
+
+        return true;
     }
 
     internal bool IsCurrent (ExportOperation operation)
@@ -326,8 +367,17 @@ internal sealed class ExportOperation : IDisposable
 
     public void Dispose ()
     {
-        Interlocked.Exchange (ref _loading, null)?.Dispose ();
-        Interlocked.Exchange (ref _cancellation, null)?.Dispose ();
+        IDisposable? loading = Interlocked.Exchange (ref _loading, null);
+        CancellationTokenSource? cancellation = Interlocked.Exchange (ref _cancellation, null);
+
+        try
+        {
+            loading?.Dispose ();
+        }
+        finally
+        {
+            cancellation?.Dispose ();
+        }
     }
 }
 

@@ -18,10 +18,10 @@ internal sealed class BoundedDetailCache
 
     private readonly object _gate = new ();
     private readonly int _maxEntries;
-    private readonly int _maxRetainedCharacters;
+    private readonly long _maxRetainedCharacters;
     private readonly Dictionary<string, LinkedListNode<Entry>> _entries = new (StringComparer.OrdinalIgnoreCase);
     private readonly LinkedList<Entry> _recency = new ();
-    private int _retainedCharacters;
+    private long _retainedCharacters;
     private long _retainedCollectionValues;
 
     internal BoundedDetailCache (
@@ -45,7 +45,7 @@ internal sealed class BoundedDetailCache
         }
     }
 
-    internal int RetainedCharacters
+    internal long RetainedCharacters
     {
         get
         {
@@ -56,7 +56,7 @@ internal sealed class BoundedDetailCache
         }
     }
 
-    internal int EstimatedCharacters => RetainedCharacters;
+    internal long EstimatedCharacters => RetainedCharacters;
 
     internal long RetainedCollectionValues
     {
@@ -70,7 +70,7 @@ internal sealed class BoundedDetailCache
     }
 
     internal int MaxEntries => _maxEntries;
-    internal int MaxRetainedCharacters => _maxRetainedCharacters;
+    internal long MaxRetainedCharacters => _maxRetainedCharacters;
     internal long MaxRetainedCollectionValues => (long)_maxEntries * MaxCollectionValuesPerEntry;
 
     internal CacheMetrics GetMetrics ()
@@ -112,15 +112,15 @@ internal sealed class BoundedDetailCache
         ArgumentNullException.ThrowIfNull (detail);
 
         PackageDetail? ownedDetail = TryCloneForRetention (detail);
-        int retainedCharacters = ownedDetail is null
-                                     ? _maxRetainedCharacters + 1
-                                     : MeasureRetainedCharacters (key, ownedDetail, _maxRetainedCharacters);
+        long retainedCharacters = ownedDetail is null
+                                      ? 0
+                                      : MeasureRetainedCharacters (key, ownedDetail, _maxRetainedCharacters);
 
         lock (_gate)
         {
             RemoveCore (key);
 
-            if (retainedCharacters > _maxRetainedCharacters)
+            if (ownedDetail is null || retainedCharacters > _maxRetainedCharacters)
             {
                 return false;
             }
@@ -180,16 +180,21 @@ internal sealed class BoundedDetailCache
         return true;
     }
 
-    private static int MeasureRetainedCharacters (string key, PackageDetail detail, int budget)
+    private static long MeasureRetainedCharacters (string key, PackageDetail detail, long budget)
     {
-        long total = key.Length;
+        long total = 0;
 
         void Add (string? value)
         {
-            if (value is not null && total <= budget)
+            if (value is null || total > budget)
             {
-                total += value.Length;
+                return;
             }
+
+            // Saturate at one past the int-backed configured budget. This is sufficient for
+            // rejection and cannot wrap the retained counter.
+            long remaining = budget - total;
+            total = value.Length > remaining ? checked(budget + 1) : checked(total + value.Length);
         }
 
         void AddAll (IReadOnlyList<string>? values)
@@ -199,12 +204,13 @@ internal sealed class BoundedDetailCache
                 return;
             }
 
-            foreach (string value in values)
+            foreach (string? value in values)
             {
                 Add (value);
             }
         }
 
+        Add (key);
         Add (detail.Id);
         Add (detail.Name);
         Add (detail.Version);
@@ -222,10 +228,10 @@ internal sealed class BoundedDetailCache
 
         if (detail.Documentation is not null)
         {
-            foreach (DocLink link in detail.Documentation)
+            foreach (DocLink? link in detail.Documentation)
             {
-                Add (link.Label);
-                Add (link.Url);
+                Add (link?.Label);
+                Add (link?.Url);
             }
         }
 
@@ -240,7 +246,7 @@ internal sealed class BoundedDetailCache
         Add (detail.InstalledScope);
         Add (detail.MatchField);
 
-        return total > budget ? budget + 1 : (int)total;
+        return total;
     }
 
     private static PackageDetail Clone (PackageDetail detail) =>
@@ -295,11 +301,11 @@ internal sealed class BoundedDetailCache
         + (detail.ProductCodes?.Count ?? 0)
         + (detail.PackageFamilyNames?.Count ?? 0);
 
-    internal readonly record struct CacheMetrics (int Count, int EstimatedCharacters, long CollectionValues);
+    internal readonly record struct CacheMetrics (int Count, long EstimatedCharacters, long CollectionValues);
 
     private sealed record Entry (
         string Key,
         PackageDetail Detail,
-        int RetainedCharacters,
+        long RetainedCharacters,
         int CollectionValues);
 }
