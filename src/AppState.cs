@@ -26,7 +26,7 @@ public sealed class AppState
     public Dictionary<string, PinState> Pins { get; } = new (StringComparer.OrdinalIgnoreCase);
     public HashSet<string> BatchSelected { get; } = new (StringComparer.OrdinalIgnoreCase);
     public PackageDetail? CurrentDetail { get; set; }
-    public Dictionary<string, PackageDetail> DetailCache { get; } = new (StringComparer.OrdinalIgnoreCase);
+    private readonly BoundedDetailCache _detailCache = new ();
 
     public string SearchQuery { get; set; } = string.Empty;
     public string LocalFilter { get; set; } = string.Empty;
@@ -63,6 +63,11 @@ public sealed class AppState
 
     public int BumpViewGeneration () => ++ViewGeneration;
     public int BumpDetailGeneration () => ++DetailGeneration;
+
+    internal bool TryGetCachedDetail (string id, out PackageDetail detail) => _detailCache.TryGet (id, out detail);
+    internal bool CacheDetail (string id, PackageDetail detail) => _detailCache.Set (id, detail);
+    internal bool RemoveCachedDetail (string id) => _detailCache.Remove (id);
+    internal void ClearCachedDetails () => _detailCache.Clear ();
 
     /// <summary>
     /// Acquires independent loading ownership. Disposing one lease cannot clear another owner's

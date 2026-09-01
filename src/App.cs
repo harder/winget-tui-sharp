@@ -44,6 +44,7 @@ public sealed class App : Runnable
     // cover list/detail refreshes that already cancel implicitly on navigation.
     private CancellationTokenSource? _opCts;
     private CancellationTokenSource? _preflightCts;
+    private CancellationTokenSource? _exportCts;
 
     // True while a short preflight fetch (version list / installer preview) is running, so a
     // rapid second trigger can't queue a duplicate modal or race the status line.
@@ -288,6 +289,7 @@ public sealed class App : Runnable
         CancelSource (_detailCts);
         CancelSource (_preflightCts);
         CancelSource (_opCts);
+        CancelSource (_exportCts);
 
         if (_smokeTimer is not null && App is { } app)
         {
@@ -345,6 +347,8 @@ public sealed class App : Runnable
         _preflightCts = null;
         _opCts?.Dispose ();
         _opCts = null;
+        _exportCts?.Dispose ();
+        _exportCts = null;
     }
 
     /// <summary>
@@ -1027,10 +1031,11 @@ public sealed class App : Runnable
             return;
         }
 
-        if (_state.DetailCache.TryGetValue (p.Id, out PackageDetail? cached))
+        if (_state.TryGetCachedDetail (p.Id, out PackageDetail cached))
         {
             cached.MergeContext (p);
             cached.EnsureDetailHint ();
+            _state.CacheDetail (p.Id, cached);
             _state.CurrentDetail = cached;
             _detailPanel.SetDetail (cached, false);
             RefreshStatusBar ();
@@ -1064,7 +1069,7 @@ public sealed class App : Runnable
                                                                               PackageDetail final = detail ?? BuildStubDetail (p);
                                                                               final.MergeContext (p);
                                                                               final.EnsureDetailHint ();
-                                                                              _state.DetailCache [p.Id] = final;
+                                                                              _state.CacheDetail (p.Id, final);
                                                                               _state.CurrentDetail = final;
                                                                               _detailPanel.SetDetail (final, false);
                                                                               RefreshStatusBar ();
@@ -2157,7 +2162,7 @@ public sealed class App : Runnable
                                                                           {
                                                                               if (result.Success)
                                                                               {
-                                                                                  _state.DetailCache.Remove (id);
+                                                                                  _state.RemoveCachedDetail (id);
                                                                               }
 
                                                                               _state.StatusMessage = result.Success
@@ -2279,7 +2284,7 @@ public sealed class App : Runnable
 
                                                                               if (result.Operation.PackageId is { } id)
                                                                               {
-                                                                                  _state.DetailCache.Remove (id);
+                                                                                  _state.RemoveCachedDetail (id);
                                                                               }
                                                                           }
 
@@ -2476,27 +2481,121 @@ public sealed class App : Runnable
 
     private void ExportCsv ()
     {
+        if (Volatile.Read (ref _exportCts) is not null)
+        {
+            return;
+        }
+
+        CsvSnapshot snapshot;
+
         try
         {
-            string path = Path.Combine (Environment.CurrentDirectory, "winget-tui-export.csv");
-            using StreamWriter sw = new (path);
-            sw.WriteLine ("Name,Id,Version,Available,Source");
-
-            foreach (Package p in _state.Filtered)
-            {
-                sw.WriteLine ($"\"{EscapeCsvCell (p.Name)}\",\"{EscapeCsvCell (p.Id)}\",\"{EscapeCsvCell (p.Version)}\",\"{EscapeCsvCell (p.AvailableVersion ?? string.Empty)}\",\"{EscapeCsvCell (p.Source)}\"");
-            }
-
-            _state.StatusMessage = $"Exported {_state.Filtered.Count} rows to {path}";
-            _state.StatusIsError = false;
+            // Copy immutable scalar data on the UI thread. CsvExporter enforces row, cell, and
+            // aggregate character ceilings before this snapshot crosses into background work.
+            snapshot = CsvExporter.CreateSnapshot (_state.Filtered);
         }
         catch (Exception ex)
         {
-            _state.StatusMessage = $"Export failed: {ex.Message}";
+            _state.StatusMessage = $"Export preparation failed: {ex.Message}";
             _state.StatusIsError = true;
+            RefreshStatusBar ();
+
+            return;
+        }
+
+        string path = Path.Combine (Environment.CurrentDirectory, "winget-tui-export.csv");
+        string activity = $"Exporting {snapshot.Rows.Count} rows…";
+        CancellationTokenSource request = CreateLifetimeLinkedSource ();
+        _exportCts = request;
+        CancellationToken ct = request.Token;
+        IDisposable loading = _state.AcquireLoading ();
+        _state.StatusMessage = activity;
+        _state.StatusIsError = false;
+        RefreshStatusBar ();
+
+        bool admitted = _background.TryRun (async lifetimeToken =>
+                                             {
+                                                 try
+                                                 {
+                                                     await CsvExporter.WriteAtomicAsync (path, snapshot, ct);
+                                                     await DispatchAsync (() => CompleteExport (
+                                                                                  request,
+                                                                                  loading,
+                                                                                  activity,
+                                                                                  FormatExportSuccess (snapshot, path),
+                                                                                  isError: false),
+                                                                          ct,
+                                                                          () => ReferenceEquals (_exportCts, request));
+                                                 }
+                                                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                                                 {
+                                                     // Application shutdown owns cancellation; no stopped UI callback.
+                                                 }
+                                                 catch (Exception ex)
+                                                 {
+                                                     await DispatchAsync (() => CompleteExport (
+                                                                                  request,
+                                                                                  loading,
+                                                                                  activity,
+                                                                                  $"Export failed: {ex.Message}",
+                                                                                  isError: true),
+                                                                          lifetimeToken,
+                                                                          () => ReferenceEquals (_exportCts, request));
+                                                 }
+                                                 finally
+                                                 {
+                                                     loading.Dispose ();
+                                                     Interlocked.CompareExchange (ref _exportCts, null, request);
+                                                     request.Dispose ();
+                                                 }
+                                             });
+
+        if (!admitted)
+        {
+            loading.Dispose ();
+            Interlocked.CompareExchange (ref _exportCts, null, request);
+            request.Dispose ();
+            ReportRejectedBackgroundAdmission ();
+        }
+    }
+
+    private void CompleteExport (
+        CancellationTokenSource request,
+        IDisposable loading,
+        string activity,
+        string message,
+        bool isError)
+    {
+        if (!ReferenceEquals (_exportCts, request))
+        {
+            return;
+        }
+
+        _exportCts = null;
+        loading.Dispose ();
+
+        // A newer operation may own the status line even though this export still owns its task
+        // identity. In that case completion must not erase or replace the newer message.
+        if (PreflightOwnsActivity (_state.StatusMessage, activity))
+        {
+            _state.StatusMessage = message;
+            _state.StatusIsError = isError;
         }
 
         RefreshStatusBar ();
+    }
+
+    private static string FormatExportSuccess (CsvSnapshot snapshot, string path)
+    {
+        if (!snapshot.WasTruncated)
+        {
+            return $"Exported {snapshot.Rows.Count} rows to {path}";
+        }
+
+        return $"Exported {snapshot.Rows.Count} of {snapshot.SourceRowCount} rows to {path}; "
+               + $"bounded export omitted {snapshot.OmittedRowCount} rows and truncated {snapshot.TruncatedCellCount} cells "
+               + $"(limits: {CsvExporter.MaxRows:N0} rows, {CsvExporter.MaxCellCharacters:N0} chars/cell, "
+               + $"{CsvExporter.MaxSnapshotCharacters:N0} chars total)";
     }
 
     private void OpenUrl (string? url)
@@ -2536,11 +2635,7 @@ public sealed class App : Runnable
     }
 
     internal static string EscapeCsvCell (string value)
-    {
-        string escaped = LooksLikeCsvFormula (value) ? "'" + value : value;
-
-        return escaped.Replace ("\"", "\"\"");
-    }
+        => CsvExporter.EscapeCell (value);
 
     internal static bool TryNormalizeOpenableUrl (string? url, out string normalizedUrl)
     {
@@ -2564,18 +2659,6 @@ public sealed class App : Runnable
         normalizedUrl = parsed.AbsoluteUri;
 
         return true;
-    }
-
-    private static bool LooksLikeCsvFormula (string value)
-    {
-        if (string.IsNullOrEmpty (value))
-        {
-            return false;
-        }
-
-        string trimmed = value.TrimStart ();
-
-        return trimmed.Length > 0 && trimmed [0] is '=' or '+' or '-' or '@';
     }
 
     private sealed record EmptyRow ();

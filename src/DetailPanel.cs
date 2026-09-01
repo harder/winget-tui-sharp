@@ -474,12 +474,41 @@ public sealed class DetailPanel : FrameView
 
     private void ClearMarkdownRows ()
     {
-        foreach (MarkdownRow markdownRow in _markdownRows)
+        Exception? firstFailure = null;
+
+        while (_markdownRows.Count > 0)
         {
-            Remove (markdownRow.View);
+            int index = _markdownRows.Count - 1;
+            MarkdownRow markdownRow = _markdownRows [index];
+            _markdownRows.RemoveAt (index);
+
+            try
+            {
+                RemoveAndDisposeDynamicView (markdownRow.View, () => Remove (markdownRow.View));
+            }
+            catch (Exception ex)
+            {
+                // Continue releasing every detached dynamic child, then preserve the first error.
+                firstFailure ??= ex;
+            }
         }
 
-        _markdownRows.Clear ();
+        if (firstFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture (firstFailure).Throw ();
+        }
+    }
+
+    internal static void RemoveAndDisposeDynamicView (IDisposable view, Action remove)
+    {
+        try
+        {
+            remove ();
+        }
+        finally
+        {
+            view.Dispose ();
+        }
     }
 
     private void LayoutMarkdownRow (MarkdownRow markdownRow, int startLine, int lineCount, int width)
