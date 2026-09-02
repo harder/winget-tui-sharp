@@ -404,6 +404,84 @@ public sealed class CrossCuttingWorkflowTests
     }
 
     [Fact]
+    public void PinSnapshot_RejectsSourceThatEnumeratesFewerEntriesThanItReports ()
+    {
+        BoundedPinSnapshot snapshot = new ();
+        Assert.True (snapshot.TryRecord (new Dictionary<string, PinState>
+        {
+            ["Vendor.Pinned"] = new (PinStateKind.Blocking)
+        }));
+
+        // Count says five, the enumerator yields two. Accepting that as complete would report the
+        // three unlisted packages as unpinned, which is a silent wrong answer rather than a gap.
+        CountingPinDictionary underReporting = new (
+            reportedCount: 5,
+            [Pair ("Vendor.One"), Pair ("Vendor.Two")]);
+
+        Assert.False (snapshot.TryRecord (underReporting));
+        Assert.False (snapshot.IsFresh);
+
+        // The previously accepted snapshot is retained (stale-marked), never replaced by partial data.
+        Assert.True (snapshot.HasSnapshot);
+        Assert.Equal (1, snapshot.Count);
+    }
+
+    [Fact]
+    public void PinSnapshot_RejectsOverEnumerationAtTheFirstExtraEntry ()
+    {
+        BoundedPinSnapshot snapshot = new ();
+        CountingPinDictionary overReporting = new (
+            reportedCount: 2,
+            [Pair ("Vendor.One"), Pair ("Vendor.Two"), Pair ("Vendor.Three")]);
+
+        Assert.False (snapshot.TryRecord (overReporting));
+        Assert.False (snapshot.IsFresh);
+
+        // Bailing at the first entry past Count means an endless enumerator costs three MoveNexts,
+        // not MaxEntries of them.
+        Assert.Equal (3, overReporting.MoveNextCount);
+    }
+
+    [Fact]
+    public void CachedDetail_AdoptsFreshSnapshotPinIncludingAnExternalUnpin ()
+    {
+        AppState state = new (new MockBackend ());
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState>
+        {
+            ["Vendor.Package"] = new (PinStateKind.Blocking)
+        }));
+
+        Package pinned = new () { Id = "Vendor.Package", Name = "Package", PinState = new (PinStateKind.Blocking) };
+        Assert.True (state.CacheDetail (pinned.Id, new () { Id = pinned.Id, Name = pinned.Name, PinState = pinned.PinState }));
+        Assert.True (state.TryGetCachedDetail (pinned, out PackageDetail whilePinned));
+        Assert.True (whilePinned.PinState.IsPinned);
+
+        // Somebody ran `winget pin remove` outside the app; the next refresh records that.
+        Assert.True (state.RecordPinSnapshot (new Dictionary<string, PinState> ()));
+        Package unpinned = new () { Id = "Vendor.Package", Name = "Package" };
+
+        Assert.True (state.TryGetCachedDetail (unpinned, out PackageDetail afterExternalUnpin));
+        Assert.Equal (PinState.Unpinned, afterExternalUnpin.PinState);
+
+        // …and the correction is written back, not recomputed on every read from a stale entry.
+        Assert.True (state.TryGetCachedDetail (unpinned, out PackageDetail reread));
+        Assert.Equal (PinState.Unpinned, reread.PinState);
+    }
+
+    [Fact]
+    public void CachedDetail_KeepsListRowPinWhenSnapshotIsStale ()
+    {
+        AppState state = new (new MockBackend ());
+        Package pinned = new () { Id = "Vendor.Package", Name = "Package", PinState = new (PinStateKind.Blocking) };
+        Assert.True (state.CacheDetail (pinned.Id, new () { Id = pinned.Id, Name = pinned.Name }));
+
+        // With no fresh pin authority, "unknown" must not be downgraded to "unpinned".
+        state.MarkPinsStale ();
+        Assert.True (state.TryGetCachedDetail (pinned, out PackageDetail detail));
+        Assert.True (detail.PinState.IsPinned);
+    }
+
+    [Fact]
     public void PinSnapshot_AppliesRetainedCopyAndCompleteEmptySnapshotClearsUnpinned ()
     {
         AppState state = new (new MockBackend ());

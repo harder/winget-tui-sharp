@@ -249,7 +249,25 @@ internal sealed class BoundedDetailCache
         return total;
     }
 
+    /// <summary>
+    /// Copies a value already under this cache's accounting. Retained collections are the cache's
+    /// own <see cref="List{T}"/> instances, so spreading them is bounded by construction. Ingress
+    /// from a backend goes through <see cref="TryCloneForRetention"/> instead.
+    /// </summary>
     private static PackageDetail Clone (PackageDetail detail) =>
+        CloneWithCollections (
+            detail,
+            detail.Tags is null ? null : [.. detail.Tags],
+            detail.Documentation is null ? null : [.. detail.Documentation],
+            detail.ProductCodes is null ? null : [.. detail.ProductCodes],
+            detail.PackageFamilyNames is null ? null : [.. detail.PackageFamilyNames]);
+
+    private static PackageDetail CloneWithCollections (
+        PackageDetail detail,
+        IReadOnlyList<string>? tags,
+        IReadOnlyList<DocLink>? documentation,
+        IReadOnlyList<string>? productCodes,
+        IReadOnlyList<string>? packageFamilyNames) =>
         new ()
         {
             Id = detail.Id,
@@ -265,10 +283,10 @@ internal sealed class BoundedDetailCache
             License = detail.License,
             ReleaseNotesUrl = detail.ReleaseNotesUrl,
             SupportUrl = detail.SupportUrl,
-            Tags = detail.Tags is null ? null : [.. detail.Tags],
-            Documentation = detail.Documentation is null ? null : [.. detail.Documentation],
-            ProductCodes = detail.ProductCodes is null ? null : [.. detail.ProductCodes],
-            PackageFamilyNames = detail.PackageFamilyNames is null ? null : [.. detail.PackageFamilyNames],
+            Tags = tags,
+            Documentation = documentation,
+            ProductCodes = productCodes,
+            PackageFamilyNames = packageFamilyNames,
             Author = detail.Author,
             Copyright = detail.Copyright,
             PrivacyUrl = detail.PrivacyUrl,
@@ -280,19 +298,79 @@ internal sealed class BoundedDetailCache
             IsDescriptionDegraded = detail.IsDescriptionDegraded
         };
 
+    /// <summary>
+    /// Copies backend-supplied collections by index against one shared item allowance, so a source
+    /// that reports a small <c>Count</c> but enumerates without end (or grows mid-copy) is rejected
+    /// instead of being allocated first and measured afterwards.
+    /// </summary>
     private static PackageDetail? TryCloneForRetention (PackageDetail detail)
     {
-        long collectionValues = CountCollectionValues (detail);
+        int remaining = MaxCollectionValuesPerEntry;
 
-        if (collectionValues > MaxCollectionValuesPerEntry)
+        if (!TryCopyBounded (detail.Tags, ref remaining, out IReadOnlyList<string>? tags)
+            || !TryCopyBounded (detail.Documentation, ref remaining, out IReadOnlyList<DocLink>? documentation)
+            || !TryCopyBounded (detail.ProductCodes, ref remaining, out IReadOnlyList<string>? productCodes)
+            || !TryCopyBounded (detail.PackageFamilyNames, ref remaining, out IReadOnlyList<string>? packageFamilyNames))
         {
             return null;
         }
 
-        PackageDetail clone = Clone (detail);
-        collectionValues = CountCollectionValues (clone);
+        return CloneWithCollections (detail, tags, documentation, productCodes, packageFamilyNames);
+    }
 
-        return collectionValues <= MaxCollectionValuesPerEntry ? clone : null;
+    private static bool TryCopyBounded<T> (
+        IReadOnlyList<T>? source,
+        ref int remaining,
+        out IReadOnlyList<T>? copy)
+    {
+        copy = null;
+
+        if (source is null)
+        {
+            return true;
+        }
+
+        int count;
+
+        try
+        {
+            count = source.Count;
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (count < 0 || count > remaining)
+        {
+            return false;
+        }
+
+        List<T> items = new (count);
+
+        try
+        {
+            // Indexed access cannot run past the reported Count, unlike enumerating the source.
+            for (int i = 0; i < count; i++)
+            {
+                items.Add (source [i]);
+            }
+
+            // A Count that moved during the copy leaves the accounting unverifiable either way.
+            if (source.Count != count)
+            {
+                return false;
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        remaining -= count;
+        copy = items;
+
+        return true;
     }
 
     private static long CountCollectionValues (PackageDetail detail) =>

@@ -487,19 +487,22 @@ public sealed partial class CliBackend : IBackend
         CancellationToken ct)
     {
         ProcessRunner.RunResult result = await RunDetailedWithCodeAsync (args, executable, timeout, ct);
-        EnsureCompleteForParsing (result, args);
+        EnsureCompleteForParsing (result, executable, args);
 
         return parser (result.Output);
     }
 
-    internal static void EnsureCompleteForParsing (ProcessRunner.RunResult result, IReadOnlyList<string> args)
+    internal static void EnsureCompleteForParsing (
+        ProcessRunner.RunResult result,
+        string executable,
+        IReadOnlyList<string> args)
     {
         if (result.OutputComplete)
         {
             return;
         }
 
-        string command = args.Count == 0 ? "winget" : $"winget {args [0]}";
+        string command = args.Count == 0 ? executable : $"{executable} {args [0]}";
         List<string> reasons = [];
 
         if (result.StdoutTruncated)
@@ -519,7 +522,7 @@ public sealed partial class CliBackend : IBackend
 
         throw new BoundedOutputException (
             $"Cannot parse incomplete output from '{command}': {string.Join ("; ", reasons)}. "
-            + "Refine the request or run winget directly for the complete result.");
+            + $"Refine the request or run {executable} directly for the complete result.");
     }
 
     /// <summary>

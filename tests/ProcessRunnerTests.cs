@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -598,8 +599,12 @@ public sealed class ProcessRunnerTests : IDisposable
         foreach (ProcessRunner.RunResult result in results)
         {
             BoundedOutputException exception = Assert.Throws<BoundedOutputException> (
-                () => CliBackend.EnsureCompleteForParsing (result, ["search"]));
+                () => CliBackend.EnsureCompleteForParsing (result, "some-tool", ["search"]));
             Assert.Contains ("incomplete output", exception.Message, StringComparison.OrdinalIgnoreCase);
+
+            // The message names what actually ran, not a hardcoded "winget".
+            Assert.Contains ("'some-tool search'", exception.Message, StringComparison.Ordinal);
+            Assert.DoesNotContain ("winget", exception.Message, StringComparison.Ordinal);
         }
     }
 
@@ -883,6 +888,16 @@ public sealed class ProcessRunnerTests : IDisposable
         {
             return false;
         }
+        catch (Win32Exception)
+        {
+            // HasExited can observe a live process that exits before StartTime is read; the
+            // kernel then refuses the start-time query. Either way it is no longer running.
+            return false;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
     }
 
     private static void KillIfAlive (TrackedProcess identity)
@@ -902,6 +917,10 @@ public sealed class ProcessRunnerTests : IDisposable
         }
         catch (InvalidOperationException)
         {
+        }
+        catch (Win32Exception)
+        {
+            // Best-effort cleanup: the process exited underneath the identity check or the kill.
         }
     }
 

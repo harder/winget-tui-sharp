@@ -213,10 +213,28 @@ finally
             exitCode = 1;
         }
 
-        window.Dispose ();
+        // A failed window disposal must not skip the application's own Terminal.Gui teardown,
+        // which is what restores the terminal (raw mode, alternate screen, cursor).
+        try
+        {
+            window.Dispose ();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine ($"Window disposal failed: {ex.Message}");
+            exitCode = 1;
+        }
     }
 
-    app?.Dispose ();
+    try
+    {
+        app?.Dispose ();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine ($"Application disposal failed: {ex.Message}");
+        exitCode = 1;
+    }
 }
 
 Environment.ExitCode = exitCode;

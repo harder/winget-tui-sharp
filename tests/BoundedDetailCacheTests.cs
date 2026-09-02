@@ -1,3 +1,5 @@
+using System.Collections;
+
 namespace WingetTuiSharp.Tests;
 
 public sealed class BoundedDetailCacheTests
@@ -58,6 +60,55 @@ public sealed class BoundedDetailCacheTests
         Assert.False (cache.Set ("a", detail));
         Assert.Equal (0, cache.Count);
         Assert.Equal (0, cache.RetainedCharacters);
+    }
+
+    [Fact]
+    public void Set_NeverReadsPastTheCountACollectionReports ()
+    {
+        BoundedDetailCache cache = new (maxEntries: 10, maxRetainedCharacters: 1_000_000);
+        LyingList flood = new (
+            reportedCount: 2,
+            actual: [.. Enumerable.Repeat ("tag", BoundedDetailCache.MaxCollectionValuesPerEntry * 4)]);
+
+        // Count is the only thing the budget can be checked against, so it is also the only thing
+        // that gets read. The oversized tail is never enumerated and never allocated — which is
+        // what keeps an endless (or merely huge) backend sequence from escaping the entry ceiling.
+        Assert.True (cache.Set ("a", new () { Id = "a", Name = "a", Tags = flood }));
+        Assert.Equal (2, cache.RetainedCollectionValues);
+        Assert.Equal (2, flood.IndexerReads);
+        Assert.Equal (0, flood.EnumerationCount);
+
+        Assert.True (cache.TryGet ("a", out PackageDetail retained));
+        Assert.Equal (2, retained.Tags!.Count);
+    }
+
+    [Fact]
+    public void Set_RejectsCollectionThatGrowsDuringTheCopy ()
+    {
+        BoundedDetailCache cache = new (maxEntries: 10, maxRetainedCharacters: 1_000_000);
+
+        // Count moves between the budget check and the end of the copy, so the retained size can
+        // no longer be reconciled with what was charged against the allowance.
+        GrowingList shifting = new (["a", "b", "c"]);
+
+        Assert.False (cache.Set ("a", new () { Id = "a", Name = "a", ProductCodes = shifting }));
+        Assert.Equal (0, cache.Count);
+        Assert.Equal (0, cache.RetainedCollectionValues);
+    }
+
+    [Fact]
+    public void Set_SharesOneItemAllowanceAcrossEveryCollection ()
+    {
+        BoundedDetailCache cache = new (maxEntries: 10, maxRetainedCharacters: 1_000_000);
+        int half = BoundedDetailCache.MaxCollectionValuesPerEntry / 2;
+        string [] chunk = [.. Enumerable.Repeat (string.Empty, half + 1)];
+
+        // Neither list exceeds the per-entry ceiling alone, but together they do.
+        Assert.False (cache.Set ("a", new () { Id = "a", Name = "a", Tags = chunk, ProductCodes = chunk }));
+        Assert.Equal (0, cache.Count);
+
+        Assert.True (cache.Set ("b", new () { Id = "b", Name = "b", Tags = chunk }));
+        Assert.Equal (half + 1, cache.RetainedCollectionValues);
     }
 
     [Fact]
@@ -415,5 +466,47 @@ public sealed class BoundedDetailCacheTests
         Assert.Equal (expected.InstalledScope, actual.InstalledScope);
         Assert.Equal (expected.MatchField, actual.MatchField);
         Assert.Equal (expected.IsDescriptionDegraded, actual.IsDescriptionDegraded);
+    }
+
+    /// <summary>
+    /// A backend list whose <see cref="Count"/> disagrees with what it will actually yield —
+    /// the shape the cache has to reject rather than allocate first and measure afterwards.
+    /// </summary>
+    private sealed class LyingList (int reportedCount, IReadOnlyList<string> actual) : IReadOnlyList<string>
+    {
+        internal int IndexerReads { get; private set; }
+        internal int EnumerationCount { get; private set; }
+
+        public int Count => reportedCount;
+
+        public string this [int index]
+        {
+            get
+            {
+                IndexerReads++;
+
+                return actual [index];
+            }
+        }
+
+        public IEnumerator<string> GetEnumerator ()
+        {
+            EnumerationCount++;
+
+            return actual.GetEnumerator ();
+        }
+
+        IEnumerator IEnumerable.GetEnumerator () => GetEnumerator ();
+    }
+
+    /// <summary>A list that reports one more item every time its <see cref="Count"/> is read.</summary>
+    private sealed class GrowingList (IReadOnlyList<string> actual) : IReadOnlyList<string>
+    {
+        private int _reads;
+
+        public int Count => Math.Min (actual.Count, ++_reads);
+        public string this [int index] => actual [index];
+        public IEnumerator<string> GetEnumerator () => actual.GetEnumerator ();
+        IEnumerator IEnumerable.GetEnumerator () => GetEnumerator ();
     }
 }

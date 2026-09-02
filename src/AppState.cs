@@ -77,6 +77,18 @@ public sealed class AppState
         }
 
         detail.MergeContext (context);
+
+        // MergeContext deliberately never downgrades a pin, because a list row that predates a
+        // pin must not erase it. A fresh snapshot is the opposite case: it is authoritative, so
+        // an external unpin (or a changed kind/gating version) has to overwrite the cached value
+        // rather than being re-cached as pinned for the rest of the entry's lifetime.
+        if (_pinSnapshot.IsFresh)
+        {
+            detail.PinState = _pinSnapshot.TryGet (context.Id, out PinState snapshotPin)
+                                  ? snapshotPin
+                                  : PinState.Unpinned;
+        }
+
         detail.EnsureDetailHint ();
         _detailCache.Set (context.Id, detail);
 
@@ -625,7 +637,10 @@ internal sealed class BoundedPinSnapshot
         {
             foreach ((string id, PinState sourceState) in pins)
             {
-                if (inspected++ >= MaxEntries
+                // Over-enumeration is rejected at the first extra entry rather than at MaxEntries:
+                // a source that yields more than it reported cannot be reconciled with its Count.
+                if (inspected++ >= reportedCount
+                    || inspected > MaxEntries
                     || string.IsNullOrEmpty (id)
                     || id.Length > MaxKeyCharacters)
                 {
@@ -653,6 +668,15 @@ internal sealed class BoundedPinSnapshot
             }
         }
         catch
+        {
+            IsFresh = false;
+
+            return false;
+        }
+
+        // Under-enumeration is just as untrustworthy as over-enumeration: accepting a short
+        // enumeration as complete would silently report every unlisted package as unpinned.
+        if (inspected != reportedCount)
         {
             IsFresh = false;
 
