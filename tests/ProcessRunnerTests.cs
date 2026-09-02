@@ -545,6 +545,20 @@ public sealed class ProcessRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task BoundedDrain_TruncationNeverRetainsHalfOfSurrogatePair ()
+    {
+        byte [] encoded = Encoding.UTF8.GetBytes ("A😀B");
+        await using MemoryStream stream = new (encoded);
+        using StreamReader reader = new (stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: false);
+
+        (string text, bool truncated) = await ProcessRunner.DrainBoundedForTestAsync (reader, maximumCharacters: 2);
+
+        Assert.True (truncated);
+        Assert.Equal ($"A{ProcessRunner.TruncationMarker}", text);
+        Assert.DoesNotContain (text, char.IsSurrogate);
+    }
+
+    [Fact]
     public async Task RunDetailedWithCodeAsync_NormalOutputIsComplete ()
     {
         FakeCommand command = CreateScript (

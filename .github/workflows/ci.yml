@@ -48,7 +48,7 @@ jobs:
         run: dotnet build tests/WingetTuiSharp.Tests.csproj --no-restore --no-dependencies --configuration Release
 
       - name: Test
-        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 244
+        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 245
 
       - name: Graceful mock smoke
         run: |
@@ -120,7 +120,7 @@ jobs:
           /p:InformationalVersion=${{ steps.version.outputs.ci_version }}
 
       - name: Test
-        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 244
+        run: dotnet test --project tests/WingetTuiSharp.Tests.csproj --no-build --configuration Release --verbosity normal --minimum-expected-tests 245
 
       # The app self-stops through its normal shutdown path. The outer deadline is only a
       # deadlock guard; force-kill is failure cleanup, never the successful path.

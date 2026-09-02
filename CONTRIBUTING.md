@@ -7,7 +7,7 @@ winget-tui-sharp is a daily-usable winget TUI and an ongoing benchmark of Termin
 ```bash
 git clone https://github.com/harder/winget-tui-sharp
 cd winget-tui-sharp
-dotnet test --project tests/WingetTuiSharp.Tests.csproj   # 244+ tests
+dotnet test --project tests/WingetTuiSharp.Tests.csproj   # 245+ tests
 dotnet run -- --mock                       # UI iteration, any host
 ```
 

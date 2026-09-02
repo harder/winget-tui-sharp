@@ -425,6 +425,13 @@ internal static class ProcessRunner
 
             if (truncated)
             {
+                // The character limit may land between the UTF-16 code units of a supplementary
+                // scalar. Never expose a dangling high surrogate in retained process output.
+                if (retained.Length > 0 && char.IsHighSurrogate (retained [^1]))
+                {
+                    retained.Length--;
+                }
+
                 retained.Append (TruncationMarker);
             }
 
@@ -434,6 +441,15 @@ internal static class ProcessRunner
         {
             ArrayPool<char>.Shared.Return (buffer);
         }
+    }
+
+    internal static async Task<(string Text, bool Truncated)> DrainBoundedForTestAsync (
+        StreamReader reader,
+        int maximumCharacters)
+    {
+        CapturedStream captured = await DrainBoundedAsync (reader, maximumCharacters).ConfigureAwait (false);
+
+        return (captured.Text, captured.Truncated);
     }
 
     internal static Task<bool> FinishDrainForTestAsync (
