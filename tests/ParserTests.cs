@@ -33,11 +33,15 @@ public class ParserTests
             output.AppendLine ($"{$"Package{i}",-16}{$"Example.Package{i}",-24}{"1.0",-10}winget");
         }
 
+        // Even after the unique-row ceiling is full, parsing must keep scanning for duplicate
+        // replacements of an identity that was retained earlier.
+        output.AppendLine ($"{"Duplicate",-16}{"Example.Duplicate",-24}{"3.0",-10}winget");
+
         IReadOnlyList<Package> rows = CliBackend.ParseSearchTable (output.ToString ());
 
         Assert.Equal (AppState.SearchResultLimit, rows.Count);
         Assert.Equal ("Example.Duplicate", rows [0].Id);
-        Assert.Equal ("2.0", rows [0].Version);
+        Assert.Equal ("3.0", rows [0].Version);
         Assert.Equal ("Example.Package0", rows [1].Id);
         Assert.Equal ($"Example.Package{AppState.SearchResultLimit - 2}", rows [^1].Id);
     }

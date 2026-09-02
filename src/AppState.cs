@@ -663,8 +663,20 @@ internal sealed class BoundedPinSnapshot
                     return false;
                 }
 
+                PinState retainedState = sourceState with { GatingVersion = gatingVersion };
+
+                // The retained snapshot and all consumers compare package IDs case-insensitively.
+                // A source dictionary may not, so two differently-cased keys could otherwise
+                // overwrite each other here and make the authoritative result depend on
+                // enumeration order.
+                if (!candidate.TryAdd (id, retainedState))
+                {
+                    IsFresh = false;
+
+                    return false;
+                }
+
                 aggregateCharacters += entryCharacters;
-                candidate [id] = sourceState with { GatingVersion = gatingVersion };
             }
         }
         catch

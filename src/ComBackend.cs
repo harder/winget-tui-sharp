@@ -61,6 +61,7 @@ public sealed class ComBackend : IBackend
         CancellationToken ct,
         Func<PackageManager, CancellationToken, Task<T>> operation)
     {
+        ct.ThrowIfCancellationRequested ();
         PackageManager pm = new ();
 
         try

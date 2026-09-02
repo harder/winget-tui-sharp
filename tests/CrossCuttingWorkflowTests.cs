@@ -443,6 +443,26 @@ public sealed class CrossCuttingWorkflowTests
     }
 
     [Fact]
+    public void PinSnapshot_RejectsCaseInsensitiveDuplicateIdsAndPreservesLastKnownState ()
+    {
+        BoundedPinSnapshot snapshot = new ();
+        Assert.True (snapshot.TryRecord (new Dictionary<string, PinState>
+        {
+            ["Vendor.Known"] = new (PinStateKind.Blocking)
+        }));
+        Dictionary<string, PinState> conflicting = new (StringComparer.Ordinal)
+        {
+            ["Vendor.Package"] = new (PinStateKind.Blocking),
+            ["vendor.package"] = new (PinStateKind.Gating, "2.*")
+        };
+
+        Assert.False (snapshot.TryRecord (conflicting));
+        Assert.False (snapshot.IsFresh);
+        Assert.True (snapshot.HasSnapshot);
+        Assert.Equal (1, snapshot.Count);
+    }
+
+    [Fact]
     public void CachedDetail_AdoptsFreshSnapshotPinIncludingAnExternalUnpin ()
     {
         AppState state = new (new MockBackend ());

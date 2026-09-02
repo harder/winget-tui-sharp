@@ -470,7 +470,8 @@ public sealed class BoundedDetailCacheTests
 
     /// <summary>
     /// A backend list whose <see cref="Count"/> disagrees with what it will actually yield —
-    /// the shape the cache has to reject rather than allocate first and measure afterwards.
+    /// the oversized enumerator tail is intentionally ignored because the cache copies exactly
+    /// the indexed entries promised by <see cref="Count"/>.
     /// </summary>
     private sealed class LyingList (int reportedCount, IReadOnlyList<string> actual) : IReadOnlyList<string>
     {

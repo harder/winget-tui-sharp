@@ -219,7 +219,7 @@ The xUnit suite under `tests/` covers:
   messages (up-to-date / no pinned / no unpinned / no filter match).
 
 Every test is anchored to a real bug found during development or a Terminal.Gui surface
-we depend on; **234+ tests** run across the cross-platform and Windows CI jobs.
+we depend on; **244+ tests** run across the cross-platform and Windows CI jobs.
 
 ### Diagnose winget parser issues at runtime
 

@@ -665,43 +665,52 @@ public sealed partial class CliBackend : IBackend
         // than special-casing only a single secondary table. Mirrors upstream
         // shanselman/winget-tui#393 ("fix: restore MSRV and multi-table parsing"), which
         // generalized the old two-table-only handling the same way.
-        List<Package> rows = [];
+        BoundedPackageDeduper rows = new (maxRows);
         int nextTableStart = 0;
         int tableIndex = 0;
 
         while (nextTableStart >= 0 && nextTableStart < lines.Length)
         {
-            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, out int afterFooter);
+            int parsedRows = ParseOneTable (
+                lines,
+                nextTableStart,
+                hasAvailable,
+                trace,
+                rows.Consider,
+                out int afterFooter);
 
-            if (tableRows.Count > 0)
+            if (parsedRows > 0)
             {
-                trace.WriteLine ($"[parse] table #{tableIndex} contributed {tableRows.Count} rows");
-                rows.AddRange (tableRows);
+                trace.WriteLine ($"[parse] table #{tableIndex} parsed {parsedRows} rows");
             }
 
             nextTableStart = afterFooter;
             tableIndex++;
         }
 
-        rows = DedupePackages (rows);
-
-        if (rows.Count > maxRows)
+        if (rows.ReachedLimit)
         {
-            rows.RemoveRange (maxRows, rows.Count - maxRows);
-            trace.WriteLine ($"[parse] applied configured row limit ({maxRows}) after dedupe");
+            trace.WriteLine ($"[parse] retained configured unique-row limit ({maxRows}) while continuing to scan duplicates");
         }
 
         trace.WriteLine ($"[parse] returned {rows.Count} rows (after dedupe and limit)");
 
-        return rows;
+        return rows.Rows;
     }
 
     /// <summary>
-    /// Parses one table starting at or after the given line index. Returns the rows it
-    /// extracted and, via <paramref name="nextLineAfterFooter"/>, the line index immediately
-    /// after the footer (or <c>-1</c> if no footer was encountered).
+    /// Parses one table starting at or after the given line index, passes each valid row to
+    /// <paramref name="acceptRow"/>, and returns the number parsed. Via
+    /// <paramref name="nextLineAfterFooter"/>, also returns the line index immediately after the
+    /// footer (or <c>-1</c> if no footer was encountered).
     /// </summary>
-    private static List<Package> ParseOneTable (string [] lines, int startIdx, bool hasAvailable, TextWriter trace, out int nextLineAfterFooter)
+    private static int ParseOneTable (
+        string [] lines,
+        int startIdx,
+        bool hasAvailable,
+        TextWriter trace,
+        Action<Package> acceptRow,
+        out int nextLineAfterFooter)
     {
         nextLineAfterFooter = -1;
         int sepIdx = -1;
@@ -726,7 +735,7 @@ public sealed partial class CliBackend : IBackend
                 trace.WriteLine ("[parse] FAIL: no dash separator found");
             }
 
-            return [];
+            return 0;
         }
 
         string headerLine = StripControl (lines [sepIdx - 1]);
@@ -744,10 +753,10 @@ public sealed partial class CliBackend : IBackend
 
         if (columns.Count == 0)
         {
-            return [];
+            return 0;
         }
 
-        List<Package> rows = [];
+        int parsedRows = 0;
         int sampled = 0;
 
         for (int i = sepIdx + 1; i < lines.Length; i++)
@@ -799,7 +808,7 @@ public sealed partial class CliBackend : IBackend
                 continue;
             }
 
-            rows.Add (new ()
+            acceptRow (new ()
             {
                 Id = id,
                 Name = name.Trim (),
@@ -807,9 +816,10 @@ public sealed partial class CliBackend : IBackend
                 AvailableVersion = hasAvailable && !string.IsNullOrWhiteSpace (available) ? available.Trim () : null,
                 Source = source.Trim ()
             });
+            parsedRows++;
         }
 
-        return rows;
+        return parsedRows;
     }
 
     /// <summary>
@@ -896,53 +906,98 @@ public sealed partial class CliBackend : IBackend
     /// </summary>
     internal static List<Package> DedupePackages (List<Package> rows)
     {
-        Dictionary<(string, string), int> index = new ();
-        List<Package> deduped = [];
+        BoundedPackageDeduper deduped = new (int.MaxValue);
 
         foreach (Package pkg in rows)
         {
-            (string, string) key = (pkg.Id, pkg.Source.ToLowerInvariant ());
-
-            if (index.TryGetValue (key, out int existing))
-            {
-                if (Prefer (pkg, deduped [existing]))
-                {
-                    deduped [existing] = pkg;
-                }
-            }
-            else
-            {
-                index [key] = deduped.Count;
-                deduped.Add (pkg);
-            }
+            deduped.Consider (pkg);
         }
 
-        return deduped;
+        return deduped.Rows;
+    }
 
-        static bool Prefer (Package candidate, Package existing)
+    private static bool PreferDuplicate (Package candidate, Package existing)
+    {
+        // Compare versions first: a newer version wins outright. Only when versions
+        // are equal (or unparseable) does metadata richness tiebreak. Mirrors upstream
+        // src/cli_backend.rs::prefer_package + compare_versions_like.
+        int versionCmp = CompareVersionsLike (candidate.Version, existing.Version);
+
+        if (versionCmp > 0)
         {
-            // Compare versions first: a newer version wins outright. Only when versions
-            // are equal (or unparseable) does metadata richness tiebreak. Mirrors upstream
-            // src/cli_backend.rs::prefer_package + compare_versions_like.
-            int versionCmp = CompareVersionsLike (candidate.Version, existing.Version);
-
-            if (versionCmp > 0)
-            {
-                return true;
-            }
-
-            if (versionCmp < 0)
-            {
-                return false;
-            }
-
-            int candidateScore = (string.IsNullOrEmpty (candidate.AvailableVersion) ? 0 : 1)
-                                 + (string.IsNullOrEmpty (candidate.Source) ? 0 : 1);
-            int existingScore = (string.IsNullOrEmpty (existing.AvailableVersion) ? 0 : 1)
-                                + (string.IsNullOrEmpty (existing.Source) ? 0 : 1);
-
-            return candidateScore > existingScore;
+            return true;
         }
+
+        if (versionCmp < 0)
+        {
+            return false;
+        }
+
+        int candidateScore = (string.IsNullOrEmpty (candidate.AvailableVersion) ? 0 : 1)
+                             + (string.IsNullOrEmpty (candidate.Source) ? 0 : 1);
+        int existingScore = (string.IsNullOrEmpty (existing.AvailableVersion) ? 0 : 1)
+                            + (string.IsNullOrEmpty (existing.Source) ? 0 : 1);
+
+        return candidateScore > existingScore;
+    }
+
+    /// <summary>
+    /// Retains at most the configured number of unique package identities while still examining
+    /// every later row for a preferred replacement of an identity already retained.
+    /// </summary>
+    private sealed class BoundedPackageDeduper
+    {
+        private readonly Dictionary<(string Id, string Source), int> _index = new (PackageIdentityComparer.Instance);
+        private readonly int _maxRows;
+
+        internal BoundedPackageDeduper (int maxRows)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative (maxRows);
+            _maxRows = maxRows;
+        }
+
+        internal List<Package> Rows { get; } = [];
+        internal int Count => Rows.Count;
+        internal bool ReachedLimit { get; private set; }
+
+        internal void Consider (Package package)
+        {
+            (string Id, string Source) key = (package.Id, package.Source);
+
+            if (_index.TryGetValue (key, out int existing))
+            {
+                if (PreferDuplicate (package, Rows [existing]))
+                {
+                    Rows [existing] = package;
+                }
+
+                return;
+            }
+
+            if (Rows.Count >= _maxRows)
+            {
+                ReachedLimit = true;
+
+                return;
+            }
+
+            _index.Add (key, Rows.Count);
+            Rows.Add (package);
+        }
+    }
+
+    private sealed class PackageIdentityComparer : IEqualityComparer<(string Id, string Source)>
+    {
+        internal static PackageIdentityComparer Instance { get; } = new ();
+
+        public bool Equals ((string Id, string Source) left, (string Id, string Source) right) =>
+            string.Equals (left.Id, right.Id, StringComparison.Ordinal)
+            && string.Equals (left.Source, right.Source, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode ((string Id, string Source) value) =>
+            HashCode.Combine (
+                StringComparer.Ordinal.GetHashCode (value.Id),
+                StringComparer.OrdinalIgnoreCase.GetHashCode (value.Source));
     }
 
     /// <summary>

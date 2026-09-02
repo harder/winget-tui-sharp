@@ -144,6 +144,33 @@ public sealed class ExportWorkflowTests
         operation.Dispose ();
     }
 
+    [Fact]
+    public void CancellationCallbackFailureCannotInterruptCancelOrDispose ()
+    {
+        ExportWorkflowState workflow = new ();
+        DisposableProbe loading = new ();
+        Assert.True (workflow.TryBegin (
+            CancellationToken.None,
+            "exporting",
+            () => loading,
+            out ExportOperation operation));
+        using CancellationTokenRegistration registration = operation.Token.Register (
+            () => throw new InvalidOperationException ("callback failed"));
+
+        workflow.CancelActive ();
+
+        Assert.True (operation.Token.IsCancellationRequested);
+        Assert.True (workflow.IsActive);
+        Assert.Equal (0, loading.DisposeCount);
+
+        workflow.Dispose ();
+
+        Assert.False (workflow.IsActive);
+        Assert.Equal (1, loading.DisposeCount);
+        workflow.Dispose ();
+        Assert.Equal (1, loading.DisposeCount);
+    }
+
     private sealed class DisposableProbe : IDisposable
     {
         internal int DisposeCount { get; private set; }

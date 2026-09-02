@@ -368,6 +368,12 @@ internal sealed class ExportOperation : IDisposable
         {
             // Completion won the race and has already released the request.
         }
+        catch
+        {
+            // Cancellation callbacks are external code and CancellationTokenSource.Cancel
+            // aggregates their failures. A faulty callback must not interrupt shutdown or keep
+            // the export's loading lease and cancellation source from being disposed.
+        }
     }
 
     public void Dispose ()
