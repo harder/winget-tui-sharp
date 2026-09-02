@@ -129,7 +129,7 @@ public sealed class CsvExporterTests
     }
 
     [Fact]
-    public async Task CreateSnapshot_AggregateBoundaryDoesNotSplitSurrogatePair ()
+    public async Task CreateSnapshot_AggregateBoundaryOmitsWholeRow ()
     {
         const int remainingForTarget = 100;
         List<Package> packages = CreateFillerPackages (CsvExporter.MaxSnapshotCharacters - remainingForTarget);
@@ -142,13 +142,11 @@ public sealed class CsvExporterTests
         });
 
         CsvSnapshot snapshot = CsvExporter.CreateSnapshot (packages);
-        CsvRow target = snapshot.Rows [^1];
-
-        Assert.Equal (remainingForTarget - 1, target.Name.Length);
-        Assert.Equal (CsvExporter.MaxSnapshotCharacters - 1, snapshot.RetainedCharacters);
-        AssertValidUtf16 (target.Name);
-        Assert.DoesNotContain ('\uFFFD', target.Name);
-        Assert.True (snapshot.TruncatedCellCount > 0);
+        Assert.Equal (packages.Count - 1, snapshot.Rows.Count);
+        Assert.Equal (1, snapshot.OmittedRowCount);
+        Assert.Equal (CsvExporter.MaxSnapshotCharacters - remainingForTarget, snapshot.RetainedCharacters);
+        Assert.DoesNotContain (snapshot.Rows, row => row.Name.StartsWith ('z'));
+        Assert.True (snapshot.WasTruncated);
 
         using TempDirectory temp = new ();
         string path = Path.Combine (temp.Path, "aggregate-safe.csv");
@@ -156,7 +154,7 @@ public sealed class CsvExporterTests
         string csv = await File.ReadAllTextAsync (path, TestContext.Current.CancellationToken);
         AssertValidUtf16 (csv);
         Assert.DoesNotContain ('\uFFFD', csv);
-        Assert.EndsWith ($"\"{target.Name}\",\"\",\"\",\"\",\"\"{Environment.NewLine}", csv);
+        Assert.DoesNotContain ("zzz", csv);
     }
 
     private static Package Package (string id, string name, string version = "1.0") =>

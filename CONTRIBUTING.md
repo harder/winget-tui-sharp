@@ -7,7 +7,7 @@ winget-tui-sharp is a daily-usable winget TUI and an ongoing benchmark of Termin
 ```bash
 git clone https://github.com/harder/winget-tui-sharp
 cd winget-tui-sharp
-dotnet test --project tests/WingetTuiSharp.Tests.csproj   # 73 tests, <1s
+dotnet test --project tests/WingetTuiSharp.Tests.csproj   # 234+ tests
 dotnet run -- --mock                       # UI iteration, any host
 ```
 
@@ -19,6 +19,10 @@ Building the actual AOT binary requires a **Windows host** with Visual Studio Bu
 2. **Compare against upstream** when changing winget parsing logic. The Rust source at <https://github.com/shanselman/winget-tui/tree/main/src> is the behavioral spec. Note divergences in [feature-gaps.md](feature-gaps.md).
 3. **Run the suite** before opening a PR: `dotnet test --project tests/WingetTuiSharp.Tests.csproj`.
 4. **Check in before large new-feature PRs.** New features beyond upstream parity are welcome, but open an issue or discuss the approach first for anything sizable so the design lands before the code does. Packaging, distribution, and signing are being actively pursued (see [code-signing.md](code-signing.md)) — coordinate there rather than opening a competing effort.
+
+The repository selects Microsoft.Testing.Platform in `global.json`. Pass the project with
+`--project` as shown above; the older positional `dotnet test tests/...csproj` form is not
+accepted by this runner. IDE test discovery likewise requires Microsoft.Testing.Platform support.
 
 ## Filing issues
 

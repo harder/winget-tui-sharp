@@ -110,6 +110,20 @@ public sealed class BackgroundTaskTrackerTests
     }
 
     [Fact]
+    public async Task DisposedTrackerRetainsSafeCancelledLifetimeToken ()
+    {
+        BackgroundTaskTracker tracker = new ();
+        CancellationToken token = tracker.LifetimeToken;
+
+        tracker.Dispose ();
+
+        Assert.True (tracker.LifetimeToken.IsCancellationRequested);
+        Assert.True (token.IsCancellationRequested);
+        Assert.False (tracker.TryRun (_ => Task.CompletedTask));
+        Assert.True (await tracker.DrainAsync (TimeSpan.Zero));
+    }
+
+    [Fact]
     public void SynchronousDrainDoesNotDependOnStoppedSynchronizationContext ()
     {
         bool drained = false;

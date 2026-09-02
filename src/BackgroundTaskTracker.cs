@@ -115,7 +115,16 @@ public sealed class BackgroundTaskTracker : IDisposable
             return true;
         }
 
-        return await Task.WhenAny (all, Task.Delay (timeout)).ConfigureAwait (false) == all;
+        try
+        {
+            await all.WaitAsync (timeout).ConfigureAwait (false);
+
+            return true;
+        }
+        catch (TimeoutException)
+        {
+            return false;
+        }
     }
 
     /// <summary>
@@ -146,7 +155,10 @@ public sealed class BackgroundTaskTracker : IDisposable
         {
             RecordFailure (ex);
         }
-        _lifetime.Dispose ();
+        // Keep the source usable as a permanently-cancelled application lifetime. Disposing it
+        // would make LifetimeToken throw and turn a distant shutdown-order invariant into an
+        // ObjectDisposedException. No wait handle is created, and admitted registrations have
+        // already drained before the application calls Dispose.
     }
 
     private async Task ExecuteAsync (

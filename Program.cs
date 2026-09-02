@@ -1,10 +1,5 @@
 using WingetTuiSharp;
 
-if (ProcessRunner.TryExecPosixContainedTarget (args))
-{
-    return;
-}
-
 if (args.Length > 0 && args [0] is "--dump")
 {
     // Diagnostic mode: invoke winget the way the backend would and print the raw output

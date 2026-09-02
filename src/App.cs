@@ -284,8 +284,8 @@ public sealed class App : Runnable
         _statusOwnership.Clear ();
         CancelSource (_viewCts);
         CancelSource (_detailCts);
-        CancelSource (_preflightCts);
-        CancelSource (_opCts);
+        CancelSource (Volatile.Read (ref _preflightCts));
+        CancelSource (Volatile.Read (ref _opCts));
         _exportWorkflow.CancelActive ();
 
         if (_smokeTimer is not null && App is { } app)
@@ -303,6 +303,15 @@ public sealed class App : Runnable
 
     private CancellationTokenSource CreateLifetimeLinkedSource () =>
         CancellationTokenSource.CreateLinkedTokenSource (_background.LifetimeToken);
+
+    private bool TryOwnOperationRequest (CancellationTokenSource request) =>
+        Interlocked.CompareExchange (ref _opCts, request, null) is null;
+
+    private bool ReleaseOperationRequest (CancellationTokenSource request) =>
+        ReferenceEquals (Interlocked.CompareExchange (ref _opCts, null, request), request);
+
+    private bool OperationRequestIsCurrent (CancellationTokenSource request) =>
+        ReferenceEquals (Volatile.Read (ref _opCts), request);
 
     private CancellationTokenSource ReplaceLifetimeLinkedSource (ref CancellationTokenSource source)
     {
@@ -340,10 +349,8 @@ public sealed class App : Runnable
     {
         _viewCts.Dispose ();
         _detailCts.Dispose ();
-        _preflightCts?.Dispose ();
-        _preflightCts = null;
-        _opCts?.Dispose ();
-        _opCts = null;
+        Interlocked.Exchange (ref _preflightCts, null)?.Dispose ();
+        Interlocked.Exchange (ref _opCts, null)?.Dispose ();
         _exportWorkflow.Dispose ();
     }
 
@@ -1303,7 +1310,7 @@ public sealed class App : Runnable
 
                 // While an operation is in flight, Esc cancels it (COM aborts cooperatively)
                 // rather than quitting. With nothing running, Esc quits as before.
-                if (_opCts is { } opCts)
+                if (Volatile.Read (ref _opCts) is { } opCts)
                 {
                     opCts.Cancel ();
                     SetStatus ("Cancelling…", owner: StatusOwner.Operation);
@@ -1981,10 +1988,19 @@ public sealed class App : Runnable
         }
 
         RefreshStatusBar ();
-        CancellationTokenSource request = CancellationTokenSource.CreateLinkedTokenSource (
-            _background.LifetimeToken,
-            _detailCts.Token);
-        _preflightCts = request;
+        CancellationTokenSource request = CreatePreflightSource (_background.LifetimeToken);
+
+        if (Interlocked.CompareExchange (ref _preflightCts, request, null) is not null)
+        {
+            ReleaseLoading ();
+            _foreground.Release (admission);
+            request.Dispose ();
+            SetStatus ("A package preflight is already active", isError: true);
+            RefreshStatusBar ();
+
+            return;
+        }
+
         CancellationToken ct = request.Token;
         int viewGeneration = _state.ViewGeneration;
         int detailGeneration = _state.DetailGeneration;
@@ -2040,30 +2056,31 @@ public sealed class App : Runnable
                                                                               SetStatus ($"Error: {ex.Message}", isError: true);
                                                                               RefreshStatusBar ();
                                                                           }, ct,
-                                                                          () => PreflightIdentityMatches (_preflightCts, request)
+                                                                          () => PreflightIdentityMatches (Volatile.Read (ref _preflightCts), request)
                                                                                 && viewGeneration == _state.ViewGeneration
                                                                                 && detailGeneration == _state.DetailGeneration);
                                                  }
                                                  finally
                                                  {
-                                                     await DispatchAsync (() =>
-                                                                          {
-                                                                              ReleasePreflight ();
-
-                                                                              if (PreflightOwnsActivity (_state.StatusMessage, activity))
+                                                     await CleanupPreflightAsync (
+                                                         () => DispatchAsync (() =>
                                                                               {
-                                                                                  SetStatus (string.Empty);
-                                                                              }
+                                                                                  ReleasePreflight ();
 
-                                                                              RefreshStatusBar ();
-                                                                          }, lifetimeToken,
-                                                                          () => PreflightIdentityMatches (_preflightCts, request));
+                                                                                  if (PreflightOwnsActivity (_state.StatusMessage, activity))
+                                                                                  {
+                                                                                      SetStatus (string.Empty);
+                                                                                  }
 
-                                                     ReleaseLoading ();
-                                                     ReleasePreflight ();
-
-                                                     CancelSource (request);
-                                                     request.Dispose ();
+                                                                                  RefreshStatusBar ();
+                                                                              }, lifetimeToken,
+                                                                              () => PreflightIdentityMatches (Volatile.Read (ref _preflightCts), request)),
+                                                         ReleasePreflight,
+                                                         () =>
+                                                         {
+                                                             CancelSource (request);
+                                                             request.Dispose ();
+                                                         });
                                                  }
                                              });
 
@@ -2090,6 +2107,31 @@ public sealed class App : Runnable
         catch (Exception ex)
         {
             reportError (ex);
+        }
+    }
+
+    internal static CancellationTokenSource CreatePreflightSource (CancellationToken lifetimeToken) =>
+        CancellationTokenSource.CreateLinkedTokenSource (lifetimeToken);
+
+    internal static async Task CleanupPreflightAsync (
+        Func<Task> dispatchCleanup,
+        Action release,
+        Action dispose)
+    {
+        try
+        {
+            await dispatchCleanup ().ConfigureAwait (false);
+        }
+        finally
+        {
+            try
+            {
+                release ();
+            }
+            finally
+            {
+                dispose ();
+            }
         }
     }
 
@@ -2308,7 +2350,16 @@ public sealed class App : Runnable
         }
 
         CancellationTokenSource request = CreateLifetimeLinkedSource ();
-        _opCts = request;
+
+        if (!TryOwnOperationRequest (request))
+        {
+            request.Dispose ();
+            _statusOwnership.AbortOperation (admission.Id);
+            _foreground.Release (admission);
+
+            return;
+        }
+
         CancellationToken ct = request.Token;
         string [] ids = [.. _state.BatchSelected];
         IDisposable loading = _state.AcquireLoading ();
@@ -2335,7 +2386,7 @@ public sealed class App : Runnable
                                                                                   $"Upgrading {id}… · Esc to cancel",
                                                                                   owner: StatusOwner.Operation);
                                                                               RefreshStatusBar ();
-                                                                          }, ct, () => ReferenceEquals (_opCts, request));
+                                                                          }, ct, () => OperationRequestIsCurrent (request));
 
                                                      OpResult result;
 
@@ -2373,7 +2424,7 @@ public sealed class App : Runnable
                                                                                   !result.Success,
                                                                                   StatusOwner.Operation);
                                                                               RefreshStatusBar ();
-                                                                          }, ct, () => ReferenceEquals (_opCts, request));
+                                                                          }, ct, () => OperationRequestIsCurrent (request));
                                                  }
 
                                                      await DispatchAsync (() =>
@@ -2384,19 +2435,16 @@ public sealed class App : Runnable
                                                                           bool outcomeIsError = !cancelled && _state.StatusIsError;
                                                                           CompleteOperationStatus (admission, outcome, outcomeIsError);
                                                                           _foreground.Release (admission);
-                                                                          _opCts = null;
+                                                                          ReleaseOperationRequest (request);
 
                                                                           TriggerRefresh (_state.StatusMessage);
-                                                                          }, lifetimeToken, () => ReferenceEquals (_opCts, request));
+                                                                          }, lifetimeToken, () => OperationRequestIsCurrent (request));
                                                  }
                                                  finally
                                                  {
                                                      loading.Dispose ();
 
-                                                     if (ReferenceEquals (_opCts, request))
-                                                     {
-                                                         _opCts = null;
-                                                     }
+                                                     ReleaseOperationRequest (request);
 
                                                      _statusOwnership.AbortOperation (admission.Id);
                                                      _foreground.Release (admission);
@@ -2409,7 +2457,7 @@ public sealed class App : Runnable
         if (!admitted)
         {
             loading.Dispose ();
-            _opCts = null;
+            ReleaseOperationRequest (request);
             CompleteOperationStatus (
                 admission,
                 "Too many background requests are still pending; wait and try again",
@@ -2439,7 +2487,16 @@ public sealed class App : Runnable
         }
 
         CancellationTokenSource request = CreateLifetimeLinkedSource ();
-        _opCts = request;
+
+        if (!TryOwnOperationRequest (request))
+        {
+            request.Dispose ();
+            _statusOwnership.AbortOperation (admission.Id);
+            _foreground.Release (admission);
+
+            return;
+        }
+
         CancellationToken ct = request.Token;
 
         SetStatus ($"{activity} · Esc to cancel", owner: StatusOwner.Operation);
@@ -2505,19 +2562,16 @@ public sealed class App : Runnable
 
                                                                           CompleteOperationStatus (admission, outcome, outcomeIsError);
                                                                           _foreground.Release (admission);
-                                                                          _opCts = null;
+                                                                          ReleaseOperationRequest (request);
 
                                                                           TriggerRefresh (_state.StatusMessage);
-                                                                          }, lifetimeToken, () => ReferenceEquals (_opCts, request));
+                                                                          }, lifetimeToken, () => OperationRequestIsCurrent (request));
                                                  }
                                                  finally
                                                  {
                                                      loading.Dispose ();
 
-                                                     if (ReferenceEquals (_opCts, request))
-                                                     {
-                                                         _opCts = null;
-                                                     }
+                                                     ReleaseOperationRequest (request);
 
                                                      _statusOwnership.AbortOperation (admission.Id);
                                                      _foreground.Release (admission);
@@ -2530,7 +2584,7 @@ public sealed class App : Runnable
         if (!admitted)
         {
             loading.Dispose ();
-            _opCts = null;
+            ReleaseOperationRequest (request);
             CompleteOperationStatus (
                 admission,
                 "Too many background requests are still pending; wait and try again",
@@ -2565,7 +2619,7 @@ public sealed class App : Runnable
         // list/detail refreshes, so a concurrent refresh could otherwise drop op samples or let
         // a late report through after the op settled. _opCts is non-null iff an op is in flight
         // and is cleared before the final refresh.
-        if (_opCts is null)
+        if (Volatile.Read (ref _opCts) is null)
         {
             return;
         }
@@ -2576,7 +2630,7 @@ public sealed class App : Runnable
 
     private void ReportProgress (OpProgress value, CancellationTokenSource request, CancellationToken requestToken)
     {
-        if (requestToken.IsCancellationRequested || !ReferenceEquals (Volatile.Read (ref _opCts), request))
+        if (requestToken.IsCancellationRequested || !OperationRequestIsCurrent (request))
         {
             return;
         }
@@ -2623,7 +2677,7 @@ public sealed class App : Runnable
             }
 
             await DispatchAsync (() => OnOpProgress (pending.Value), pending.RequestToken,
-                                 () => ReferenceEquals (_opCts, pending.Request));
+                                 () => OperationRequestIsCurrent (pending.Request));
         }
 
         lock (_progressGate)
@@ -2905,17 +2959,6 @@ public sealed class App : Runnable
         return true;
     }
 
-    private sealed record EmptyRow ();
-
-    /// <summary>
-    /// Wraps an <see cref="EnumerableTableSource{Package}"/> and prepends a column-0 cursor
-    /// marker (<c>●</c> on the cursor row, blank otherwise). A redundant visual cue alongside
-    /// the row-highlight colors — useful when terminal themes mute the highlight, and for
-    /// color-blind accessibility.
-    ///
-    /// Nested here because it has no consumer outside <see cref="App"/>; pulling
-    /// it out as a public top-level type would just clutter the public surface.
-    /// </summary>
     /// <summary>
     /// A <see cref="TableView"/> that reports clicks on a column header (raising
     /// <see cref="HeaderClicked"/> with the column index) so the app can sort by that column,

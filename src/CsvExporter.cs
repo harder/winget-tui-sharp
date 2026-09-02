@@ -19,9 +19,7 @@ internal static class CsvExporter
         int retainedCharacters = 0;
         int truncatedCells = 0;
 
-        for (int index = 0;
-             index < packages.Count && rows.Count < MaxRows && retainedCharacters < MaxSnapshotCharacters;
-             index++)
+        for (int index = 0; index < packages.Count && rows.Count < MaxRows; index++)
         {
             Package package = packages [index];
             string [] values =
@@ -32,21 +30,24 @@ internal static class CsvExporter
                 package.AvailableVersion ?? string.Empty,
                 package.Source
             ];
+            bool [] cellWasTruncated = new bool [values.Length];
+            int rowCharacters = 0;
 
             for (int cell = 0; cell < values.Length; cell++)
             {
-                string value = values [cell];
-                int allowed = Math.Min (MaxCellCharacters, MaxSnapshotCharacters - retainedCharacters);
-                values [cell] = TakeUtf16Prefix (value, allowed, out bool truncated);
-
-                if (truncated)
-                {
-                    truncatedCells++;
-                }
-
-                retainedCharacters += values [cell].Length;
+                values [cell] = TakeUtf16Prefix (values [cell], MaxCellCharacters, out cellWasTruncated [cell]);
+                rowCharacters += values [cell].Length;
             }
 
+            // Retain complete rows only. Emptying the tail of the last row to fit the aggregate
+            // budget can erase its identity and produce a misleading CSV record.
+            if (rowCharacters > MaxSnapshotCharacters - retainedCharacters)
+            {
+                break;
+            }
+
+            truncatedCells += cellWasTruncated.Count (truncated => truncated);
+            retainedCharacters += rowCharacters;
             rows.Add (new (values [0], values [1], values [2], values [3], values [4]));
         }
 
@@ -100,6 +101,10 @@ internal static class CsvExporter
                 }
 
                 await writer.FlushAsync (cancellationToken);
+                // Flush the temp file's contents before the atomic replacement. The rename is
+                // atomic for concurrent readers; parent-directory metadata is not fsync'd, so this
+                // does not claim full crash durability across sudden power loss.
+                stream.Flush (flushToDisk: true);
             }
 
             cancellationToken.ThrowIfCancellationRequested ();

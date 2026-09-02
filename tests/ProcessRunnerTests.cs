@@ -79,34 +79,33 @@ public sealed class ProcessRunnerTests : IDisposable
     }
 
     [Fact]
-    public async Task RunWithPosixPreSetSidDelay_CancellationKillsHelperBeforeTargetStarts ()
+    public async Task PosixSpawn_EstablishesDedicatedProcessGroupBeforeExec ()
     {
         if (OperatingSystem.IsWindows ())
         {
             return;
         }
 
-        string marker = Path.Combine (_tempDirectory, "pre-setsid-target-started");
-        string escapedMarker = marker.Replace ("'", "'\\''", StringComparison.Ordinal);
+        string pidFile = Path.Combine (_tempDirectory, "process-group.pid");
+        string escapedPidFile = pidFile.Replace ("'", "'\\''", StringComparison.Ordinal);
         FakeCommand command = CreateScript (
-            "pre-setsid-cancel",
-            unix: $"printf 'started' > '{escapedMarker}'; sleep 60",
+            "process-group",
+            unix: $"printf '%s' \"$$\" > '{escapedPidFile}'; exec sleep 60",
             windows: string.Empty);
         using CancellationTokenSource cancellation = new ();
-        Task<(int Code, string Output)> run = ProcessRunner.RunWithPosixPreSetSidDelayForTestAsync (
+        Task<(int Code, string Output)> run = ProcessRunner.RunAsync (
             command.Executable,
             command.Arguments,
             Encoding.UTF8,
             TimeSpan.FromSeconds (30),
-            preSetSidDelayMilliseconds: 2000,
             cancellation.Token);
+        int childPid = await ReadPidAsync (pidFile, TestContext.Current.CancellationToken);
+        Assert.True (TrackChild (childPid));
 
-        await Task.Delay (100, TestContext.Current.CancellationToken);
+        Assert.Equal (childPid, ProcessRunner.GetPosixProcessGroupForTest (childPid));
         cancellation.Cancel ();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException> (
-            () => run.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken));
-        Assert.False (File.Exists (marker));
+        await Assert.ThrowsAnyAsync<OperationCanceledException> (() => run);
+        await AssertProcessStopsAsync (childPid);
     }
 
     [Fact]
@@ -120,7 +119,6 @@ public sealed class ProcessRunnerTests : IDisposable
         FakeCommand command = CreateScript ("reap-race", unix: "exit 0", windows: string.Empty);
         TaskCompletionSource workerOwnsLifecycle = new (TaskCreationOptions.RunContinuationsAsynchronously);
         using ManualResetEventSlim releaseWorker = new ();
-        TaskCompletionSource externalTerminationStarted = new (TaskCreationOptions.RunContinuationsAsynchronously);
         using CancellationTokenSource cancellation = new ();
         List<bool> terminationDecisions = [];
         object decisionsGate = new ();
@@ -138,7 +136,6 @@ public sealed class ProcessRunnerTests : IDisposable
                     throw new TimeoutException ("The test did not release POSIX lifecycle cleanup.");
                 }
             },
-            () => externalTerminationStarted.TrySetResult (),
             willSignal =>
             {
                 lock (decisionsGate)
@@ -151,10 +148,12 @@ public sealed class ProcessRunnerTests : IDisposable
         try
         {
             await workerOwnsLifecycle.Task.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken);
-            Task cancellationTask = Task.Run (cancellation.Cancel, TestContext.Current.CancellationToken);
-            await externalTerminationStarted.Task.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken);
+            Stopwatch cancellationDuration = Stopwatch.StartNew ();
+            cancellation.Cancel ();
+            cancellationDuration.Stop ();
+            Assert.InRange (cancellationDuration.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds (1));
+            Assert.False (run.IsCompleted);
             releaseWorker.Set ();
-            await cancellationTask;
         }
         finally
         {
@@ -239,6 +238,102 @@ public sealed class ProcessRunnerTests : IDisposable
 
             await Assert.ThrowsAnyAsync<OperationCanceledException> (
                 () => secondRun.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken));
+        }
+    }
+
+    [Fact]
+    public async Task LinuxPipeCreation_DoesNotLeakIntoConcurrentProcessStart ()
+    {
+        if (!OperatingSystem.IsLinux ())
+        {
+            return;
+        }
+
+        FakeCommand command = CreateScript ("pipe2", unix: "printf 'complete'", windows: string.Empty);
+        TaskCompletionSource pipesCreated = new (TaskCreationOptions.RunContinuationsAsynchronously);
+        using ManualResetEventSlim releaseLaunch = new ();
+        Task<(int Code, string Output)> run = Task.Run (
+            () => ProcessRunner.RunWithPosixLaunchBarrierForTestAsync (
+                command.Executable,
+                command.Arguments,
+                Encoding.UTF8,
+                TimeSpan.FromSeconds (10),
+                () =>
+                {
+                    pipesCreated.TrySetResult ();
+                    releaseLaunch.Wait (TimeSpan.FromSeconds (10));
+                },
+                TestContext.Current.CancellationToken));
+
+        await pipesCreated.Task.WaitAsync (TimeSpan.FromSeconds (10), TestContext.Current.CancellationToken);
+        using Process external = Process.Start (new ProcessStartInfo ("/bin/sh")
+        {
+            UseShellExecute = false,
+            ArgumentList = { "-c", "sleep 3" }
+        })!;
+
+        try
+        {
+            Stopwatch completion = Stopwatch.StartNew ();
+            releaseLaunch.Set ();
+            (int code, string output) = await run.WaitAsync (
+                TimeSpan.FromSeconds (2),
+                TestContext.Current.CancellationToken);
+            completion.Stop ();
+
+            Assert.Equal (0, code);
+            Assert.Equal ("complete", output);
+            Assert.InRange (completion.Elapsed, TimeSpan.Zero, TimeSpan.FromSeconds (2));
+        }
+        finally
+        {
+            releaseLaunch.Set ();
+
+            if (!external.HasExited)
+            {
+                external.Kill (entireProcessTree: true);
+            }
+
+            await external.WaitForExitAsync (TestContext.Current.CancellationToken);
+        }
+    }
+
+    [Fact]
+    public async Task PosixRunner_CoexistsWithConcurrentManagedProcessStarts ()
+    {
+        if (OperatingSystem.IsWindows ())
+        {
+            return;
+        }
+
+        FakeCommand command = CreateScript ("managed-reaper", unix: "sleep 0.02; printf 'runner'", windows: string.Empty);
+        Task<(int Code, string Output)> [] runnerTasks = Enumerable.Range (0, 20)
+            .Select (_ => CliBackend.RunWithCodeAsync (
+                         command.Arguments,
+                         command.Executable,
+                         TimeSpan.FromSeconds (10),
+                         TestContext.Current.CancellationToken))
+            .ToArray ();
+        Task [] managedTasks = Enumerable.Range (0, 40).Select (_ => RunManagedProcessAsync ()).ToArray ();
+
+        await Task.WhenAll (managedTasks);
+        (int Code, string Output) [] results = await Task.WhenAll (runnerTasks);
+
+        Assert.All (results, result =>
+        {
+            Assert.Equal (0, result.Code);
+            Assert.Equal ("runner", result.Output);
+        });
+
+        async Task RunManagedProcessAsync ()
+        {
+            using Process process = Process.Start (new ProcessStartInfo ("/bin/sh")
+            {
+                UseShellExecute = false,
+                ArgumentList = { "-c", "exit 0" }
+            })!;
+            await process.WaitForExitAsync (TestContext.Current.CancellationToken);
+            Assert.Equal (0, process.ExitCode);
         }
     }
 
@@ -429,7 +524,7 @@ public sealed class ProcessRunnerTests : IDisposable
     [Fact]
     public async Task RunWithCodeAsync_DrainsFloodedPipesButBoundsRetainedOutput ()
     {
-        const int floodCharacters = ProcessRunner.MaxCapturedCharactersPerStream * 2;
+        const int floodCharacters = ProcessRunner.MaxCapturedStdoutCharacters + 4096;
         FakeCommand command = CreateScript (
             "flood",
             unix: $"head -c {floodCharacters} /dev/zero | tr '\\0' A; head -c {floodCharacters} /dev/zero | tr '\\0' B >&2",
@@ -472,7 +567,7 @@ public sealed class ProcessRunnerTests : IDisposable
     [Fact]
     public async Task RunDetailedWithCodeAsync_FloodReportsIncompleteCapture ()
     {
-        const int floodCharacters = ProcessRunner.MaxCapturedCharactersPerStream * 2;
+        const int floodCharacters = ProcessRunner.MaxCapturedStdoutCharacters + 4096;
         FakeCommand command = CreateScript (
             "detailed-flood",
             unix: $"head -c {floodCharacters} /dev/zero | tr '\\0' A",
@@ -511,7 +606,7 @@ public sealed class ProcessRunnerTests : IDisposable
     [Fact]
     public async Task RunParsedForTestAsync_DoesNotInvokeParserForTruncatedOutput ()
     {
-        const int floodCharacters = ProcessRunner.MaxCapturedCharactersPerStream * 2;
+        const int floodCharacters = ProcessRunner.MaxCapturedStdoutCharacters + 4096;
         FakeCommand command = CreateScript (
             "parsed-flood",
             unix: $"head -c {floodCharacters} /dev/zero | tr '\\0' A",

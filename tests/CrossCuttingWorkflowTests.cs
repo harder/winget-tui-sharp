@@ -142,6 +142,43 @@ public sealed class CrossCuttingWorkflowTests
     }
 
     [Fact]
+    public void PreflightCancellationIsOwnedByApplicationLifetimeNotDetailRefresh ()
+    {
+        using CancellationTokenSource lifetime = new ();
+        using CancellationTokenSource detailRefresh = new ();
+        using CancellationTokenSource request = App.CreatePreflightSource (lifetime.Token);
+
+        detailRefresh.Cancel ();
+        Assert.False (request.IsCancellationRequested);
+
+        lifetime.Cancel ();
+        Assert.True (request.IsCancellationRequested);
+    }
+
+    [Fact]
+    public async Task PreflightCleanup_ReleasesAndDisposesWhenUiDispatchThrows ()
+    {
+        ForegroundWorkflowCoordinator coordinator = new ();
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Preflight, out ForegroundAdmission admission));
+        int releaseCount = 0;
+        int disposeCount = 0;
+
+        await Assert.ThrowsAsync<InvalidOperationException> (
+            () => App.CleanupPreflightAsync (
+                () => throw new InvalidOperationException ("dispatch failed"),
+                () =>
+                {
+                    releaseCount++;
+                    Assert.True (coordinator.Release (admission));
+                },
+                () => disposeCount++));
+
+        Assert.Equal (1, releaseCount);
+        Assert.Equal (1, disposeCount);
+        Assert.True (coordinator.TryBegin (ForegroundWorkflow.Operation, out _));
+    }
+
+    [Fact]
     public void OperationReservation_BusySkipsConfirmationCancelReleasesAndTransferIsOnce ()
     {
         foreach (ForegroundWorkflow blocker in Enum.GetValues<ForegroundWorkflow> ())

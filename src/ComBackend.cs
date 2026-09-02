@@ -33,26 +33,27 @@ namespace WingetTuiSharp;
 ///    first exact match). If the same id existed in multiple catalogs the wrong source could be
 ///    chosen. Rare in practice (winget vs msstore ids differ), and matches CliBackend's by-id
 ///    behavior; carrying source identity through IBackend would be a separate change.
-///  - COM work is serialized through a 32-waiter bounded, cancellation-aware gate. Each admitted
-///    operation creates its own PackageManager and retains it through the complete asynchronous
-///    operation; no projected COM object crosses operations. All projected collections and
-///    strings are bounded before managed retention. This is compile- and unit-tested from macOS,
-///    but activation, apartment behavior, and cancellation still require Windows runtime testing.
+///  - Mutating COM work is serialized through a 32-waiter bounded, cancellation-aware gate.
+///    Reads use independent PackageManager instances so a long install cannot freeze list/detail
+///    refreshes. Every call retains its manager through the complete asynchronous operation; no
+///    projected COM object crosses calls. All projected collections and strings are bounded before
+///    managed retention. This is compile- and unit-tested from macOS, but activation, apartment
+///    behavior, and cancellation still require Windows runtime testing.
 ///  - Pinning delegates to winget.exe, so pin/unpin/list-pins need winget on PATH even on this
 ///    backend. If the COM server is registered but winget.exe isn't reachable, pin operations
 ///    fail (visibly, via the returned OpResult) while everything else keeps working.
 /// </summary>
 public sealed class ComBackend : IBackend
 {
-    private readonly BoundedAsyncGate _comGate = new (maxQueuedWaiters: 32);
+    private readonly BoundedAsyncGate _mutationGate = new (maxQueuedWaiters: 32);
 
     // Pin operations fall through to the CLI — the COM API has no pinning surface.
     private readonly CliBackend _cliForPins = new ();
 
     public ComBackend ()
     {
-        // Preserve eager activation as the backend-selection probe. Calls use a fresh manager
-        // after gate admission so a projected COM instance is never shared across operations.
+        // Preserve eager activation as the backend-selection probe. Calls use a fresh manager so
+        // a projected COM instance is never shared across concurrent reads or mutations.
         _ = new PackageManager ();
     }
 
@@ -60,7 +61,6 @@ public sealed class ComBackend : IBackend
         CancellationToken ct,
         Func<PackageManager, CancellationToken, Task<T>> operation)
     {
-        using IDisposable lease = await _comGate.AcquireAsync (ct);
         PackageManager pm = new ();
 
         try
@@ -73,6 +73,15 @@ public sealed class ComBackend : IBackend
             // operation/callback has completed, faulted, or observed cancellation.
             GC.KeepAlive (pm);
         }
+    }
+
+    private async Task<T> WithMutationPackageManagerAsync<T> (
+        CancellationToken ct,
+        Func<PackageManager, CancellationToken, Task<T>> operation)
+    {
+        using IDisposable lease = await _mutationGate.AcquireAsync (ct);
+
+        return await WithPackageManagerAsync (ct, operation);
     }
 
     // ------------------------------------------------------------------------
@@ -200,10 +209,6 @@ public sealed class ComBackend : IBackend
                 PackageMatchField.ProductCode => "product code",
                 _ => null
             };
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
@@ -546,10 +551,6 @@ public sealed class ComBackend : IBackend
         {
             return pkg.GetPackageVersionInfo (vid);
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch
         {
             return null;
@@ -561,10 +562,6 @@ public sealed class ComBackend : IBackend
         try
         {
             return installer.ElevationRequirement == ElevationRequirement.ElevationRequired;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
@@ -614,7 +611,7 @@ public sealed class ComBackend : IBackend
     // ------------------------------------------------------------------------
 
     public Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithPackageManagerAsync (ct, (pm, token) => InstallCoreAsync (pm, id, version, settings, progress, token));
+        => WithMutationPackageManagerAsync (ct, (pm, token) => InstallCoreAsync (pm, id, version, settings, progress, token));
 
     private static async Task<OpResult> InstallCoreAsync (
         PackageManager pm,
@@ -676,7 +673,7 @@ public sealed class ComBackend : IBackend
     }
 
     public Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithPackageManagerAsync (ct, (pm, token) => UpgradeCoreAsync (pm, id, progress, token));
+        => WithMutationPackageManagerAsync (ct, (pm, token) => UpgradeCoreAsync (pm, id, progress, token));
 
     private static async Task<OpResult> UpgradeCoreAsync (
         PackageManager pm,
@@ -722,7 +719,7 @@ public sealed class ComBackend : IBackend
     }
 
     public Task<OpResult> UninstallAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithPackageManagerAsync (ct, (pm, token) => UninstallCoreAsync (pm, id, progress, token));
+        => WithMutationPackageManagerAsync (ct, (pm, token) => UninstallCoreAsync (pm, id, progress, token));
 
     private static async Task<OpResult> UninstallCoreAsync (
         PackageManager pm,
@@ -760,7 +757,7 @@ public sealed class ComBackend : IBackend
     }
 
     public Task<OpResult> DownloadAsync (string id, string? version, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithPackageManagerAsync (ct, (pm, token) => DownloadCoreAsync (pm, id, version, progress, token));
+        => WithMutationPackageManagerAsync (ct, (pm, token) => DownloadCoreAsync (pm, id, version, progress, token));
 
     private static async Task<OpResult> DownloadCoreAsync (
         PackageManager pm,
@@ -829,7 +826,7 @@ public sealed class ComBackend : IBackend
     public bool CanRepair => true;
 
     public Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithPackageManagerAsync (ct, (pm, token) => RepairCoreAsync (pm, id, progress, token));
+        => WithMutationPackageManagerAsync (ct, (pm, token) => RepairCoreAsync (pm, id, progress, token));
 
     private static async Task<OpResult> RepairCoreAsync (
         PackageManager pm,
@@ -1485,10 +1482,6 @@ public sealed class ComBackend : IBackend
         {
             return v?.PackageCatalog?.Info?.Name ?? string.Empty;
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch
         {
             return string.Empty;
@@ -1500,10 +1493,6 @@ public sealed class ComBackend : IBackend
         try
         {
             return pkg.InstalledVersion;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
@@ -1517,10 +1506,6 @@ public sealed class ComBackend : IBackend
         {
             return pkg.DefaultInstallVersion;
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch
         {
             return null;
@@ -1532,10 +1517,6 @@ public sealed class ComBackend : IBackend
         try
         {
             return pkg.IsUpdateAvailable;
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
@@ -1553,10 +1534,6 @@ public sealed class ComBackend : IBackend
         try
         {
             return NullIfEmpty (info.Version);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
@@ -1576,10 +1553,6 @@ public sealed class ComBackend : IBackend
         {
             return NullIfEmpty (info.GetMetadata (field));
         }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
         catch
         {
             return null;
@@ -1596,10 +1569,6 @@ public sealed class ComBackend : IBackend
             {
                 return NullIfEmpty (versions [0].Version);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
         }
         catch
         {
