@@ -1,0 +1,282 @@
+namespace WingetTuiSharp;
+
+/// <summary>
+/// Hard memory limits applied at backend trust boundaries: 1,000 search rows; 10,000 local
+/// rows; 256 catalogs; 2,048 versions; 4,096 total metadata or verification items; 4 Ki UTF-16
+/// code units for ordinary display fields and exact operational identities; and 64 Ki for
+/// descriptions and installation notes. Aggregate retained text is capped at 8 Mi characters
+/// for package rows, 1 Mi for versions, 256 Ki for sources, and 1 Mi each for one package detail
+/// or verification result. Oversized identities are rejected, never truncated.
+/// </summary>
+internal static class BackendLimits
+{
+    internal const int SearchMatches = AppState.SearchResultLimit;
+    internal const int LocalMatches = 10_000;
+    internal const int Catalogs = 256;
+    internal const int Versions = 2_048;
+    internal const int MetadataItems = 4_096;
+    internal const int VerificationItems = 4_096;
+    internal const int VerificationInstallers = 256;
+    internal const int IdentityCharacters = 4 * 1_024;
+    internal const int SimpleTextCharacters = 4 * 1_024;
+    internal const int RichTextCharacters = 64 * 1_024;
+    internal const int PackageResultCharacters = 8 * 1_024 * 1_024;
+    internal const int VersionResultCharacters = 1 * 1_024 * 1_024;
+    internal const int SourceResultCharacters = 256 * 1_024;
+    internal const int PackageDetailCharacters = 1 * 1_024 * 1_024;
+    internal const int VerificationCharacters = 1 * 1_024 * 1_024;
+
+    internal static List<T> Materialize<T> (
+        IReadOnlyList<T> projected,
+        int maximum,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull (projected);
+        ArgumentOutOfRangeException.ThrowIfNegative (maximum);
+        cancellationToken.ThrowIfCancellationRequested ();
+
+        int count = Math.Min (projected.Count, maximum);
+        List<T> copy = new (count);
+
+        for (int i = 0; i < count; i++)
+        {
+            cancellationToken.ThrowIfCancellationRequested ();
+            copy.Add (projected [i]);
+        }
+
+        return copy;
+    }
+
+    internal static string? SimpleText (string? value) => Truncate (value, SimpleTextCharacters);
+    internal static string? RichText (string? value) => Truncate (value, RichTextCharacters);
+
+    /// <summary>
+    /// Accept an operational identity only when it can be retained exactly. Unlike display text,
+    /// package ids, versions, and source names must never be shortened into a different lookup key.
+    /// </summary>
+    internal static string? ExactIdentity (string? value)
+        => value is null || value.Length > IdentityCharacters || string.IsNullOrWhiteSpace (value) ? null : value;
+
+    /// <summary>Validate an optional identity, distinguishing an absent value from an oversized one.</summary>
+    internal static bool TryExactIdentity (string? value, out string? exact)
+    {
+        if (value is { Length: > IdentityCharacters })
+        {
+            exact = null;
+            return false;
+        }
+
+        exact = ExactIdentity (value);
+        return true;
+    }
+
+    internal static string? Truncate (string? value, int maximumCharacters)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (maximumCharacters);
+
+        if (value is null || value.Length <= maximumCharacters)
+        {
+            return value;
+        }
+
+        int length = maximumCharacters;
+
+        // Never split a UTF-16 surrogate pair at the retained boundary.
+        if (length > 0 && char.IsHighSurrogate (value [length - 1]) && char.IsLowSurrogate (value [length]))
+        {
+            length--;
+        }
+
+        return value [..length];
+    }
+}
+
+/// <summary>
+/// Overflow-safe aggregate character allowance. Exact values are accepted whole or rejected;
+/// display values may be shortened without splitting a UTF-16 surrogate pair.
+/// </summary>
+internal sealed class CharacterBudget
+{
+    private int _remaining;
+
+    internal CharacterBudget (int maximumCharacters)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (maximumCharacters);
+        _remaining = maximumCharacters;
+    }
+
+    internal int Remaining => _remaining;
+
+    internal bool TryReserveExact (
+        string? first,
+        string? second = null,
+        string? third = null,
+        string? fourth = null,
+        string? fifth = null)
+    {
+        long requested = (long)(first?.Length ?? 0)
+                         + (second?.Length ?? 0)
+                         + (third?.Length ?? 0)
+                         + (fourth?.Length ?? 0)
+                         + (fifth?.Length ?? 0);
+
+        if (requested > _remaining)
+        {
+            return false;
+        }
+
+        _remaining -= (int)requested;
+        return true;
+    }
+
+    internal bool TryTakeExact (string value, out string? accepted)
+    {
+        ArgumentNullException.ThrowIfNull (value);
+
+        if (value.Length > _remaining)
+        {
+            accepted = null;
+            return false;
+        }
+
+        _remaining -= value.Length;
+        accepted = value;
+        return true;
+    }
+
+    /// <summary>
+    /// Reserves a value that must be retained whole or not at all, charging nothing when it is
+    /// omitted. Use this for anything the UI will act on rather than merely display: a shortened
+    /// URL is not a shortened label, it is a different address that still resolves, so truncating
+    /// one would silently point the user at another resource.
+    /// </summary>
+    internal string? TakeExactOrOmit (string? value, int perFieldMaximum)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (perFieldMaximum);
+
+        if (value is null || value.Length > perFieldMaximum || value.Length > _remaining)
+        {
+            return null;
+        }
+
+        _remaining -= value.Length;
+
+        return value;
+    }
+
+    internal string? TakeDisplay (string? value, int perFieldMaximum)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (perFieldMaximum);
+
+        if (value is null)
+        {
+            return null;
+        }
+
+        int length = Math.Min (value.Length, Math.Min (perFieldMaximum, _remaining));
+
+        if (length > 0
+            && length < value.Length
+            && char.IsHighSurrogate (value [length - 1])
+            && char.IsLowSurrogate (value [length]))
+        {
+            length--;
+        }
+
+        _remaining -= length;
+        return length == value.Length ? value : value [..length];
+    }
+}
+
+/// <summary>Shares one total item allowance across related or nested external collections.</summary>
+internal sealed class CollectionBudget
+{
+    private int _remaining;
+
+    internal CollectionBudget (int maximumItems)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (maximumItems);
+        _remaining = maximumItems;
+    }
+
+    internal int Remaining => _remaining;
+
+    internal int Take (int requested) => TakeBounded (requested).Count;
+
+    internal CollectionTake TakeBounded (int requested)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (requested);
+        int granted = Math.Min (requested, _remaining);
+        _remaining -= granted;
+        return new (granted, granted == requested);
+    }
+}
+
+internal readonly record struct CollectionTake (int Count, bool Complete);
+
+internal sealed record VerificationCandidate (IReadOnlyList<VerifyCheck> Checks, bool Complete);
+
+internal readonly record struct VerificationDecision (VerifyOutcome Outcome, IReadOnlyList<VerifyCheck> Checks);
+
+/// <summary>
+/// Chooses a verification result without treating partial projected data as definitive. A fully
+/// observed passing installer proves the package healthy under WinGet's any-installer semantics.
+/// Otherwise any omitted/unreadable data may change the best-installer result and yields Error.
+/// </summary>
+internal static class VerificationEvaluator
+{
+    internal static VerificationDecision Decide (
+        IReadOnlyList<VerificationCandidate> candidates,
+        bool externalIncomplete)
+    {
+        VerificationCandidate? completePass = candidates.FirstOrDefault (
+            candidate => candidate.Complete
+                         && candidate.Checks.Count > 0
+                         && candidate.Checks.All (check => check.Ok));
+
+        if (completePass is not null)
+        {
+            return new (VerifyOutcome.Ok, completePass.Checks);
+        }
+
+        if (externalIncomplete || candidates.Any (candidate => !candidate.Complete))
+        {
+            return new (VerifyOutcome.Error, []);
+        }
+
+        VerificationCandidate? best = candidates
+            .Where (candidate => candidate.Checks.Count > 0)
+            .OrderBy (candidate => candidate.Checks.Count (check => !check.Ok))
+            .FirstOrDefault ();
+
+        return best is null
+                   ? new (VerifyOutcome.NotApplicable, [])
+                   : new (VerifyOutcome.Issues, best.Checks);
+    }
+}
+
+/// <summary>
+/// Runs non-critical cleanup without allowing it to replace the primary operation outcome. The
+/// final retention hook always runs, including when cleanup itself fails.
+/// </summary>
+internal static class BestEffortCleanup
+{
+    internal static void Run (Action cleanup, Action retention)
+    {
+        try
+        {
+            try
+            {
+                cleanup ();
+            }
+            catch
+            {
+                // Cleanup is deliberately best-effort; preserve success, fault, or cancellation.
+            }
+        }
+        finally
+        {
+            retention ();
+        }
+    }
+}

@@ -6,95 +6,81 @@ namespace WingetTuiSharp;
 /// </summary>
 public sealed class MockBackend : IBackend
 {
-    private static readonly Package [] _installed =
+    private static readonly PackageTemplate [] InstalledTemplates =
     [
-        new () { Id = "Microsoft.VisualStudioCode", Name = "Microsoft Visual Studio Code", Version = "1.95.0", Source = "winget" },
-        new () { Id = "Git.Git", Name = "Git", Version = "2.46.0", Source = "winget", AvailableVersion = "2.47.0" },
-        new () { Id = "GitHub.cli", Name = "GitHub CLI", Version = "2.55.0", Source = "winget" },
-        new () { Id = "Microsoft.PowerShell", Name = "PowerShell", Version = "7.4.5", Source = "winget", AvailableVersion = "7.5.0" },
-        new () { Id = "9NKSQGP7F2NH", Name = "WhatsApp Desktop", Version = "2.2412.10.0", Source = "msstore" },
-        new () { Id = "Notepad++.Notepad++", Name = "Notepad++", Version = "8.6.9", Source = "winget" },
-        new () { Id = "Mozilla.Firefox", Name = "Mozilla Firefox", Version = "131.0.3", Source = "winget", AvailableVersion = "132.0.1" },
-        new () { Id = "Microsoft.WindowsTerminal", Name = "Windows Terminal", Version = "1.21.3231.0", Source = "winget" },
-        new () { Id = "Python.Python.3.12", Name = "Python 3.12", Version = "3.12.7", Source = "winget" },
-        new () { Id = "Docker.DockerDesktop", Name = "Docker Desktop", Version = "4.34.0", Source = "winget", AvailableVersion = "4.35.1" }
+        new ("Microsoft.VisualStudioCode", "Microsoft Visual Studio Code", "1.95.0", "winget"),
+        new ("Git.Git", "Git", "2.46.0", "winget", "2.47.0"),
+        new ("GitHub.cli", "GitHub CLI", "2.55.0", "winget"),
+        new ("Microsoft.PowerShell", "PowerShell", "7.4.5", "winget", "7.5.0"),
+        new ("9NKSQGP7F2NH", "WhatsApp Desktop", "2.2412.10.0", "msstore"),
+        new ("Notepad++.Notepad++", "Notepad++", "8.6.9", "winget"),
+        new ("Mozilla.Firefox", "Mozilla Firefox", "131.0.3", "winget", "132.0.1"),
+        new ("Microsoft.WindowsTerminal", "Windows Terminal", "1.21.3231.0", "winget"),
+        new ("Python.Python.3.12", "Python 3.12", "3.12.7", "winget"),
+        new ("Docker.DockerDesktop", "Docker Desktop", "4.34.0", "winget", "4.35.1")
     ];
 
-    private static readonly Package [] _searchResults =
+    private static readonly PackageTemplate [] SearchTemplates =
     [
-        new () { Id = "Microsoft.VisualStudioCode", Name = "Visual Studio Code", Version = "1.95.0", Source = "winget" },
-        new () { Id = "Microsoft.VisualStudioCode.Insiders", Name = "Visual Studio Code Insiders", Version = "1.96.0", Source = "winget" },
-        new () { Id = "Anthropic.Claude", Name = "Claude", Version = "0.7.5", Source = "winget" },
-        new () { Id = "JetBrains.Rider", Name = "JetBrains Rider", Version = "2024.2.7", Source = "winget" },
-        new () { Id = "Neovim.Neovim", Name = "Neovim", Version = "0.10.2", Source = "winget" }
+        new ("Microsoft.VisualStudioCode", "Visual Studio Code", "1.95.0", "winget"),
+        new ("Microsoft.VisualStudioCode.Insiders", "Visual Studio Code Insiders", "1.96.0", "winget"),
+        new ("Anthropic.Claude", "Claude", "0.7.5", "winget"),
+        new ("JetBrains.Rider", "JetBrains Rider", "2024.2.7", "winget"),
+        new ("Neovim.Neovim", "Neovim", "0.10.2", "winget")
     ];
 
+    private readonly object _pinsGate = new ();
     private readonly Dictionary<string, PinState> _pins = new (StringComparer.OrdinalIgnoreCase);
 
     public Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
     {
-        IEnumerable<Package> q = _searchResults
-                                 .Concat (_installed)
-                                 .Where (p => string.IsNullOrEmpty (query)
-                                              || p.Name.Contains (query, StringComparison.OrdinalIgnoreCase)
-                                              || p.Id.Contains (query, StringComparison.OrdinalIgnoreCase));
-
-        if (!string.IsNullOrEmpty (source))
-        {
-            q = q.Where (p => p.Source == source);
-        }
-
-        return Task.FromResult<IReadOnlyList<Package>> (q.ToArray ());
+        return Task.FromResult<IReadOnlyList<Package>> (
+            Materialize (
+                SearchTemplates.Concat (InstalledTemplates),
+                template => (string.IsNullOrEmpty (query)
+                             || template.Name.Contains (query, StringComparison.OrdinalIgnoreCase)
+                             || template.Id.Contains (query, StringComparison.OrdinalIgnoreCase))
+                            && (string.IsNullOrEmpty (source)
+                                || template.Source.Equals (source, StringComparison.OrdinalIgnoreCase)),
+                ct));
     }
 
     public Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
-    {
-        Package [] q = string.IsNullOrEmpty (source)
-                           ? _installed
-                           : _installed.Where (p => p.Source == source).ToArray ();
-
-        foreach (Package p in q)
-        {
-            if (_pins.TryGetValue (p.Id, out PinState ps))
-            {
-                p.PinState = ps;
-            }
-        }
-
-        return Task.FromResult<IReadOnlyList<Package>> (q);
-    }
+        => Task.FromResult<IReadOnlyList<Package>> (
+            Materialize (
+                InstalledTemplates,
+                template => string.IsNullOrEmpty (source)
+                            || template.Source.Equals (source, StringComparison.OrdinalIgnoreCase),
+                ct));
 
     public Task<IReadOnlyList<Package>> ListUpgradesAsync (string? source, CancellationToken ct)
-    {
-        Package [] q = _installed.Where (p => p.AvailableVersion is not null).ToArray ();
-
-        if (!string.IsNullOrEmpty (source))
-        {
-            q = q.Where (p => p.Source == source).ToArray ();
-        }
-
-        foreach (Package p in q)
-        {
-            if (_pins.TryGetValue (p.Id, out PinState ps))
-            {
-                p.PinState = ps;
-            }
-        }
-
-        return Task.FromResult<IReadOnlyList<Package>> (q);
-    }
+        => Task.FromResult<IReadOnlyList<Package>> (
+            Materialize (
+                InstalledTemplates,
+                template => template.AvailableVersion is not null
+                            && (string.IsNullOrEmpty (source)
+                                || template.Source.Equals (source, StringComparison.OrdinalIgnoreCase)),
+                ct));
 
     public Task<IReadOnlyList<string>> ListSourcesAsync (CancellationToken ct)
-        => Task.FromResult<IReadOnlyList<string>> (["winget", "msstore"]);
+    {
+        ct.ThrowIfCancellationRequested ();
+
+        return Task.FromResult<IReadOnlyList<string>> (["winget", "msstore"]);
+    }
 
     public Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
     {
-        Package? p = _installed.Concat (_searchResults).FirstOrDefault (x => x.Id == id);
+        ct.ThrowIfCancellationRequested ();
+        PackageTemplate? template = InstalledTemplates.Concat (SearchTemplates)
+                                                     .FirstOrDefault (x => x.Id.Equals (id, StringComparison.OrdinalIgnoreCase));
 
-        if (p is null)
+        if (template is null)
         {
             return Task.FromResult<PackageDetail?> (null);
         }
+
+        Package p = CreatePackage (template, SnapshotPins (ct));
 
         PackageDetail detail = new ()
         {
@@ -103,7 +89,7 @@ public sealed class MockBackend : IBackend
             Version = p.Version,
             AvailableVersion = p.AvailableVersion,
             Source = p.Source,
-            PinState = _pins.GetValueOrDefault (p.Id, PinState.Unpinned),
+            PinState = p.PinState,
             Publisher = $"{p.Name.Split (' ') [0]} Team",
             Description = $"{p.Name} is a placeholder description for the mock backend. "
                           + "When running on Windows with winget installed, real manifest data is fetched here. ",
@@ -122,8 +108,9 @@ public sealed class MockBackend : IBackend
 
     public Task<IReadOnlyList<string>> ListVersionsAsync (string id, CancellationToken ct)
     {
-        Package? p = _searchResults.Concat (_installed)
-                                   .FirstOrDefault (x => x.Id.Equals (id, StringComparison.OrdinalIgnoreCase));
+        ct.ThrowIfCancellationRequested ();
+        PackageTemplate? p = SearchTemplates.Concat (InstalledTemplates)
+                                            .FirstOrDefault (x => x.Id.Equals (id, StringComparison.OrdinalIgnoreCase));
         string baseV = p?.AvailableVersion ?? p?.Version ?? "1.0.0";
 
         // A small, distinct, newest-first list so the version picker is exercisable on any host.
@@ -136,8 +123,9 @@ public sealed class MockBackend : IBackend
 
     public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
     {
-        Package? p = _searchResults.Concat (_installed)
-                                   .FirstOrDefault (x => x.Id.Equals (id, StringComparison.OrdinalIgnoreCase));
+        ct.ThrowIfCancellationRequested ();
+        PackageTemplate? p = SearchTemplates.Concat (InstalledTemplates)
+                                            .FirstOrDefault (x => x.Id.Equals (id, StringComparison.OrdinalIgnoreCase));
 
         InstallerPreview preview = new ()
         {
@@ -153,6 +141,7 @@ public sealed class MockBackend : IBackend
 
     public Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         // Deterministically fake a "corrupt" result for one package so the Issues path is visible.
         bool corrupt = id.Contains ("Firefox", StringComparison.OrdinalIgnoreCase);
 
@@ -174,6 +163,7 @@ public sealed class MockBackend : IBackend
 
     public async Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         // Synthesize a repair ramp so the flow is exercisable on Linux (mirrors how the mock's
         // Verify fakes a result). No download phase — repair re-runs the local installer.
         if (progress is not null)
@@ -197,6 +187,7 @@ public sealed class MockBackend : IBackend
 
     public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         await SimulateProgressAsync (progress, downloads: true, ct);
 
         string note = settings is null
@@ -213,6 +204,7 @@ public sealed class MockBackend : IBackend
 
     public async Task<OpResult> DownloadAsync (string id, string? version, IProgress<OpProgress>? progress, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         // Download-only: a download ramp with no install phase.
         if (progress is not null)
         {
@@ -235,6 +227,7 @@ public sealed class MockBackend : IBackend
 
     public async Task<OpResult> UninstallAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         await SimulateProgressAsync (progress, downloads: false, ct);
 
         return new ()
@@ -247,6 +240,7 @@ public sealed class MockBackend : IBackend
 
     public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         await SimulateProgressAsync (progress, downloads: true, ct);
 
         return new ()
@@ -289,7 +283,12 @@ public sealed class MockBackend : IBackend
 
     public Task<OpResult> PinAsync (string id, CancellationToken ct)
     {
-        _pins [id] = new (PinStateKind.Blocking);
+        ct.ThrowIfCancellationRequested ();
+
+        lock (_pinsGate)
+        {
+            _pins [id] = new (PinStateKind.Blocking);
+        }
 
         return Task.FromResult (new OpResult
         {
@@ -301,7 +300,12 @@ public sealed class MockBackend : IBackend
 
     public Task<OpResult> UnpinAsync (string id, CancellationToken ct)
     {
-        _pins.Remove (id);
+        ct.ThrowIfCancellationRequested ();
+
+        lock (_pinsGate)
+        {
+            _pins.Remove (id);
+        }
 
         return Task.FromResult (new OpResult
         {
@@ -312,7 +316,62 @@ public sealed class MockBackend : IBackend
     }
 
     public Task<IReadOnlyDictionary<string, PinState>> ListPinsAsync (CancellationToken ct)
-        => Task.FromResult<IReadOnlyDictionary<string, PinState>> (_pins);
+        => Task.FromResult<IReadOnlyDictionary<string, PinState>> (SnapshotPins (ct));
 
-    public Task<string> DescribeAsync (CancellationToken ct) => Task.FromResult ("Mock backend");
+    public Task<string> DescribeAsync (CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested ();
+
+        return Task.FromResult ("Mock backend");
+    }
+
+    private IReadOnlyList<Package> Materialize (
+        IEnumerable<PackageTemplate> templates,
+        Func<PackageTemplate, bool> predicate,
+        CancellationToken ct)
+    {
+        IReadOnlyDictionary<string, PinState> pins = SnapshotPins (ct);
+        List<Package> packages = [];
+
+        foreach (PackageTemplate template in templates)
+        {
+            ct.ThrowIfCancellationRequested ();
+
+            if (predicate (template))
+            {
+                packages.Add (CreatePackage (template, pins));
+            }
+        }
+
+        return packages;
+    }
+
+    private Dictionary<string, PinState> SnapshotPins (CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested ();
+
+        lock (_pinsGate)
+        {
+            return new (_pins, StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static Package CreatePackage (
+        PackageTemplate template,
+        IReadOnlyDictionary<string, PinState> pins) => new ()
+    {
+        Id = template.Id,
+        Name = template.Name,
+        Version = template.Version,
+        Source = template.Source,
+        AvailableVersion = template.AvailableVersion,
+        PinState = pins.GetValueOrDefault (template.Id, PinState.Unpinned)
+    };
+
+    private sealed record PackageTemplate (
+        string Id,
+        string Name,
+        string Version,
+        string Source,
+        string? AvailableVersion = null);
 }

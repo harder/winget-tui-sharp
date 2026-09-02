@@ -9,7 +9,7 @@
 // IIterable<T> runtime-callable-wrapper for the generic instantiation isn't generated and
 // enumeration throws InvalidCastException at runtime. Indexed access (IVectorView.GetAt,
 // i.e. `list[i]`) works fine. Every projected list is funneled through Materialize<T>()
-// below, which copies via indexing into a normal List<T>; after that, ordinary
+// below, which copies a bounded number via indexing into a normal List<T>; after that, ordinary
 // foreach/LINQ on the managed copy is safe.
 
 #if WINGET_COM
@@ -33,37 +33,83 @@ namespace WingetTuiSharp;
 ///    first exact match). If the same id existed in multiple catalogs the wrong source could be
 ///    chosen. Rare in practice (winget vs msstore ids differ), and matches CliBackend's by-id
 ///    behavior; carrying source identity through IBackend would be a separate change.
-///  - A single PackageManager is shared across operations that the UI invokes from background
-///    (threadpool/MTA) threads. WinGet's COM objects are expected to be agile, but that hasn't
-///    been verified under this app's usage; if RPC_E_WRONG_THREAD or intermittent COM errors
-///    surface on Windows, switch to a fresh PackageManager per operation.
+///  - Mutating COM work is serialized through a 32-waiter bounded, cancellation-aware gate.
+///    Reads use independent PackageManager instances so a long install cannot freeze list/detail
+///    refreshes. Every call retains its manager through the complete asynchronous operation; no
+///    projected COM object crosses calls. All projected collections and strings are bounded before
+///    managed retention. This is compile- and unit-tested from macOS, but activation, apartment
+///    behavior, and cancellation still require Windows runtime testing.
 ///  - Pinning delegates to winget.exe, so pin/unpin/list-pins need winget on PATH even on this
 ///    backend. If the COM server is registered but winget.exe isn't reachable, pin operations
 ///    fail (visibly, via the returned OpResult) while everything else keeps working.
 /// </summary>
 public sealed class ComBackend : IBackend
 {
-    private readonly PackageManager _pm = new ();
+    private readonly BoundedAsyncGate _mutationGate = new (maxQueuedWaiters: 32);
 
     // Pin operations fall through to the CLI — the COM API has no pinning surface.
     private readonly CliBackend _cliForPins = new ();
+
+    public ComBackend ()
+    {
+        // Preserve eager activation as the backend-selection probe. Calls use a fresh manager so
+        // a projected COM instance is never shared across concurrent reads or mutations.
+        _ = new PackageManager ();
+    }
+
+    private async Task<T> WithPackageManagerAsync<T> (
+        CancellationToken ct,
+        Func<PackageManager, CancellationToken, Task<T>> operation)
+    {
+        ct.ThrowIfCancellationRequested ();
+        PackageManager pm = new ();
+
+        try
+        {
+            return await operation (pm, ct);
+        }
+        finally
+        {
+            // Keep the operation's COM activation context alive until every projected async
+            // operation/callback has completed, faulted, or observed cancellation.
+            GC.KeepAlive (pm);
+        }
+    }
+
+    private async Task<T> WithMutationPackageManagerAsync<T> (
+        CancellationToken ct,
+        Func<PackageManager, CancellationToken, Task<T>> operation)
+    {
+        using IDisposable lease = await _mutationGate.AcquireAsync (ct);
+
+        return await WithPackageManagerAsync (ct, operation);
+    }
 
     // ------------------------------------------------------------------------
     // Reads
     // ------------------------------------------------------------------------
 
-    public async Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
+    public Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace (query))
         {
-            return [];
+            return Task.FromResult<IReadOnlyList<Package>> ([]);
         }
 
+        return WithPackageManagerAsync (ct, (pm, token) => SearchCoreAsync (pm, query, source, token));
+    }
+
+    private static async Task<IReadOnlyList<Package>> SearchCoreAsync (
+        PackageManager pm,
+        string query,
+        string? source,
+        CancellationToken ct)
+    {
         // Composite over the remote catalog(s), returning remote packages correlated with
         // installed status. CatalogDefault searches the catalog's default field set
         // (Id/Name/Moniker/Tags) — the free-text-search field.
         PackageCatalog catalog = await ConnectAsync (
-            CompositeRef (RemoteRefs (source), CompositeSearchBehavior.RemotePackagesFromRemoteCatalogs),
+            CompositeRef (pm, RemoteRefs (pm, source, ct), CompositeSearchBehavior.RemotePackagesFromRemoteCatalogs, ct),
             ct);
 
         FindPackagesOptions opts = new ();
@@ -76,36 +122,64 @@ public sealed class ComBackend : IBackend
 
         // Cap a pathologically broad query (e.g. a one-letter term) so it can't materialize tens
         // of thousands of rows. The app already blocks empty queries; this guards the merely-broad
-        // ones. result.WasLimitExceeded below tells the UI to nudge the user to refine.
-        opts.ResultLimit = AppState.SearchResultLimit;
+        // ones. The UI infers truncation when the returned count reaches this shared cap.
+        opts.ResultLimit = BackendLimits.SearchMatches;
 
         FindPackagesResult result = await catalog.FindPackagesAsync (opts).AsTask (ct);
 
         List<Package> packages = [];
+        CharacterBudget characters = new (BackendLimits.PackageResultCharacters);
 
-        foreach (MatchResult m in Materialize (result.Matches))
+        foreach (MatchResult m in Materialize (result.Matches, BackendLimits.SearchMatches, ct))
         {
+            ct.ThrowIfCancellationRequested ();
             try
             {
                 CatalogPackage pkg = m.CatalogPackage;
-                string version = SafeVersion (SafeDefaultInstallVersion (pkg)) ?? LatestAvailableVersion (pkg) ?? string.Empty;
+                string? packageId = ExactIdentity (pkg.Id);
+                string? rawVersion = SafeVersion (SafeDefaultInstallVersion (pkg)) ?? LatestAvailableVersion (pkg);
+                string? rawSource = SourceOf (pkg);
 
                 // The search composite (RemotePackagesFromRemoteCatalogs) correlates installed
                 // status, so a search row knows whether it's installed and whether an upgrade is
                 // available — surfaced so the UI can offer Uninstall/Upgrade rather than Install.
                 string? installedVersion = SafeVersion (SafeInstalledVersion (pkg));
                 bool updateAvailable = installedVersion is not null && SafeIsUpdateAvailable (pkg);
+                string? availableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null;
+
+                if (packageId is null
+                    || !TryExactIdentity (rawVersion, out string? version)
+                    || !TryExactIdentity (installedVersion, out installedVersion)
+                    || !TryExactIdentity (availableVersion, out availableVersion)
+                    || !TryExactIdentity (rawSource, out string? packageSource))
+                {
+                    continue;
+                }
+
+                if (!characters.TryReserveExact (
+                        packageId,
+                        version,
+                        packageSource,
+                        installedVersion,
+                        availableVersion))
+                {
+                    break;
+                }
 
                 packages.Add (new ()
                 {
-                    Id = pkg.Id,
-                    Name = pkg.Name,
-                    Version = version,
-                    Source = SourceOf (pkg),
-                    MatchField = NotableMatchField (m),
+                    Id = packageId,
+                    Name = characters.TakeDisplay (pkg.Name, BackendLimits.SimpleTextCharacters) ?? string.Empty,
+                    Version = version ?? string.Empty,
+                    Source = packageSource ?? string.Empty,
+                    MatchField = characters.TakeDisplay (NotableMatchField (m), BackendLimits.SimpleTextCharacters),
                     InstalledVersion = installedVersion,
-                    AvailableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null
+                    AvailableVersion = availableVersion
                 });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch
             {
@@ -144,10 +218,10 @@ public sealed class ComBackend : IBackend
     }
 
     public Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
-        => ListLocalAsync (source, upgradesOnly: false, ct);
+        => WithPackageManagerAsync (ct, (pm, token) => ListLocalAsync (pm, source, upgradesOnly: false, token));
 
     public Task<IReadOnlyList<Package>> ListUpgradesAsync (string? source, CancellationToken ct)
-        => ListLocalAsync (source, upgradesOnly: true, ct);
+        => WithPackageManagerAsync (ct, (pm, token) => ListLocalAsync (pm, source, upgradesOnly: true, token));
 
     /// <summary>
     /// Installed packages, optionally filtered to those with an available upgrade. Uses a
@@ -155,19 +229,22 @@ public sealed class ComBackend : IBackend
     /// from the implicit local "installed" catalog, correlated against the supplied remote
     /// catalog(s) so each row knows its available version / update status.
     /// </summary>
-    private async Task<IReadOnlyList<Package>> ListLocalAsync (string? source, bool upgradesOnly, CancellationToken ct)
+    private static async Task<IReadOnlyList<Package>> ListLocalAsync (PackageManager pm, string? source, bool upgradesOnly, CancellationToken ct)
     {
         PackageCatalog catalog = await ConnectAsync (
-            CompositeRef (RemoteRefs (source), CompositeSearchBehavior.LocalCatalogs),
+            CompositeRef (pm, RemoteRefs (pm, source, ct), CompositeSearchBehavior.LocalCatalogs, ct),
             ct);
 
         // An empty filter set returns every installed package.
-        FindPackagesResult result = await catalog.FindPackagesAsync (new ()).AsTask (ct);
+        FindPackagesOptions options = new () { ResultLimit = BackendLimits.LocalMatches };
+        FindPackagesResult result = await catalog.FindPackagesAsync (options).AsTask (ct);
 
         List<Package> packages = [];
+        CharacterBudget characters = new (BackendLimits.PackageResultCharacters);
 
-        foreach (MatchResult m in Materialize (result.Matches))
+        foreach (MatchResult m in Materialize (result.Matches, BackendLimits.LocalMatches, ct))
         {
+            ct.ThrowIfCancellationRequested ();
             try
             {
                 CatalogPackage pkg = m.CatalogPackage;
@@ -179,15 +256,39 @@ public sealed class ComBackend : IBackend
                 }
 
                 string installed = SafeVersion (SafeInstalledVersion (pkg)) ?? string.Empty;
+                string? packageId = ExactIdentity (pkg.Id);
+                string? availableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null;
+                string? rawSource = SourceOf (pkg);
+
+                if (packageId is null
+                    || !TryExactIdentity (installed, out string? exactInstalled)
+                    || !TryExactIdentity (availableVersion, out availableVersion)
+                    || !TryExactIdentity (rawSource, out string? packageSource))
+                {
+                    continue;
+                }
+
+                if (!characters.TryReserveExact (
+                        packageId,
+                        exactInstalled,
+                        packageSource,
+                        availableVersion))
+                {
+                    break;
+                }
 
                 packages.Add (new ()
                 {
-                    Id = pkg.Id,
-                    Name = pkg.Name,
-                    Version = installed,
-                    Source = SourceOf (pkg),
-                    AvailableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null
+                    Id = packageId,
+                    Name = characters.TakeDisplay (pkg.Name, BackendLimits.SimpleTextCharacters) ?? string.Empty,
+                    Version = exactInstalled ?? string.Empty,
+                    Source = packageSource ?? string.Empty,
+                    AvailableVersion = availableVersion
                 });
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
             }
             catch
             {
@@ -199,9 +300,12 @@ public sealed class ComBackend : IBackend
         return packages;
     }
 
-    public async Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
+    public Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
+        => WithPackageManagerAsync (ct, (pm, token) => ShowCoreAsync (pm, id, token));
+
+    private static async Task<PackageDetail?> ShowCoreAsync (PackageManager pm, string id, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -220,7 +324,12 @@ public sealed class ComBackend : IBackend
 
         try
         {
+            ct.ThrowIfCancellationRequested ();
             meta = versionInfo.GetCatalogPackageMetadata ();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -232,35 +341,77 @@ public sealed class ComBackend : IBackend
         // Installed-only metadata (location/scope) comes from the installed version's metadata
         // bag, not the manifest — so resolve it from the installed version specifically.
         PackageVersionInfo? installed = SafeInstalledVersion (pkg);
+        CollectionBudget metadataBudget = new (BackendLimits.MetadataItems);
+        CharacterBudget detailCharacters = new (BackendLimits.PackageDetailCharacters);
 
         try
         {
+            string? packageId = ExactIdentity (pkg.Id);
+            string? rawVersion = SafeVersion (SafeInstalledVersion (pkg)) ?? SafeVersion (versionInfo);
+            string? rawAvailableVersion = LatestAvailableVersion (pkg);
+            string? rawInstalledVersion = SafeVersion (installed);
+            string? rawSource = SourceOf (pkg);
+
+            if (packageId is null
+                || !TryExactIdentity (rawVersion, out string? version)
+                || !TryExactIdentity (rawAvailableVersion, out string? availableVersion)
+                || !TryExactIdentity (rawInstalledVersion, out string? installedVersion)
+                || !TryExactIdentity (rawSource, out string? packageSource))
+            {
+                return null;
+            }
+
+            if (!detailCharacters.TryReserveExact (
+                    packageId,
+                    version,
+                    availableVersion,
+                    installedVersion,
+                    packageSource))
+            {
+                return null;
+            }
+
+            string? displayName = detailCharacters.TakeDisplay (
+                Coalesce (meta?.PackageName, pkg.Name),
+                BackendLimits.SimpleTextCharacters);
+
             return new ()
             {
-                Id = pkg.Id,
-                Name = Coalesce (meta?.PackageName, pkg.Name) ?? pkg.Id,
-                Version = SafeVersion (SafeInstalledVersion (pkg)) ?? SafeVersion (versionInfo) ?? string.Empty,
-                AvailableVersion = LatestAvailableVersion (pkg),
-                InstalledVersion = SafeVersion (installed),
-                Source = SourceOf (pkg),
-                Publisher = NullIfEmpty (meta?.Publisher),
-                Author = NullIfEmpty (meta?.Author),
-                Copyright = NullIfEmpty (meta?.Copyright),
-                Description = description,
-                Homepage = NullIfEmpty (meta?.PackageUrl),
-                License = NullIfEmpty (meta?.License),
-                ReleaseNotesUrl = NullIfEmpty (meta?.ReleaseNotesUrl),
-                SupportUrl = NullIfEmpty (meta?.PublisherSupportUrl),
-                PrivacyUrl = NullIfEmpty (meta?.PrivacyUrl),
-                PurchaseUrl = NullIfEmpty (meta?.PurchaseUrl),
-                InstallationNotes = NullIfEmpty (meta?.InstallationNotes),
-                InstalledLocation = SafeMetadata (installed, PackageVersionMetadataField.InstalledLocation),
-                InstalledScope = SafeMetadata (installed, PackageVersionMetadataField.InstalledScope),
-                Tags = meta is null ? null : StringVector (() => meta.Tags),
-                Documentation = DocLinks (meta),
-                ProductCodes = StringVector (() => versionInfo.ProductCodes),
-                PackageFamilyNames = StringVector (() => versionInfo.PackageFamilyNames)
+                Id = packageId,
+                Name = string.IsNullOrEmpty (displayName) ? packageId : displayName,
+                Version = version ?? string.Empty,
+                AvailableVersion = availableVersion,
+                InstalledVersion = installedVersion,
+                Source = packageSource ?? string.Empty,
+                Publisher = detailCharacters.TakeDisplay (NullIfEmpty (meta?.Publisher), BackendLimits.SimpleTextCharacters),
+                Author = detailCharacters.TakeDisplay (NullIfEmpty (meta?.Author), BackendLimits.SimpleTextCharacters),
+                Copyright = detailCharacters.TakeDisplay (NullIfEmpty (meta?.Copyright), BackendLimits.SimpleTextCharacters),
+                Description = detailCharacters.TakeDisplay (description, BackendLimits.RichTextCharacters),
+                // URLs are opened, not just shown (DetailPanel link rows, plus the `o` and `c`
+                // keys). A truncated URL is a valid address for a different resource, so these
+                // are retained whole or dropped — never shortened.
+                Homepage = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PackageUrl), BackendLimits.SimpleTextCharacters),
+                License = detailCharacters.TakeDisplay (NullIfEmpty (meta?.License), BackendLimits.SimpleTextCharacters),
+                ReleaseNotesUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.ReleaseNotesUrl), BackendLimits.SimpleTextCharacters),
+                SupportUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PublisherSupportUrl), BackendLimits.SimpleTextCharacters),
+                PrivacyUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PrivacyUrl), BackendLimits.SimpleTextCharacters),
+                PurchaseUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PurchaseUrl), BackendLimits.SimpleTextCharacters),
+                InstallationNotes = detailCharacters.TakeDisplay (NullIfEmpty (meta?.InstallationNotes), BackendLimits.RichTextCharacters),
+                InstalledLocation = detailCharacters.TakeDisplay (
+                    SafeMetadata (installed, PackageVersionMetadataField.InstalledLocation),
+                    BackendLimits.SimpleTextCharacters),
+                InstalledScope = detailCharacters.TakeDisplay (
+                    SafeMetadata (installed, PackageVersionMetadataField.InstalledScope),
+                    BackendLimits.SimpleTextCharacters),
+                Tags = meta is null ? null : StringVector (() => meta.Tags, metadataBudget, detailCharacters, ct),
+                Documentation = DocLinks (meta, metadataBudget, detailCharacters, ct),
+                ProductCodes = StringVector (() => versionInfo.ProductCodes, metadataBudget, detailCharacters, ct),
+                PackageFamilyNames = StringVector (() => versionInfo.PackageFamilyNames, metadataBudget, detailCharacters, ct)
             };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -275,9 +426,12 @@ public sealed class ComBackend : IBackend
     // Version list + install preview
     // ------------------------------------------------------------------------
 
-    public async Task<IReadOnlyList<string>> ListVersionsAsync (string id, CancellationToken ct)
+    public Task<IReadOnlyList<string>> ListVersionsAsync (string id, CancellationToken ct)
+        => WithPackageManagerAsync (ct, (pm, token) => ListVersionsCoreAsync (pm, id, token));
+
+    private static async Task<IReadOnlyList<string>> ListVersionsCoreAsync (PackageManager pm, string id, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -286,19 +440,31 @@ public sealed class ComBackend : IBackend
 
         List<string> versions = [];
         HashSet<string> seen = new (StringComparer.OrdinalIgnoreCase);
+        CharacterBudget characters = new (BackendLimits.VersionResultCharacters);
 
         try
         {
             // AvailableVersions is newest-first. Indexed access via Materialize (AOT rule).
-            foreach (PackageVersionId vid in Materialize (pkg.AvailableVersions))
+            foreach (PackageVersionId vid in Materialize (pkg.AvailableVersions, BackendLimits.Versions, ct))
             {
-                string v = vid.Version;
+                ct.ThrowIfCancellationRequested ();
+                string? v = ExactIdentity (vid.Version);
 
-                if (!string.IsNullOrWhiteSpace (v) && seen.Add (v))
+                if (v is not null && !seen.Contains (v))
                 {
-                    versions.Add (v);
+                    if (!characters.TryTakeExact (v, out string? accepted))
+                    {
+                        break;
+                    }
+
+                    seen.Add (accepted!);
+                    versions.Add (accepted!);
                 }
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -308,9 +474,16 @@ public sealed class ComBackend : IBackend
         return versions;
     }
 
-    public async Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
+    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
+        => WithPackageManagerAsync (ct, (pm, token) => GetInstallerPreviewCoreAsync (pm, id, version, token));
+
+    private static async Task<InstallerPreview?> GetInstallerPreviewCoreAsync (
+        PackageManager pm,
+        string id,
+        string? version,
+        CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -324,7 +497,7 @@ public sealed class ComBackend : IBackend
             // Explicit version: resolve exactly that. Do NOT fall back to a different version —
             // a fallback would compute the preview from the wrong installer while the confirm
             // dialog still says "Install X <version>".
-            PackageVersionId? vid = FindVersionId (pkg, version);
+            PackageVersionId? vid = FindVersionId (pkg, version, ct);
             versionInfo = vid is null ? null : SafeGetVersionInfo (pkg, vid);
         }
         else
@@ -340,10 +513,18 @@ public sealed class ComBackend : IBackend
 
         try
         {
+            ct.ThrowIfCancellationRequested ();
             // Resolve the installer that *would* be chosen for default options on this machine.
             PackageInstallerInfo installer = versionInfo.GetApplicableInstaller (new InstallOptions ());
 
             if (installer is null)
+            {
+                return null;
+            }
+
+            string? rawVersion = SafeVersion (versionInfo);
+
+            if (!TryExactIdentity (rawVersion, out string? exactVersion))
             {
                 return null;
             }
@@ -354,8 +535,12 @@ public sealed class ComBackend : IBackend
                 Architecture = ArchName (installer.Architecture),
                 Scope = ScopeName (installer.Scope),
                 RequiresElevation = RequiresElevation (installer),
-                Version = SafeVersion (versionInfo)
+                Version = exactVersion
             };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -429,10 +614,19 @@ public sealed class ComBackend : IBackend
     // Writes
     // ------------------------------------------------------------------------
 
-    public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
+    public Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => InstallCoreAsync (pm, id, version, settings, progress, token));
+
+    private static async Task<OpResult> InstallCoreAsync (
+        PackageManager pm,
+        string id,
+        string? version,
+        InstallSettings? settings,
+        IProgress<OpProgress>? progress,
+        CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Install, PackageId = id, Version = version };
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -450,11 +644,11 @@ public sealed class ComBackend : IBackend
 
         if (!string.IsNullOrEmpty (version))
         {
-            PackageVersionId? versionId = FindVersionId (pkg, version);
+            PackageVersionId? versionId = FindVersionId (pkg, version, ct);
 
             if (versionId is null)
             {
-                return Fail (op, $"Version '{version}' is not available for {pkg.Name}.");
+                return Fail (op, $"Version '{version}' is not available for {SimpleText (pkg.Name) ?? id}.");
             }
 
             options.PackageVersionId = versionId;
@@ -462,22 +656,40 @@ public sealed class ComBackend : IBackend
 
         // Set the progress handler on the WinRT op before awaiting; it fires on a COM thread,
         // so the IProgress<> the caller supplies is responsible for marshaling to the UI.
-        var asyncOp = _pm.InstallPackageAsync (pkg, options);
-        asyncOp.Progress = (_, p) => progress?.Report (MapInstall (p));
-        InstallResult result = await asyncOp.AsTask (ct);
+        var asyncOp = pm.InstallPackageAsync (pkg, options);
+        InstallResult result;
+
+        try
+        {
+            asyncOp.Progress = (_, p) => progress?.Report (MapInstall (p));
+            result = await asyncOp.AsTask (ct);
+        }
+        finally
+        {
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
+        }
 
         return result.Status == InstallResultStatus.Ok
-                   ? Ok (op, $"Installed {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}")
+                   ? Ok (op, $"Installed {SimpleText (pkg.Name) ?? id}{(result.RebootRequired ? " (reboot required)" : string.Empty)}")
                    : Fail (op, DescribeInstall ("Install", result));
     }
 
-    public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    public Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => UpgradeCoreAsync (pm, id, progress, token));
+
+    private static async Task<OpResult> UpgradeCoreAsync (
+        PackageManager pm,
+        string id,
+        IProgress<OpProgress>? progress,
+        CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Upgrade, PackageId = id };
 
         // Installed context so the package carries both its installed version and the
         // correlated remote available versions that the upgrade resolves against.
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -490,19 +702,37 @@ public sealed class ComBackend : IBackend
             AcceptPackageAgreements = true
         };
 
-        var asyncOp = _pm.UpgradePackageAsync (pkg, options);
-        asyncOp.Progress = (_, p) => progress?.Report (MapInstall (p));
-        InstallResult result = await asyncOp.AsTask (ct);
+        var asyncOp = pm.UpgradePackageAsync (pkg, options);
+        InstallResult result;
+
+        try
+        {
+            asyncOp.Progress = (_, p) => progress?.Report (MapInstall (p));
+            result = await asyncOp.AsTask (ct);
+        }
+        finally
+        {
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
+        }
 
         return result.Status == InstallResultStatus.Ok
-                   ? Ok (op, $"Upgraded {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}")
+                   ? Ok (op, $"Upgraded {SimpleText (pkg.Name) ?? id}{(result.RebootRequired ? " (reboot required)" : string.Empty)}")
                    : Fail (op, DescribeInstall ("Upgrade", result));
     }
 
-    public async Task<OpResult> UninstallAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    public Task<OpResult> UninstallAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => UninstallCoreAsync (pm, id, progress, token));
+
+    private static async Task<OpResult> UninstallCoreAsync (
+        PackageManager pm,
+        string id,
+        IProgress<OpProgress>? progress,
+        CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Uninstall, PackageId = id };
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -510,19 +740,38 @@ public sealed class ComBackend : IBackend
         }
 
         UninstallOptions options = new () { PackageUninstallMode = PackageUninstallMode.Silent };
-        var asyncOp = _pm.UninstallPackageAsync (pkg, options);
-        asyncOp.Progress = (_, p) => progress?.Report (MapUninstall (p));
-        UninstallResult result = await asyncOp.AsTask (ct);
+        var asyncOp = pm.UninstallPackageAsync (pkg, options);
+        UninstallResult result;
+
+        try
+        {
+            asyncOp.Progress = (_, p) => progress?.Report (MapUninstall (p));
+            result = await asyncOp.AsTask (ct);
+        }
+        finally
+        {
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
+        }
 
         return result.Status == UninstallResultStatus.Ok
-                   ? Ok (op, $"Uninstalled {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}")
+                   ? Ok (op, $"Uninstalled {SimpleText (pkg.Name) ?? id}{(result.RebootRequired ? " (reboot required)" : string.Empty)}")
                    : Fail (op, $"Uninstall failed: {result.Status} (installer 0x{result.UninstallerErrorCode:X}, hr 0x{HResultOf (result.ExtendedErrorCode):X8})");
     }
 
-    public async Task<OpResult> DownloadAsync (string id, string? version, IProgress<OpProgress>? progress, CancellationToken ct)
+    public Task<OpResult> DownloadAsync (string id, string? version, IProgress<OpProgress>? progress, CancellationToken ct)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => DownloadCoreAsync (pm, id, version, progress, token));
+
+    private static async Task<OpResult> DownloadCoreAsync (
+        PackageManager pm,
+        string id,
+        string? version,
+        IProgress<OpProgress>? progress,
+        CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Download, PackageId = id, Version = version };
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -548,33 +797,51 @@ public sealed class ComBackend : IBackend
 
         if (!string.IsNullOrEmpty (version))
         {
-            PackageVersionId? versionId = FindVersionId (pkg, version);
+            PackageVersionId? versionId = FindVersionId (pkg, version, ct);
 
             if (versionId is null)
             {
-                return Fail (op, $"Version '{version}' is not available for {pkg.Name}.");
+                return Fail (op, $"Version '{version}' is not available for {SimpleText (pkg.Name) ?? id}.");
             }
 
             options.PackageVersionId = versionId;
         }
 
-        var asyncOp = _pm.DownloadPackageAsync (pkg, options);
-        asyncOp.Progress = (_, p) => progress?.Report (MapDownload (p));
-        DownloadResult result = await asyncOp.AsTask (ct);
+        var asyncOp = pm.DownloadPackageAsync (pkg, options);
+        DownloadResult result;
+
+        try
+        {
+            asyncOp.Progress = (_, p) => progress?.Report (MapDownload (p));
+            result = await asyncOp.AsTask (ct);
+        }
+        finally
+        {
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
+        }
 
         return result.Status == DownloadResultStatus.Ok
-                   ? Ok (op, $"Downloaded {pkg.Name} to {dir}")
+                   ? Ok (op, $"Downloaded {SimpleText (pkg.Name) ?? id} to {dir}")
                    : Fail (op, $"Download failed: {result.Status} (hr 0x{HResultOf (result.ExtendedErrorCode):X8})");
     }
 
     public bool CanRepair => true;
 
-    public async Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    public Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => RepairCoreAsync (pm, id, progress, token));
+
+    private static async Task<OpResult> RepairCoreAsync (
+        PackageManager pm,
+        string id,
+        IProgress<OpProgress>? progress,
+        CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Repair, PackageId = id };
 
         // Installed context so the package carries the installed version that repair targets.
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -583,16 +850,27 @@ public sealed class ComBackend : IBackend
 
         RepairOptions options = new () { PackageRepairMode = PackageRepairMode.Silent };
 
-        var asyncOp = _pm.RepairPackageAsync (pkg, options);
-        asyncOp.Progress = (_, p) => progress?.Report (MapRepair (p));
-        RepairResult result = await asyncOp.AsTask (ct);
+        var asyncOp = pm.RepairPackageAsync (pkg, options);
+        RepairResult result;
+
+        try
+        {
+            asyncOp.Progress = (_, p) => progress?.Report (MapRepair (p));
+            result = await asyncOp.AsTask (ct);
+        }
+        finally
+        {
+            BestEffortCleanup.Run (
+                () => asyncOp.Progress = null,
+                () => GC.KeepAlive (asyncOp));
+        }
 
         if (result.Status == RepairResultStatus.Ok)
         {
-            return Ok (op, $"Repaired {pkg.Name}{(result.RebootRequired ? " (reboot required)" : string.Empty)}");
+            return Ok (op, $"Repaired {SimpleText (pkg.Name) ?? id}{(result.RebootRequired ? " (reboot required)" : string.Empty)}");
         }
 
-        return Fail (op, RepairFailureMessage (pkg.Name, result));
+        return Fail (op, RepairFailureMessage (SimpleText (pkg.Name) ?? id, result));
     }
 
     // The COM API reports "this package can't be repaired" in two ways: as the dedicated
@@ -619,9 +897,12 @@ public sealed class ComBackend : IBackend
         };
     }
 
-    public async Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct)
+    public Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct)
+        => WithPackageManagerAsync (ct, (pm, token) => VerifyInstalledCoreAsync (pm, id, token));
+
+    private static async Task<InstallVerification?> VerifyInstalledCoreAsync (PackageManager pm, string id, CancellationToken ct)
     {
-        CatalogPackage? pkg = await FindByIdAsync (id, null, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: true, ct);
 
         if (pkg is null)
         {
@@ -635,6 +916,10 @@ public sealed class ComBackend : IBackend
         try
         {
             result = await pkg.CheckInstalledStatusAsync (InstalledStatusType.AllChecks).AsTask (ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -656,74 +941,114 @@ public sealed class ComBackend : IBackend
             // pass — rather than flagging the package because some *other* manifest installer (which
             // was never installed) didn't match. (The old code flattened all installers and reported
             // Issues if any one check failed, so multi-installer packages always looked corrupt.)
-            // Track each installer's checks plus whether any of its entries couldn't be read, so a
-            // "best" installer whose only failure is an unreadable entry reports Error ("couldn't
-            // verify"), not Issues ("may be corrupt").
-            List<(List<VerifyCheck> Checks, bool ReadError)> perInstaller = [];
-            bool hadReadError = false;
+            // Track whether every installer and status entry was observed. Partial data cannot
+            // choose a trustworthy "best" installer unless another fully observed installer has
+            // already proved the package healthy.
+            List<VerificationCandidate> perInstaller = [];
+            CollectionBudget verificationBudget = new (BackendLimits.VerificationItems);
+            CharacterBudget verificationCharacters = new (BackendLimits.VerificationCharacters);
+            int projectedInstallerCount = result.PackageInstalledStatus.Count;
+            int requestedInstallerCount = Math.Min (
+                projectedInstallerCount,
+                BackendLimits.VerificationInstallers);
+            CollectionTake installerTake = verificationBudget.TakeBounded (requestedInstallerCount);
+            bool externalIncomplete = projectedInstallerCount > requestedInstallerCount || !installerTake.Complete;
 
             // Two nested projected vectors — indexed via Materialize (AOT rule).
-            foreach (PackageInstallerInstalledStatus installer in Materialize (result.PackageInstalledStatus))
+            foreach (PackageInstallerInstalledStatus installer in Materialize (
+                         result.PackageInstalledStatus,
+                         installerTake.Count,
+                         ct))
             {
+                ct.ThrowIfCancellationRequested ();
                 IReadOnlyList<InstalledStatus> entries;
+                CollectionTake entryTake;
 
                 try
                 {
-                    entries = Materialize (installer.InstallerInstalledStatus);
+                    entryTake = verificationBudget.TakeBounded (installer.InstallerInstalledStatus.Count);
+                    entries = Materialize (
+                        installer.InstallerInstalledStatus,
+                        entryTake.Count,
+                        ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch
                 {
-                    hadReadError = true;
+                    externalIncomplete = true;
 
                     continue;
                 }
 
                 List<VerifyCheck> checks = [];
-                bool readError = false;
+                bool complete = entryTake.Complete;
 
                 foreach (InstalledStatus entry in entries)
                 {
+                    ct.ThrowIfCancellationRequested ();
+
+                    if (verificationCharacters.Remaining == 0)
+                    {
+                        complete = false;
+                        break;
+                    }
+
                     try
                     {
                         // HRESULT projects to an Exception: null means S_OK (the check passed).
                         bool ok = entry.Status is null;
                         string? path = NullIfEmpty (entry.Path);
-                        checks.Add (new (StatusTypeName (entry.Type), ok, ok ? path : Coalesce (path, $"hr 0x{HResultOf (entry.Status):X8}")));
+                        string label = verificationCharacters.TakeDisplay (
+                                           StatusTypeName (entry.Type),
+                                           BackendLimits.SimpleTextCharacters)
+                                       ?? string.Empty;
+                        string? detail = verificationCharacters.TakeDisplay (
+                            ok ? path : Coalesce (path, $"hr 0x{HResultOf (entry.Status):X8}"),
+                            BackendLimits.SimpleTextCharacters);
+                        checks.Add (new (
+                            label,
+                            ok,
+                            detail));
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
                     }
                     catch
                     {
                         // Couldn't read this check (bad HRESULT projecting the entry). Record it as a
-                        // FAILING check AND flag the installer's data as incomplete — so the package
-                        // isn't reported Ok on partial data, and a best installer whose failures are
-                        // *only* read errors reports Error ("couldn't verify"), not Issues.
-                        readError = true;
-                        hadReadError = true;
-                        checks.Add (new ("Status check", false, "could not read installed-status entry"));
+                        // failing display row and mark the installer incomplete. The evaluator then
+                        // returns Error unless another fully observed installer independently passes.
+                        complete = false;
+                        string label = verificationCharacters.TakeDisplay (
+                                           "Status check",
+                                           BackendLimits.SimpleTextCharacters)
+                                       ?? string.Empty;
+                        string? detail = verificationCharacters.TakeDisplay (
+                            "could not read installed-status entry",
+                            BackendLimits.SimpleTextCharacters);
+                        checks.Add (new (label, false, detail));
                     }
                 }
 
-                if (checks.Count > 0)
+                if (checks.Count > 0 || !complete)
                 {
-                    perInstaller.Add ((checks, readError));
+                    perInstaller.Add (new (checks, complete));
                 }
             }
 
-            if (perInstaller.Count == 0)
-            {
-                // No installer yielded a readable check: can't honestly verify if a read errored.
-                return new () { Outcome = hadReadError ? VerifyOutcome.Error : VerifyOutcome.NotApplicable };
-            }
-
-            // Best-matching installer = the one with the fewest failing checks. All pass → installed
-            // correctly (show its clean checks). Otherwise, if its data was incomplete (a read error)
-            // we can't honestly call it corrupt → Error; a genuine failing check → Issues.
-            (List<VerifyCheck> Checks, bool ReadError) best = perInstaller.OrderBy (x => x.Checks.Count (c => !c.Ok)).First ();
-
-            VerifyOutcome outcome = best.Checks.TrueForAll (c => c.Ok) ? VerifyOutcome.Ok
-                                    : best.ReadError ? VerifyOutcome.Error
-                                    : VerifyOutcome.Issues;
-
-            return new () { Outcome = outcome, Checks = best.Checks };
+            // A complete passing installer still proves health under WinGet's any-installer
+            // semantics. Without one, omitted/read-failed/truncated data could change which
+            // installer is the best match and therefore must not produce a definitive result.
+            VerificationDecision decision = VerificationEvaluator.Decide (perInstaller, externalIncomplete);
+            return new () { Outcome = decision.Outcome, Checks = decision.Checks };
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -744,10 +1069,15 @@ public sealed class ComBackend : IBackend
         };
 
     /// <summary>Read a projected string vector into a managed list (indexed, guarded), or null if empty/unreadable.</summary>
-    private static IReadOnlyList<string>? StringVector (Func<IReadOnlyList<string>?> get)
+    private static IReadOnlyList<string>? StringVector (
+        Func<IReadOnlyList<string>?> get,
+        CollectionBudget itemBudget,
+        CharacterBudget characterBudget,
+        CancellationToken ct)
     {
         try
         {
+            ct.ThrowIfCancellationRequested ();
             IReadOnlyList<string>? projected = get ();
 
             if (projected is null)
@@ -757,15 +1087,30 @@ public sealed class ComBackend : IBackend
 
             List<string> list = [];
 
-            foreach (string s in Materialize (projected))
+            foreach (string s in Materialize (projected, itemBudget.Take (projected.Count), ct))
             {
-                if (!string.IsNullOrWhiteSpace (s))
+                ct.ThrowIfCancellationRequested ();
+
+                if (characterBudget.Remaining == 0)
                 {
-                    list.Add (s);
+                    break;
+                }
+
+                string? bounded = characterBudget.TakeDisplay (
+                    NullIfEmpty (s),
+                    BackendLimits.SimpleTextCharacters);
+
+                if (bounded is not null)
+                {
+                    list.Add (bounded);
                 }
             }
 
             return list.Count > 0 ? list : null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -773,7 +1118,11 @@ public sealed class ComBackend : IBackend
         }
     }
 
-    private static IReadOnlyList<DocLink>? DocLinks (CatalogPackageMetadata? meta)
+    private static IReadOnlyList<DocLink>? DocLinks (
+        CatalogPackageMetadata? meta,
+        CollectionBudget itemBudget,
+        CharacterBudget characterBudget,
+        CancellationToken ct)
     {
         if (meta is null)
         {
@@ -782,18 +1131,44 @@ public sealed class ComBackend : IBackend
 
         try
         {
+            ct.ThrowIfCancellationRequested ();
             List<DocLink> links = [];
 
-            foreach (Documentation d in Materialize (meta.Documentations))
+            foreach (Documentation d in Materialize (
+                         meta.Documentations,
+                         itemBudget.Take (meta.Documentations.Count),
+                         ct))
             {
+                ct.ThrowIfCancellationRequested ();
+
+                if (characterBudget.Remaining == 0)
+                {
+                    break;
+                }
+
                 try
                 {
-                    string url = d.DocumentUrl;
+                    // The URL is what the row activates, so it is reserved whole or the entry is
+                    // skipped. Omission charges nothing, leaving room for a later shorter link.
+                    string? url = characterBudget.TakeExactOrOmit (
+                        NullIfEmpty (d.DocumentUrl),
+                        BackendLimits.SimpleTextCharacters);
 
-                    if (!string.IsNullOrWhiteSpace (url))
+                    if (url is not null)
                     {
-                        links.Add (new (string.IsNullOrWhiteSpace (d.DocumentLabel) ? "Documentation" : d.DocumentLabel, url));
+                        // The label is display-only and may be shortened.
+                        string label = characterBudget.TakeDisplay (
+                                           string.IsNullOrWhiteSpace (d.DocumentLabel)
+                                               ? "Documentation"
+                                               : d.DocumentLabel,
+                                           BackendLimits.SimpleTextCharacters)
+                                       ?? string.Empty;
+                        links.Add (new (label, url));
                     }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch
                 {
@@ -802,6 +1177,10 @@ public sealed class ComBackend : IBackend
             }
 
             return links.Count > 0 ? links : null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -869,13 +1248,17 @@ public sealed class ComBackend : IBackend
     public Task<IReadOnlyDictionary<string, PinState>> ListPinsAsync (CancellationToken ct) => _cliForPins.ListPinsAsync (ct);
 
     public Task<string> DescribeAsync (CancellationToken ct)
+        => WithPackageManagerAsync (ct, DescribeCoreAsync);
+
+    private static Task<string> DescribeCoreAsync (PackageManager pm, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         string version;
 
         try
         {
             // PackageManager.Version (contract 13) — the running WinGet COM server version.
-            version = NullIfEmpty (_pm.Version) ?? "unknown version";
+            version = SimpleText (NullIfEmpty (pm.Version)) ?? "unknown version";
         }
         catch
         {
@@ -896,13 +1279,14 @@ public sealed class ComBackend : IBackend
     /// configured source (winget, msstore, and any custom REST sources) via GetPackageCatalogs,
     /// rather than the hard-coded pair — so enterprise/custom sources are included automatically.
     /// </summary>
-    private List<PackageCatalogReference> RemoteRefs (string? source)
+    private static List<PackageCatalogReference> RemoteRefs (PackageManager pm, string? source, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         List<PackageCatalogReference> refs = [];
 
         if (!string.IsNullOrEmpty (source))
         {
-            PackageCatalogReference? r = _pm.GetPackageCatalogByName (source);
+            PackageCatalogReference? r = pm.GetPackageCatalogByName (source);
 
             if (r is not null)
             {
@@ -919,11 +1303,16 @@ public sealed class ComBackend : IBackend
         // implicit local "installed" catalog, which the composite adds on its own).
         try
         {
-            foreach (PackageCatalogReference r in Materialize (_pm.GetPackageCatalogs ()))
+            foreach (PackageCatalogReference r in Materialize (pm.GetPackageCatalogs (), BackendLimits.Catalogs, ct))
             {
+                ct.ThrowIfCancellationRequested ();
                 r.AcceptSourceAgreements = true;
                 refs.Add (r);
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -931,7 +1320,8 @@ public sealed class ComBackend : IBackend
             // common case still works.
             foreach (string name in (string [])["winget", "msstore"])
             {
-                PackageCatalogReference? r = _pm.GetPackageCatalogByName (name);
+                ct.ThrowIfCancellationRequested ();
+                PackageCatalogReference? r = pm.GetPackageCatalogByName (name);
 
                 if (r is not null)
                 {
@@ -945,27 +1335,46 @@ public sealed class ComBackend : IBackend
     }
 
     public Task<IReadOnlyList<string>> ListSourcesAsync (CancellationToken ct)
+        => WithPackageManagerAsync (ct, ListSourcesCoreAsync);
+
+    private static Task<IReadOnlyList<string>> ListSourcesCoreAsync (PackageManager pm, CancellationToken ct)
     {
+        ct.ThrowIfCancellationRequested ();
         List<string> names = [];
+        CharacterBudget characters = new (BackendLimits.SourceResultCharacters);
 
         try
         {
-            foreach (PackageCatalogReference r in Materialize (_pm.GetPackageCatalogs ()))
+            foreach (PackageCatalogReference r in Materialize (pm.GetPackageCatalogs (), BackendLimits.Catalogs, ct))
             {
+                ct.ThrowIfCancellationRequested ();
                 try
                 {
-                    string? name = NullIfEmpty (r.Info?.Name);
+                    string? name = ExactIdentity (r.Info?.Name);
 
                     if (name is not null)
                     {
-                        names.Add (name);
+                        if (!characters.TryTakeExact (name, out string? accepted))
+                        {
+                            break;
+                        }
+
+                        names.Add (accepted!);
                     }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
                 }
                 catch
                 {
                     // Skip a catalog whose Info/Name read threw rather than dropping the whole list.
                 }
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -980,16 +1389,21 @@ public sealed class ComBackend : IBackend
     /// catalog is implicit in every composite; <paramref name="behavior"/> selects which side
     /// queries return.
     /// </summary>
-    private PackageCatalogReference CompositeRef (List<PackageCatalogReference> refs, CompositeSearchBehavior behavior)
+    private static PackageCatalogReference CompositeRef (
+        PackageManager pm,
+        List<PackageCatalogReference> refs,
+        CompositeSearchBehavior behavior,
+        CancellationToken ct)
     {
         CreateCompositePackageCatalogOptions opts = new () { CompositeSearchBehavior = behavior };
 
         foreach (PackageCatalogReference r in refs)
         {
+            ct.ThrowIfCancellationRequested ();
             opts.Catalogs.Add (r);
         }
 
-        return _pm.CreateCompositePackageCatalog (opts);
+        return pm.CreateCompositePackageCatalog (opts);
     }
 
     private static async Task<PackageCatalog> ConnectAsync (PackageCatalogReference reference, CancellationToken ct)
@@ -1010,15 +1424,17 @@ public sealed class ComBackend : IBackend
     }
 
     /// <summary>Find a single package by exact (case-insensitive) id.</summary>
-    private async Task<CatalogPackage?> FindByIdAsync (string id, string? source, bool installedContext, CancellationToken ct)
+    private static async Task<CatalogPackage?> FindByIdAsync (PackageManager pm, string id, string? source, bool installedContext, CancellationToken ct)
     {
         PackageCatalog catalog = await ConnectAsync (
             CompositeRef (
-                RemoteRefs (source),
-                installedContext ? CompositeSearchBehavior.LocalCatalogs : CompositeSearchBehavior.RemotePackagesFromRemoteCatalogs),
+                pm,
+                RemoteRefs (pm, source, ct),
+                installedContext ? CompositeSearchBehavior.LocalCatalogs : CompositeSearchBehavior.RemotePackagesFromRemoteCatalogs,
+                ct),
             ct);
 
-        FindPackagesOptions opts = new ();
+        FindPackagesOptions opts = new () { ResultLimit = 1 };
         opts.Filters.Add (new ()
         {
             Field = PackageMatchField.Id,
@@ -1027,22 +1443,27 @@ public sealed class ComBackend : IBackend
         });
 
         FindPackagesResult result = await catalog.FindPackagesAsync (opts).AsTask (ct);
-        List<MatchResult> matches = Materialize (result.Matches);
+        List<MatchResult> matches = Materialize (result.Matches, 1, ct);
 
         return matches.Count > 0 ? matches [0].CatalogPackage : null;
     }
 
-    private static PackageVersionId? FindVersionId (CatalogPackage pkg, string version)
+    private static PackageVersionId? FindVersionId (CatalogPackage pkg, string version, CancellationToken ct)
     {
         try
         {
-            foreach (PackageVersionId vid in Materialize (pkg.AvailableVersions))
+            foreach (PackageVersionId vid in Materialize (pkg.AvailableVersions, BackendLimits.Versions, ct))
             {
+                ct.ThrowIfCancellationRequested ();
                 if (string.Equals (vid.Version, version, StringComparison.OrdinalIgnoreCase))
                 {
                     return vid;
                 }
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch
         {
@@ -1173,18 +1594,11 @@ public sealed class ComBackend : IBackend
     /// This is the AOT-safe substitute for enumerating the projection directly (see the file
     /// header). Callers may then foreach/LINQ the returned managed copy freely.
     /// </summary>
-    private static List<T> Materialize<T> (IReadOnlyList<T> projected)
-    {
-        int count = projected.Count;
-        List<T> copy = new (count);
-
-        for (int i = 0; i < count; i++)
-        {
-            copy.Add (projected [i]);
-        }
-
-        return copy;
-    }
+    private static List<T> Materialize<T> (
+        IReadOnlyList<T> projected,
+        int maximum,
+        CancellationToken ct)
+        => BackendLimits.Materialize (projected, maximum, ct);
 
     /// <summary>Map the WinGet install/upgrade progress struct onto the backend-agnostic model.</summary>
     private static OpProgress MapInstall (InstallProgress p)
@@ -1265,5 +1679,12 @@ public sealed class ComBackend : IBackend
     private static string? NullIfEmpty (string? value) => string.IsNullOrWhiteSpace (value) ? null : value;
 
     private static string? Coalesce (string? a, string? b) => NullIfEmpty (a) ?? NullIfEmpty (b);
+
+    private static string? SimpleText (string? value) => BackendLimits.SimpleText (value);
+
+    private static string? ExactIdentity (string? value) => BackendLimits.ExactIdentity (value);
+
+    private static bool TryExactIdentity (string? value, out string? exact)
+        => BackendLimits.TryExactIdentity (value, out exact);
 }
 #endif

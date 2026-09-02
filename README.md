@@ -187,6 +187,10 @@ winget-tui-sharp.exe --theme=amber
 dotnet test --project tests/WingetTuiSharp.Tests.csproj
 ```
 
+The repository uses Microsoft.Testing.Platform through `global.json`, so the test project must
+be supplied with `--project` rather than as a positional argument. IDE test discovery requires
+Microsoft.Testing.Platform support.
+
 The xUnit suite under `tests/` covers:
 
 - **Parser pipeline** - table parsing, ANSI/CR handling, display-width column slicing for
@@ -215,7 +219,7 @@ The xUnit suite under `tests/` covers:
   messages (up-to-date / no pinned / no unpinned / no filter match).
 
 Every test is anchored to a real bug found during development or a Terminal.Gui surface
-we depend on; **109 tests**, runs in <1 second.
+we depend on; **245+ tests** run across the cross-platform and Windows CI jobs.
 
 ### Diagnose winget parser issues at runtime
 

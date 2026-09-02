@@ -12,6 +12,40 @@ namespace WingetTuiSharp.Tests;
 /// </summary>
 public class ParserTests
 {
+    [Fact]
+    public void ParseSearchTable_CapsRowsAtSharedSearchLimit ()
+    {
+        StringBuilder output = new ();
+        output.AppendLine ($"{"Name",-16}{"Id",-24}{"Version",-10}Source");
+        output.AppendLine (new string ('-', 58));
+
+        // A duplicate-heavy prefix must not consume the unique-result budget. The later duplicate
+        // also has a newer version, proving the normal duplicate preference still runs before cap.
+        for (int i = 0; i < 100; i++)
+        {
+            output.AppendLine ($"{"Duplicate",-16}{"Example.Duplicate",-24}{"1.0",-10}winget");
+        }
+
+        output.AppendLine ($"{"Duplicate",-16}{"Example.Duplicate",-24}{"2.0",-10}winget");
+
+        for (int i = 0; i < AppState.SearchResultLimit + 25; i++)
+        {
+            output.AppendLine ($"{$"Package{i}",-16}{$"Example.Package{i}",-24}{"1.0",-10}winget");
+        }
+
+        // Even after the unique-row ceiling is full, parsing must keep scanning for duplicate
+        // replacements of an identity that was retained earlier.
+        output.AppendLine ($"{"Duplicate",-16}{"Example.Duplicate",-24}{"3.0",-10}winget");
+
+        IReadOnlyList<Package> rows = CliBackend.ParseSearchTable (output.ToString ());
+
+        Assert.Equal (AppState.SearchResultLimit, rows.Count);
+        Assert.Equal ("Example.Duplicate", rows [0].Id);
+        Assert.Equal ("3.0", rows [0].Version);
+        Assert.Equal ("Example.Package0", rows [1].Id);
+        Assert.Equal ($"Example.Package{AppState.SearchResultLimit - 2}", rows [^1].Id);
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // ParseTable — the core table parser
     // ──────────────────────────────────────────────────────────────────────

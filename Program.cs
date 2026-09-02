@@ -18,11 +18,34 @@ if (args.Length > 0 && args [0] is "--dump")
     Console.WriteLine ($"Console.OutputEncoding: {Console.OutputEncoding.WebName}");
     Console.WriteLine ();
 
-    (int code, string output) = await CliBackend.RunWithCodeAsync (cmd, CancellationToken.None);
+    ProcessRunner.RunResult dumpResult = await CliBackend.RunDetailedWithCodeAsync (
+                                               cmd,
+                                               "winget",
+                                               TimeSpan.FromMinutes (2),
+                                               CancellationToken.None);
+    int code = dumpResult.Code;
+    string output = dumpResult.Output;
     Console.WriteLine ($"--- exit code: {code}");
     Console.WriteLine ($"--- output length: {output.Length} chars");
+    Console.WriteLine ($"--- output complete: {dumpResult.OutputComplete}");
+
+    if (!dumpResult.OutputComplete)
+    {
+        Console.WriteLine (
+            $"--- incomplete reasons: stdout-truncated={dumpResult.StdoutTruncated}, "
+            + $"stderr-truncated={dumpResult.StderrTruncated}, cleanup-incomplete={dumpResult.CleanupIncomplete}");
+    }
+
     Console.WriteLine ("--- output:");
     Console.WriteLine (output);
+
+    if (!dumpResult.OutputComplete)
+    {
+        Console.WriteLine ("--- parser skipped: incomplete bounded output cannot be parsed safely");
+
+        return;
+    }
+
     Console.WriteLine ("--- parser trace:");
 
     if (cmd [0] == "show")
@@ -113,6 +136,7 @@ if (args.Length > 0 && args [0] is "--comdiag")
 // These are preferences, not hard guarantees: a requested backend that can't run degrades
 // (with a stderr note) — --com on a non-Windows build → CLI, and any CLI path with no winget
 // on PATH → mock. Scripts that need a guaranteed backend should check that note.
+bool smokeMode = args.Any (a => a == "--smoke");
 IBackend backend = SelectBackend (args);
 
 // Theme selection: --theme=<amber|sage|moss|rose>. Defaults to Sage. An unrecognized id
@@ -132,17 +156,98 @@ if (themeArg is null || !Theme.TryApply (themeArg))
     Theme.Register ();
 }
 
-IApplication app = Application.Create ().Init ();
-App window = new (backend);
-app.Run (window);
-window.Dispose ();
-app.Dispose ();
+IApplication? app = null;
+App? window = null;
+int exitCode = 0;
+
+try
+{
+    // Assign before Init so a partially-initialized terminal still reaches the finally below.
+    // Init is what puts the terminal into raw mode and the alternate screen; if it throws
+    // midway, only Dispose can put it back.
+    app = Application.Create ();
+    app.Init ();
+    window = new (backend, smokeMode ? TimeSpan.FromSeconds (1) : null);
+    app.Run (window);
+}
+catch (Exception ex)
+{
+    Console.Error.WriteLine ($"Application failed: {ex.Message}");
+    exitCode = 1;
+}
+finally
+{
+    if (window is not null)
+    {
+        try
+        {
+            // Application.Run installs a UI synchronization context that is no longer pumped once
+            // Run returns. Block on the context-free shutdown task on this original thread instead
+            // of awaiting a continuation that could be posted to that stopped context.
+            bool drained = window.ShutdownAsync (TimeSpan.FromSeconds (5))
+                                 .ConfigureAwait (false)
+                                 .GetAwaiter ()
+                                 .GetResult ();
+
+            if (!drained)
+            {
+                Console.Error.WriteLine ("Shutdown timed out while waiting for background work.");
+                exitCode = 1;
+            }
+
+            if (window.BackgroundFailures.Count > 0 || window.DroppedBackgroundFailureCount > 0)
+            {
+                Console.Error.WriteLine (
+                    $"Background work failed {window.BackgroundFailures.Count + window.DroppedBackgroundFailureCount} time(s)." +
+                    (window.DroppedBackgroundFailureCount > 0
+                         ? $" {window.DroppedBackgroundFailureCount} additional failure(s) were not retained."
+                         : string.Empty));
+
+                foreach (Exception failure in window.BackgroundFailures)
+                {
+                    Console.Error.WriteLine ($"- {failure.GetType ().Name}: {failure.Message}");
+                }
+
+                exitCode = 1;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine ($"Shutdown failed: {ex.Message}");
+            exitCode = 1;
+        }
+
+        // A failed window disposal must not skip the application's own Terminal.Gui teardown,
+        // which is what restores the terminal (raw mode, alternate screen, cursor).
+        try
+        {
+            window.Dispose ();
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine ($"Window disposal failed: {ex.Message}");
+            exitCode = 1;
+        }
+    }
+
+    try
+    {
+        app?.Dispose ();
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine ($"Application disposal failed: {ex.Message}");
+        exitCode = 1;
+    }
+}
+
+Environment.ExitCode = exitCode;
 
 return;
 
 static IBackend SelectBackend (string [] args)
 {
-    bool wantMock = args.Any (a => a is "--mock" or "-m");
+    bool wantMock = args.Any (a => a is "--mock" or "-m" or "--smoke");
     bool wantCli = args.Any (a => a is "--cli");
     bool wantCom = args.Any (a => a is "--com");
 
@@ -199,22 +304,11 @@ static bool IsWingetAvailable ()
 {
     try
     {
-        using System.Diagnostics.Process p = new ()
-        {
-            StartInfo = new ()
-            {
-                FileName = "winget",
-                Arguments = "--version",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        p.Start ();
-        p.WaitForExit (1500);
+        (int code, _) = CliBackend.ProbeWingetAsync (TimeSpan.FromMilliseconds (1500), CancellationToken.None)
+                                  .GetAwaiter ()
+                                  .GetResult ();
 
-        return p.HasExited && p.ExitCode == 0;
+        return code == 0;
     }
     catch
     {

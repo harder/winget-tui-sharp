@@ -1,7 +1,5 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
-using Process = System.Diagnostics.Process;
-using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
 
 namespace WingetTuiSharp;
 
@@ -16,7 +14,7 @@ public sealed partial class CliBackend : IBackend
     {
         string output = await RunAsync (SearchArgs (query, source), ct);
 
-        return ParseTable (output, hasAvailable: false);
+        return ParseSearchTable (output);
     }
 
     public async Task<IReadOnlyList<Package>> ListInstalledAsync (string? source, CancellationToken ct)
@@ -45,6 +43,15 @@ public sealed partial class CliBackend : IBackend
             IReadOnlyList<string> names = ParseSourceNames (output);
 
             return names.Count > 0 ? names : ["winget", "msstore"];
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (BoundedOutputException)
+        {
+            // Partial source output must never be treated as a complete source snapshot.
+            throw;
         }
         catch
         {
@@ -324,6 +331,10 @@ public sealed partial class CliBackend : IBackend
 
             return string.IsNullOrEmpty (version) ? "CLI · winget" : $"CLI · winget {version}";
         }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
         catch
         {
             return "CLI · winget";
@@ -457,11 +468,61 @@ public sealed partial class CliBackend : IBackend
         return PinState.Unpinned;
     }
 
-    private static async Task<string> RunAsync (IReadOnlyList<string> args, CancellationToken ct)
-    {
-        (int _, string output) = await RunWithCodeAsync (args, ct);
+    private static Task<string> RunAsync (IReadOnlyList<string> args, CancellationToken ct) =>
+        RunParsedAsync (args, "winget", CommandTimeout (args), static output => output, ct);
 
-        return output;
+    internal static Task<T> RunParsedForTestAsync<T> (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        Func<string, T> parser,
+        CancellationToken ct) =>
+        RunParsedAsync (args, executable, timeout, parser, ct);
+
+    private static async Task<T> RunParsedAsync<T> (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        Func<string, T> parser,
+        CancellationToken ct)
+    {
+        ProcessRunner.RunResult result = await RunDetailedWithCodeAsync (args, executable, timeout, ct);
+        EnsureCompleteForParsing (result, executable, args);
+
+        return parser (result.Output);
+    }
+
+    internal static void EnsureCompleteForParsing (
+        ProcessRunner.RunResult result,
+        string executable,
+        IReadOnlyList<string> args)
+    {
+        if (result.OutputComplete)
+        {
+            return;
+        }
+
+        string command = args.Count == 0 ? executable : $"{executable} {args [0]}";
+        List<string> reasons = [];
+
+        if (result.StdoutTruncated)
+        {
+            reasons.Add ("stdout exceeded the bounded capture limit");
+        }
+
+        if (result.StderrTruncated)
+        {
+            reasons.Add ("stderr exceeded the bounded capture limit");
+        }
+
+        if (result.CleanupIncomplete)
+        {
+            reasons.Add ("output cleanup did not complete");
+        }
+
+        throw new BoundedOutputException (
+            $"Cannot parse incomplete output from '{command}': {string.Join ("; ", reasons)}. "
+            + $"Refine the request or run {executable} directly for the complete result.");
     }
 
     /// <summary>
@@ -527,38 +588,40 @@ public sealed partial class CliBackend : IBackend
         return names;
     }
 
-    public static async Task<(int Code, string Output)> RunWithCodeAsync (IReadOnlyList<string> args, CancellationToken ct)
+    public static Task<(int Code, string Output)> RunWithCodeAsync (IReadOnlyList<string> args, CancellationToken ct)
+        => RunWithCodeAsync (args, "winget", CommandTimeout (args), ct);
+
+    /// <summary>
+    /// Test/startup seam for selecting the executable and deadline. Production callers use the
+    /// public overload above, which remains hardcoded to winget.
+    /// </summary>
+    internal static Task<(int Code, string Output)> RunWithCodeAsync (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        CancellationToken ct)
+        => ProcessRunner.RunAsync (executable, args, ResolveEncoding (), timeout, ct);
+
+    internal static Task<ProcessRunner.RunResult> RunDetailedWithCodeAsync (
+        IReadOnlyList<string> args,
+        string executable,
+        TimeSpan timeout,
+        CancellationToken ct)
+        => ProcessRunner.RunDetailedAsync (executable, args, ResolveEncoding (), timeout, ct);
+
+    internal static Task<(int Code, string Output)> ProbeWingetAsync (TimeSpan timeout, CancellationToken ct)
+        => RunWithCodeAsync (["--version"], "winget", timeout, ct);
+
+    private static TimeSpan CommandTimeout (IReadOnlyList<string> args)
     {
-        ProcessStartInfo psi = new ()
-        {
-            FileName = "winget",
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
+        string command = args.Count > 0 ? args [0] : string.Empty;
 
-            // Don't force UTF-8. Modern winget on a UTF-8 codepage (chcp 65001) emits UTF-8;
-            // on the default English Windows codepage it emits the active OEM codepage. Letting
-            // .NET pick `Console.OutputEncoding` matches what the user would see if they ran
-            // winget in the same shell. Override via WINGETTUI_ENCODING if it's wrong.
-            StandardOutputEncoding = ResolveEncoding ()
-        };
+        bool isMutation = command is "install" or "download" or "uninstall" or "upgrade"
+                          || command == "pin" && (args.Count < 2 || args [1] != "list");
 
-        foreach (string a in args)
-        {
-            psi.ArgumentList.Add (a);
-        }
-
-        using Process p = new () { StartInfo = psi };
-        p.Start ();
-
-        Task<string> stdout = p.StandardOutput.ReadToEndAsync (ct);
-        Task<string> stderr = p.StandardError.ReadToEndAsync (ct);
-        await p.WaitForExitAsync (ct);
-
-        string combined = await stdout + await stderr;
-
-        return (p.ExitCode, combined);
+        return isMutation
+                   ? TimeSpan.FromMinutes (30)
+                   : TimeSpan.FromMinutes (2);
     }
 
     private static Encoding ResolveEncoding ()
@@ -588,6 +651,9 @@ public sealed partial class CliBackend : IBackend
     /// which filter caused each skipped row. Used by Program.cs --dump.
     /// </summary>
     public static IReadOnlyList<Package> ParseTableTraced (string output, bool hasAvailable, TextWriter trace)
+        => ParseTableTraced (output, hasAvailable, trace, int.MaxValue);
+
+    private static IReadOnlyList<Package> ParseTableTraced (string output, bool hasAvailable, TextWriter trace, int maxRows)
     {
         output = StripAnsi (output);
         string [] lines = SplitLines (output);
@@ -599,36 +665,52 @@ public sealed partial class CliBackend : IBackend
         // than special-casing only a single secondary table. Mirrors upstream
         // shanselman/winget-tui#393 ("fix: restore MSRV and multi-table parsing"), which
         // generalized the old two-table-only handling the same way.
-        List<Package> rows = [];
+        BoundedPackageDeduper rows = new (maxRows);
         int nextTableStart = 0;
         int tableIndex = 0;
 
         while (nextTableStart >= 0 && nextTableStart < lines.Length)
         {
-            List<Package> tableRows = ParseOneTable (lines, nextTableStart, hasAvailable, trace, out int afterFooter);
+            int parsedRows = ParseOneTable (
+                lines,
+                nextTableStart,
+                hasAvailable,
+                trace,
+                rows.Consider,
+                out int afterFooter);
 
-            if (tableRows.Count > 0)
+            if (parsedRows > 0)
             {
-                trace.WriteLine ($"[parse] table #{tableIndex} contributed {tableRows.Count} rows");
-                rows.AddRange (tableRows);
+                trace.WriteLine ($"[parse] table #{tableIndex} parsed {parsedRows} rows");
             }
 
             nextTableStart = afterFooter;
             tableIndex++;
         }
 
-        rows = DedupePackages (rows);
-        trace.WriteLine ($"[parse] returned {rows.Count} rows (after dedupe)");
+        if (rows.ReachedLimit)
+        {
+            trace.WriteLine ($"[parse] retained configured unique-row limit ({maxRows}) while continuing to scan duplicates");
+        }
 
-        return rows;
+        trace.WriteLine ($"[parse] returned {rows.Count} rows (after dedupe and limit)");
+
+        return rows.Rows;
     }
 
     /// <summary>
-    /// Parses one table starting at or after the given line index. Returns the rows it
-    /// extracted and, via <paramref name="nextLineAfterFooter"/>, the line index immediately
-    /// after the footer (or <c>-1</c> if no footer was encountered).
+    /// Parses one table starting at or after the given line index, passes each valid row to
+    /// <paramref name="acceptRow"/>, and returns the number parsed. Via
+    /// <paramref name="nextLineAfterFooter"/>, also returns the line index immediately after the
+    /// footer (or <c>-1</c> if no footer was encountered).
     /// </summary>
-    private static List<Package> ParseOneTable (string [] lines, int startIdx, bool hasAvailable, TextWriter trace, out int nextLineAfterFooter)
+    private static int ParseOneTable (
+        string [] lines,
+        int startIdx,
+        bool hasAvailable,
+        TextWriter trace,
+        Action<Package> acceptRow,
+        out int nextLineAfterFooter)
     {
         nextLineAfterFooter = -1;
         int sepIdx = -1;
@@ -653,7 +735,7 @@ public sealed partial class CliBackend : IBackend
                 trace.WriteLine ("[parse] FAIL: no dash separator found");
             }
 
-            return [];
+            return 0;
         }
 
         string headerLine = StripControl (lines [sepIdx - 1]);
@@ -671,10 +753,10 @@ public sealed partial class CliBackend : IBackend
 
         if (columns.Count == 0)
         {
-            return [];
+            return 0;
         }
 
-        List<Package> rows = [];
+        int parsedRows = 0;
         int sampled = 0;
 
         for (int i = sepIdx + 1; i < lines.Length; i++)
@@ -726,7 +808,7 @@ public sealed partial class CliBackend : IBackend
                 continue;
             }
 
-            rows.Add (new ()
+            acceptRow (new ()
             {
                 Id = id,
                 Name = name.Trim (),
@@ -734,9 +816,10 @@ public sealed partial class CliBackend : IBackend
                 AvailableVersion = hasAvailable && !string.IsNullOrWhiteSpace (available) ? available.Trim () : null,
                 Source = source.Trim ()
             });
+            parsedRows++;
         }
 
-        return rows;
+        return parsedRows;
     }
 
     /// <summary>
@@ -823,53 +906,98 @@ public sealed partial class CliBackend : IBackend
     /// </summary>
     internal static List<Package> DedupePackages (List<Package> rows)
     {
-        Dictionary<(string, string), int> index = new ();
-        List<Package> deduped = [];
+        BoundedPackageDeduper deduped = new (int.MaxValue);
 
         foreach (Package pkg in rows)
         {
-            (string, string) key = (pkg.Id, pkg.Source.ToLowerInvariant ());
-
-            if (index.TryGetValue (key, out int existing))
-            {
-                if (Prefer (pkg, deduped [existing]))
-                {
-                    deduped [existing] = pkg;
-                }
-            }
-            else
-            {
-                index [key] = deduped.Count;
-                deduped.Add (pkg);
-            }
+            deduped.Consider (pkg);
         }
 
-        return deduped;
+        return deduped.Rows;
+    }
 
-        static bool Prefer (Package candidate, Package existing)
+    private static bool PreferDuplicate (Package candidate, Package existing)
+    {
+        // Compare versions first: a newer version wins outright. Only when versions
+        // are equal (or unparseable) does metadata richness tiebreak. Mirrors upstream
+        // src/cli_backend.rs::prefer_package + compare_versions_like.
+        int versionCmp = CompareVersionsLike (candidate.Version, existing.Version);
+
+        if (versionCmp > 0)
         {
-            // Compare versions first: a newer version wins outright. Only when versions
-            // are equal (or unparseable) does metadata richness tiebreak. Mirrors upstream
-            // src/cli_backend.rs::prefer_package + compare_versions_like.
-            int versionCmp = CompareVersionsLike (candidate.Version, existing.Version);
-
-            if (versionCmp > 0)
-            {
-                return true;
-            }
-
-            if (versionCmp < 0)
-            {
-                return false;
-            }
-
-            int candidateScore = (string.IsNullOrEmpty (candidate.AvailableVersion) ? 0 : 1)
-                                 + (string.IsNullOrEmpty (candidate.Source) ? 0 : 1);
-            int existingScore = (string.IsNullOrEmpty (existing.AvailableVersion) ? 0 : 1)
-                                + (string.IsNullOrEmpty (existing.Source) ? 0 : 1);
-
-            return candidateScore > existingScore;
+            return true;
         }
+
+        if (versionCmp < 0)
+        {
+            return false;
+        }
+
+        int candidateScore = (string.IsNullOrEmpty (candidate.AvailableVersion) ? 0 : 1)
+                             + (string.IsNullOrEmpty (candidate.Source) ? 0 : 1);
+        int existingScore = (string.IsNullOrEmpty (existing.AvailableVersion) ? 0 : 1)
+                            + (string.IsNullOrEmpty (existing.Source) ? 0 : 1);
+
+        return candidateScore > existingScore;
+    }
+
+    /// <summary>
+    /// Retains at most the configured number of unique package identities while still examining
+    /// every later row for a preferred replacement of an identity already retained.
+    /// </summary>
+    private sealed class BoundedPackageDeduper
+    {
+        private readonly Dictionary<(string Id, string Source), int> _index = new (PackageIdentityComparer.Instance);
+        private readonly int _maxRows;
+
+        internal BoundedPackageDeduper (int maxRows)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative (maxRows);
+            _maxRows = maxRows;
+        }
+
+        internal List<Package> Rows { get; } = [];
+        internal int Count => Rows.Count;
+        internal bool ReachedLimit { get; private set; }
+
+        internal void Consider (Package package)
+        {
+            (string Id, string Source) key = (package.Id, package.Source);
+
+            if (_index.TryGetValue (key, out int existing))
+            {
+                if (PreferDuplicate (package, Rows [existing]))
+                {
+                    Rows [existing] = package;
+                }
+
+                return;
+            }
+
+            if (Rows.Count >= _maxRows)
+            {
+                ReachedLimit = true;
+
+                return;
+            }
+
+            _index.Add (key, Rows.Count);
+            Rows.Add (package);
+        }
+    }
+
+    private sealed class PackageIdentityComparer : IEqualityComparer<(string Id, string Source)>
+    {
+        internal static PackageIdentityComparer Instance { get; } = new ();
+
+        public bool Equals ((string Id, string Source) left, (string Id, string Source) right) =>
+            string.Equals (left.Id, right.Id, StringComparison.Ordinal)
+            && string.Equals (left.Source, right.Source, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode ((string Id, string Source) value) =>
+            HashCode.Combine (
+                StringComparer.Ordinal.GetHashCode (value.Id),
+                StringComparer.OrdinalIgnoreCase.GetHashCode (value.Source));
     }
 
     /// <summary>
@@ -934,6 +1062,9 @@ public sealed partial class CliBackend : IBackend
     /// column boundaries. Stops at footer lines like "N upgrades available".
     /// </summary>
     public static IReadOnlyList<Package> ParseTable (string output, bool hasAvailable) => ParseTableTraced (output, hasAvailable, TextWriter.Null);
+
+    internal static IReadOnlyList<Package> ParseSearchTable (string output)
+        => ParseTableTraced (output, hasAvailable: false, TextWriter.Null, AppState.SearchResultLimit);
 
     private static List<(string Name, int Start)> ParseHeader (string header)
     {
@@ -1288,3 +1419,5 @@ public sealed partial class CliBackend : IBackend
         };
     }
 }
+
+internal sealed class BoundedOutputException (string message) : Exception (message);

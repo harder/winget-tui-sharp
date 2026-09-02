@@ -473,13 +473,35 @@ public sealed class DetailPanel : FrameView
     }
 
     private void ClearMarkdownRows ()
+        => ClearDynamicViews (_markdownRows, markdownRow => Remove (markdownRow.View));
+
+    internal static void ClearDynamicViews<T> (IList<T> trackedViews, Func<T, IDisposable?> remove)
     {
-        foreach (MarkdownRow markdownRow in _markdownRows)
+        Exception? firstFailure = null;
+
+        while (trackedViews.Count > 0)
         {
-            Remove (markdownRow.View);
+            int index = trackedViews.Count - 1;
+            T trackedView = trackedViews [index];
+            trackedViews.RemoveAt (index);
+
+            try
+            {
+                // Remove returning a view is Terminal.Gui's ownership-transfer signal. A null
+                // return (or exception) means the parent may still own it, so do not dispose it.
+                remove (trackedView)?.Dispose ();
+            }
+            catch (Exception ex)
+            {
+                // Continue releasing every detached dynamic child, then preserve the first error.
+                firstFailure ??= ex;
+            }
         }
 
-        _markdownRows.Clear ();
+        if (firstFailure is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture (firstFailure).Throw ();
+        }
     }
 
     private void LayoutMarkdownRow (MarkdownRow markdownRow, int startLine, int lineCount, int width)
