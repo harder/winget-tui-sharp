@@ -144,6 +144,26 @@ internal sealed class CharacterBudget
         return true;
     }
 
+    /// <summary>
+    /// Reserves a value that must be retained whole or not at all, charging nothing when it is
+    /// omitted. Use this for anything the UI will act on rather than merely display: a shortened
+    /// URL is not a shortened label, it is a different address that still resolves, so truncating
+    /// one would silently point the user at another resource.
+    /// </summary>
+    internal string? TakeExactOrOmit (string? value, int perFieldMaximum)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative (perFieldMaximum);
+
+        if (value is null || value.Length > perFieldMaximum || value.Length > _remaining)
+        {
+            return null;
+        }
+
+        _remaining -= value.Length;
+
+        return value;
+    }
+
     internal string? TakeDisplay (string? value, int perFieldMaximum)
     {
         ArgumentOutOfRangeException.ThrowIfNegative (perFieldMaximum);

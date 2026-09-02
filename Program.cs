@@ -162,7 +162,11 @@ int exitCode = 0;
 
 try
 {
-    app = Application.Create ().Init ();
+    // Assign before Init so a partially-initialized terminal still reaches the finally below.
+    // Init is what puts the terminal into raw mode and the alternate screen; if it throws
+    // midway, only Dispose can put it back.
+    app = Application.Create ();
+    app.Init ();
     window = new (backend, smokeMode ? TimeSpan.FromSeconds (1) : null);
     app.Run (window);
 }

@@ -15,7 +15,7 @@ public sealed class BackendBoundaryTests
         {
             using IDisposable lease = await gate.AcquireAsync (CancellationToken.None);
             int now = Interlocked.Increment (ref active);
-            maximum = Math.Max (maximum, now);
+            RecordMaximum (ref maximum, now);
 
             try
             {
@@ -35,7 +35,29 @@ public sealed class BackendBoundaryTests
         await Assert.ThrowsAsync<InvalidOperationException> (() => Enter (throws: true));
         await Task.WhenAll (Enter (false), Enter (false), Enter (false));
 
-        Assert.Equal (1, maximum);
+        Assert.Equal (1, Volatile.Read (ref maximum));
+    }
+
+    /// <summary>
+    /// Raises <paramref name="maximum"/> to <paramref name="observed"/> atomically. A plain
+    /// read-modify-write would let a delayed store of 1 overwrite an already-recorded 2, so the
+    /// test could pass on the very interleaving it exists to catch.
+    /// </summary>
+    private static void RecordMaximum (ref int maximum, int observed)
+    {
+        int current = Volatile.Read (ref maximum);
+
+        while (observed > current)
+        {
+            int seen = Interlocked.CompareExchange (ref maximum, observed, current);
+
+            if (seen == current)
+            {
+                return;
+            }
+
+            current = seen;
+        }
     }
 
     [Fact]
@@ -177,6 +199,33 @@ public sealed class BackendBoundaryTests
         Assert.Equal (0, budget.Remaining);
         Assert.False (rejected.TryReserveExact ("abcd", "ef"));
         Assert.Equal (5, rejected.Remaining);
+    }
+
+    [Fact]
+    public void CharacterBudget_OmitsActionableValueRatherThanShorteningIt ()
+    {
+        const string url = "https://example.com/releases/v1";
+        CharacterBudget perField = new (1_000);
+        CharacterBudget aggregate = new (10);
+
+        // Over the per-field ceiling: dropped whole, and nothing is charged.
+        Assert.Null (perField.TakeExactOrOmit (url, perFieldMaximum: url.Length - 1));
+        Assert.Equal (1_000, perField.Remaining);
+
+        // Exactly at the ceiling: retained verbatim, never a prefix that still resolves.
+        Assert.Equal (url, perField.TakeExactOrOmit (url, perFieldMaximum: url.Length));
+        Assert.Equal (1_000 - url.Length, perField.Remaining);
+
+        // Over the remaining aggregate: also dropped, and the untouched budget still admits a
+        // shorter link that follows it.
+        Assert.Null (aggregate.TakeExactOrOmit (url, BackendLimits.SimpleTextCharacters));
+        Assert.Equal (10, aggregate.Remaining);
+        Assert.Equal ("short", aggregate.TakeExactOrOmit ("short", BackendLimits.SimpleTextCharacters));
+        Assert.Equal (5, aggregate.Remaining);
+
+        // Contrast with the display rule, which is allowed to shorten.
+        CharacterBudget display = new (10);
+        Assert.Equal (url [..10], display.TakeDisplay (url, BackendLimits.SimpleTextCharacters));
     }
 
     [Fact]

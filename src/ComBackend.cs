@@ -386,12 +386,15 @@ public sealed class ComBackend : IBackend
                 Author = detailCharacters.TakeDisplay (NullIfEmpty (meta?.Author), BackendLimits.SimpleTextCharacters),
                 Copyright = detailCharacters.TakeDisplay (NullIfEmpty (meta?.Copyright), BackendLimits.SimpleTextCharacters),
                 Description = detailCharacters.TakeDisplay (description, BackendLimits.RichTextCharacters),
-                Homepage = detailCharacters.TakeDisplay (NullIfEmpty (meta?.PackageUrl), BackendLimits.SimpleTextCharacters),
+                // URLs are opened, not just shown (DetailPanel link rows, plus the `o` and `c`
+                // keys). A truncated URL is a valid address for a different resource, so these
+                // are retained whole or dropped — never shortened.
+                Homepage = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PackageUrl), BackendLimits.SimpleTextCharacters),
                 License = detailCharacters.TakeDisplay (NullIfEmpty (meta?.License), BackendLimits.SimpleTextCharacters),
-                ReleaseNotesUrl = detailCharacters.TakeDisplay (NullIfEmpty (meta?.ReleaseNotesUrl), BackendLimits.SimpleTextCharacters),
-                SupportUrl = detailCharacters.TakeDisplay (NullIfEmpty (meta?.PublisherSupportUrl), BackendLimits.SimpleTextCharacters),
-                PrivacyUrl = detailCharacters.TakeDisplay (NullIfEmpty (meta?.PrivacyUrl), BackendLimits.SimpleTextCharacters),
-                PurchaseUrl = detailCharacters.TakeDisplay (NullIfEmpty (meta?.PurchaseUrl), BackendLimits.SimpleTextCharacters),
+                ReleaseNotesUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.ReleaseNotesUrl), BackendLimits.SimpleTextCharacters),
+                SupportUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PublisherSupportUrl), BackendLimits.SimpleTextCharacters),
+                PrivacyUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PrivacyUrl), BackendLimits.SimpleTextCharacters),
+                PurchaseUrl = detailCharacters.TakeExactOrOmit (NullIfEmpty (meta?.PurchaseUrl), BackendLimits.SimpleTextCharacters),
                 InstallationNotes = detailCharacters.TakeDisplay (NullIfEmpty (meta?.InstallationNotes), BackendLimits.RichTextCharacters),
                 InstalledLocation = detailCharacters.TakeDisplay (
                     SafeMetadata (installed, PackageVersionMetadataField.InstalledLocation),
@@ -1144,12 +1147,15 @@ public sealed class ComBackend : IBackend
 
                 try
                 {
-                    string? url = characterBudget.TakeDisplay (
-                        d.DocumentUrl,
+                    // The URL is what the row activates, so it is reserved whole or the entry is
+                    // skipped. Omission charges nothing, leaving room for a later shorter link.
+                    string? url = characterBudget.TakeExactOrOmit (
+                        NullIfEmpty (d.DocumentUrl),
                         BackendLimits.SimpleTextCharacters);
 
-                    if (!string.IsNullOrWhiteSpace (url))
+                    if (url is not null)
                     {
+                        // The label is display-only and may be shortened.
                         string label = characterBudget.TakeDisplay (
                                            string.IsNullOrWhiteSpace (d.DocumentLabel)
                                                ? "Documentation"
