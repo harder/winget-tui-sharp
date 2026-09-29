@@ -18,7 +18,7 @@
     <LangVersion>latest</LangVersion>
     <RootNamespace>WingetTuiSharp</RootNamespace>
     <AssemblyName>winget-tui-sharp</AssemblyName>
-    <Version>0.1.2</Version>
+    <Version>0.1.3</Version>
     <Description>A C# / Terminal.Gui implementation of winget-tui (a terminal UI for winget).</Description>
     <PublishAot>true</PublishAot>
     <InvariantGlobalization>true</InvariantGlobalization>
@@ -74,7 +74,7 @@
       prereleases; this is intentionally a moving target since the project's purpose is
       to evaluate parity against current Terminal.Gui behavior.
     -->
-    <PackageReference Include="Terminal.Gui" Version="2.4.18-develop.53" />
+    <PackageReference Include="Terminal.Gui" Version="2.5.1-develop.44" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
@@ -86,7 +86,7 @@
       GeneratePathProperty exposes $(PkgMicrosoft_WindowsPackageManager_ComInterop) so the Identity
       build can copy the projection winmd out of the package.
     -->
-    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.290" GeneratePathProperty="true" />
+    <PackageReference Include="Microsoft.WindowsPackageManager.ComInterop" Version="1.29.380" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(WingetComMode)' == 'InProc' and '$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">
@@ -95,7 +95,7 @@
       ExcludeAssets=compile so its bundled .winmd doesn't collide with ComInterop's managed projection;
       we only want its native runtime assets copied next to the exe. app.manifest routes activation here.
     -->
-    <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.290" ExcludeAssets="compile" NoWarn="NU1701" />
+    <PackageReference Include="Microsoft.WindowsPackageManager.InProcCom" Version="1.29.380" ExcludeAssets="compile" NoWarn="NU1701" />
   </ItemGroup>
 
   <ItemGroup Condition="'$(WingetComMode)' == 'Identity' and '$(TargetFramework)' == 'net10.0-windows10.0.26100.0'">

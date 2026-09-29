@@ -5,7 +5,7 @@ building this winget-tui port. Each entry is the kind of thing that should drive
 Terminal.Gui issue, PR, or wishlist discussion — not a complaint about Terminal.Gui being
 incomplete. Where this port works around a gap, the workaround is noted.
 
-The list is anchored to **Terminal.Gui 2.4.17-develop.6** (the version in `WingetTuiSharp.csproj`).
+The list is reviewed against **Terminal.Gui 2.5.1-develop.44** (the version in `WingetTuiSharp.csproj`).
 If Terminal.Gui upgrades close any of these, please send a PR removing the entry — and
 ideally adding a test in `tests/ParserTests.cs § Terminal.Gui compatibility` that would
 have caught a regression.
@@ -239,9 +239,8 @@ whether they've regressed.
 - ~~**No `TableStyle.HeaderColorGetter` (only per-column), A7**~~ — Closed by 2.4.17's
   `TableStyle.HeaderScheme`: a base `Scheme` applied to all column headers, falling back to
   the view's scheme if `null`, with `ColumnStyle.HeaderColorGetter` still available for
-  per-column overrides. `App.ApplyColumnStyles` (`src/App.cs`) still loops over every column
-  to assign the same `HeaderColorGetter` on every `RefreshTable` call — that loop can be
-  replaced with a single `TableStyle.HeaderScheme` assignment as a follow-up simplification.
+  per-column overrides. `App.ApplyColumnStyles` now uses the shared scheme and retains a
+  per-column override for the unstyled cursor-marker header.
 
 ## H. Wishlist — items that would have made the port noticeably shorter
 

@@ -807,6 +807,11 @@ public sealed class App : Runnable
     private void ApplyColumnStyles (MarkedTableSource marked)
     {
         _packageTable.Style.ColumnStyles.Clear ();
+        _packageTable.Style.HeaderScheme = new Scheme (_packageTable.GetScheme ())
+        {
+            Normal = new (Theme.Accent, Theme.Surface, TextStyle.Bold),
+            Focus = new (Theme.Accent, Theme.Surface, TextStyle.Bold)
+        };
 
         // Column 0: the cursor marker — exactly 1 cell wide.
         ColumnStyle markerStyle = _packageTable.Style.GetOrCreateColumnStyle (0);
@@ -820,12 +825,6 @@ public sealed class App : Runnable
         for (int i = 1; i < marked.Columns; i++)
         {
             ColumnStyle s = _packageTable.Style.GetOrCreateColumnStyle (i);
-            s.HeaderColorGetter = _ => new Scheme (_packageTable.GetScheme ())
-            {
-                Normal = new (Theme.Accent, Theme.Surface, TextStyle.Bold),
-                Focus = new (Theme.Accent, Theme.Surface, TextStyle.Bold)
-            };
-
             if (marked.ColumnNames [i] == "Source")
             {
                 s.ColorGetter = args =>

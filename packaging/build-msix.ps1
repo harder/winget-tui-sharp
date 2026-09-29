@@ -16,12 +16,12 @@
 
 .EXAMPLE
   # CI: pack only (sign separately with Azure Trusted Signing, see code-signing.md):
-  pwsh ./packaging/build-msix.ps1 -Arch x64 -Version 0.1.2.0
+  pwsh ./packaging/build-msix.ps1 -Arch x64 -Version 0.1.3.0
 #>
 [CmdletBinding()]
 param(
   [ValidateSet('x64', 'arm64')] [string]$Arch = 'arm64',
-  [string]$Version = '0.1.2.0',
+  [string]$Version = '0.1.3.0',
   [string]$Publisher = 'CN=winget-tui-sharp (Dev)',
   [string]$CertPath,
   [string]$CertPassword = 'spike',
@@ -33,7 +33,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
-if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Version must be 4-part (e.g. 0.1.2.0); got '$Version'." }
+if ($Version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Version must be 4-part (e.g. 0.1.3.0); got '$Version'." }
 if (-not $OutDir) { $OutDir = Join-Path $repo 'dist' }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
