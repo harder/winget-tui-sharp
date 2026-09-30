@@ -179,7 +179,7 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 **Cancellation** (`Esc`):
 
 - [x] **Esc during an install cancels it** cooperatively (COM `Cancel()`): status shows "Cancelling…" then **"Cancelled"**, and the list refreshes. *(Manually verified on Windows, 2026-07-16.)*
-- [x] **Esc with no op running** still quits the app (unchanged behavior). *(Manually verified on Windows, 2026-07-16.)*
+- [ ] **Esc with no op running** shows the top-level quit hint instead of quitting (intentional behavior; see the README key bindings).
 - [x] `q` and `Ctrl+C` **still quit** during an op (only `Esc` cancels). *(Manually verified on Windows, 2026-07-16.)*
 - [x] **Batch upgrade + Esc**: the in-flight item cancels and the remaining queue stops. *(Manually verified on Windows, 2026-07-16.)*
 - [x] **One-op-at-a-time guard**: triggering a second operation while one is running is ignored (no second progress bar, no crash). *(Manually verified on Windows, 2026-07-16.)*
