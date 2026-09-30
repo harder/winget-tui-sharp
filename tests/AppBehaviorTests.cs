@@ -130,6 +130,197 @@ public class AppBehaviorTests
         Assert.Equal (["10.0.0", "2.0.0", "1.9.0"], state.Filtered.Select (p => p.Version));
     }
 
+    [Theory]
+    [InlineData (SortDir.Asc, "2.0", "3.0", "10.0")]
+    [InlineData (SortDir.Desc, "10.0", "3.0", "2.0")]
+    public void AppState_ApplyFilter_SortsAvailableVersionsInUpgrades (
+        SortDir direction, string first, string second, string third)
+    {
+        AppState state = new (new MockBackend ())
+        {
+            Mode = AppMode.Upgrades,
+            Packages =
+            [
+                new () { Id = "a", Name = "A", Version = "1.0", AvailableVersion = "3.0" },
+                new () { Id = "b", Name = "B", Version = "1.0", AvailableVersion = "10.0" },
+                new () { Id = "c", Name = "C", Version = "1.0", AvailableVersion = "2.0" }
+            ],
+            SortField = SortField.AvailableVersion,
+            SortDir = direction
+        };
+
+        state.ApplyFilter ();
+
+        Assert.Equal ([first, second, third], state.Filtered.Select (p => p.AvailableVersion));
+    }
+
+    [Theory]
+    [InlineData (AppMode.Installed, SortField.None)]
+    [InlineData (AppMode.Upgrades, SortField.AvailableVersion)]
+    public void AppState_CycleSort_IncludesAvailableOnlyForUpgrades (AppMode mode, SortField expected)
+    {
+        AppState state = new (new MockBackend ())
+        {
+            Mode = mode,
+            SortField = SortField.Version,
+            SortDir = SortDir.Desc
+        };
+
+        state.CycleSort ();
+
+        Assert.Equal (expected, state.SortField);
+        Assert.Equal (SortDir.Asc, state.SortDir);
+    }
+
+    [Fact]
+    public void App_LocalFilter_KeepsSelectedPackageWhenCleared ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+
+        state.Packages =
+        [
+            new () { Id = "one", Name = "One", Version = "1" },
+            new () { Id = "two", Name = "Two", Version = "1" },
+            new () { Id = "three", Name = "Three", Version = "1" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        table.Value = new (new (0, 2));
+        state.InputMode = InputMode.LocalFilter;
+
+        input.Text = "Three";
+        Assert.Equal ("three", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+
+        input.Text = string.Empty;
+        Assert.Equal ("three", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+    }
+
+    [Fact]
+    public void App_LocalFilter_KeepsSelectedSourceWhenIdsMatch ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+
+        state.Packages =
+        [
+            new () { Id = "shared.app", Name = "Desktop App", Version = "1", Source = "winget" },
+            new () { Id = "shared.app", Name = "Store App", Version = "2", Source = "msstore" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        table.Value = new (new (0, 1));
+        state.InputMode = InputMode.LocalFilter;
+
+        input.Text = "Store";
+        Assert.Equal ("msstore", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Source);
+
+        input.Text = string.Empty;
+        Assert.Equal ("msstore", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Source);
+    }
+
+    [Fact]
+    public void App_LocalFilter_KeepsSelectedPackageWhenIdsDifferOnlyByCase ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+
+        state.Packages =
+        [
+            new () { Id = "Example.App", Name = "Upper", Version = "1", Source = "winget" },
+            new () { Id = "example.app", Name = "Lower", Version = "1", Source = "winget" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        table.Value = new (new (0, 1));
+        state.InputMode = InputMode.LocalFilter;
+
+        input.Text = "Lower";
+        Assert.Equal ("example.app", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+
+        input.Text = string.Empty;
+        Assert.Equal ("example.app", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+    }
+
+    [Fact]
+    public void App_SortedAvailableColumn_KeepsItsReservedWidth ()
+    {
+        App app = new (new MockBackend ()) { Frame = new (0, 0, 140, 40) };
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+        LayoutView (app, new (140, 40));
+        state.Mode = AppMode.Upgrades;
+        state.Packages = [new () { Id = "test.app", Name = "Test App", Version = "1", AvailableVersion = "2" }];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        int availableColumn = Array.FindIndex (table.Table!.ColumnNames,
+            name => name.StartsWith ("Available", StringComparison.Ordinal));
+        int idColumn = Array.FindIndex (table.Table.ColumnNames,
+            name => name.StartsWith ("Id", StringComparison.Ordinal));
+        int idWidth = table.Style.GetOrCreateColumnStyle (idColumn).MinWidth;
+
+        state.SortField = SortField.AvailableVersion;
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+
+        Assert.Equal ("Available ↑", table.Table!.ColumnNames [availableColumn]);
+        Assert.Equal (14, table.Style.GetOrCreateColumnStyle (availableColumn).MinWidth);
+        Assert.Equal (14, table.Style.GetOrCreateColumnStyle (availableColumn).MaxWidth);
+        Assert.Equal (idWidth, table.Style.GetOrCreateColumnStyle (idColumn).MinWidth);
+    }
+
+    [Fact]
+    public void App_FilterShortcuts_ClearTextAndExitOnEmptyBackspace ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        state.InputMode = InputMode.LocalFilter;
+        input.Text = "sample";
+
+        Key clear = new (KeyCode.U | KeyCode.CtrlMask);
+        InvokePrivate (app, "OnFilterKeyDown", input, clear);
+
+        Assert.True (clear.Handled);
+        Assert.Equal (string.Empty, state.LocalFilter);
+        Assert.Equal (InputMode.LocalFilter, state.InputMode);
+
+        Key backspace = new (KeyCode.Backspace);
+        InvokePrivate (app, "OnFilterKeyDown", input, backspace);
+
+        Assert.True (backspace.Handled);
+        Assert.Equal (InputMode.Normal, state.InputMode);
+    }
+
+    [Fact]
+    public void App_FilterCtrlC_RequestsShutdown ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        state.InputMode = InputMode.Search;
+
+        Key quit = new (KeyCode.C | KeyCode.CtrlMask);
+        InvokePrivate (app, "OnFilterKeyDown", input, quit);
+
+        Assert.True (quit.Handled);
+        Assert.Equal (0, GetPrivateInt (app, "_uiAccepting"));
+    }
+
     [Fact]
     public void UpgradeQueryFor_TruncatedId_FallsBackToName ()
     {
@@ -184,6 +375,8 @@ public class AppBehaviorTests
     [InlineData ("Name ↑", SortField.Name)]
     [InlineData ("Id", SortField.Id)]
     [InlineData ("Version ↓", SortField.Version)]
+    [InlineData ("Available", SortField.AvailableVersion)]
+    [InlineData ("Available ↑", SortField.AvailableVersion)]
     public void SortFieldForHeader_MapsSortableColumns (string header, SortField expected)
     {
         Assert.Equal (expected, App.SortFieldForHeader (header));
@@ -191,7 +384,6 @@ public class AppBehaviorTests
 
     [Theory]
     [InlineData (" ")]
-    [InlineData ("Available")]
     [InlineData ("Source")]
     public void SortFieldForHeader_ReturnsNullForNonSortableColumns (string header)
     {
@@ -318,6 +510,32 @@ public class AppBehaviorTests
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
 
         return Assert.IsType<T> (field.GetValue (instance));
+    }
+
+    private static int GetPrivateInt (object instance, string fieldName)
+    {
+        System.Reflection.FieldInfo field = instance.GetType ().GetField (
+            fieldName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+        return Assert.IsType<int> (field.GetValue (instance));
+    }
+
+    private static void InvokePrivate (object instance, string methodName)
+    {
+        System.Reflection.MethodInfo method = instance.GetType ().GetMethod (
+            methodName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+        Assert.NotNull (method);
+        _ = method.Invoke (instance, []);
+    }
+
+    private static void InvokePrivate (object instance, string methodName, params object[] arguments)
+    {
+        System.Reflection.MethodInfo method = instance.GetType ().GetMethod (
+            methodName, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+        Assert.NotNull (method);
+        _ = method.Invoke (instance, arguments);
     }
 
     private static void LayoutView (View view, System.Drawing.Size size)

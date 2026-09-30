@@ -192,9 +192,15 @@ public sealed class AppState
                 filtered.Sort ((left, right) => CliBackend.CompareVersionsLike (left.Version, right.Version));
 
                 break;
+            case SortField.AvailableVersion when Mode == AppMode.Upgrades:
+                filtered.Sort ((left, right) => CliBackend.CompareVersionsLike (
+                    left.AvailableVersion ?? string.Empty, right.AvailableVersion ?? string.Empty));
+
+                break;
         }
 
-        if (SortDir == SortDir.Desc && SortField != SortField.None)
+        if (SortDir == SortDir.Desc && SortField != SortField.None
+            && (SortField != SortField.AvailableVersion || Mode == AppMode.Upgrades))
         {
             filtered.Reverse ();
         }
@@ -214,7 +220,7 @@ public sealed class AppState
 
     public void CycleSort ()
     {
-        // None -> Name asc -> Name desc -> Id asc -> Id desc -> Version asc -> Version desc -> None
+        // Upgrades includes Available asc and desc after Version desc.
         (SortField, SortDir) = (SortField, SortDir) switch
         {
             (SortField.None, _) => (SortField.Name, SortDir.Asc),
@@ -223,6 +229,8 @@ public sealed class AppState
             (SortField.Id, SortDir.Asc) => (SortField.Id, SortDir.Desc),
             (SortField.Id, SortDir.Desc) => (SortField.Version, SortDir.Asc),
             (SortField.Version, SortDir.Asc) => (SortField.Version, SortDir.Desc),
+            (SortField.Version, SortDir.Desc) when Mode == AppMode.Upgrades => (SortField.AvailableVersion, SortDir.Asc),
+            (SortField.AvailableVersion, SortDir.Asc) when Mode == AppMode.Upgrades => (SortField.AvailableVersion, SortDir.Desc),
             _ => (SortField.None, SortDir.Asc)
         };
     }

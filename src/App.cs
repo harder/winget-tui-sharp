@@ -165,9 +165,11 @@ public sealed class App : Runnable
                                     {
                                         if (_state.InputMode == InputMode.LocalFilter)
                                         {
+                                            Package? selectedPackage = CurrentPackage ();
                                             _state.LocalFilter = _filterInput.Text ?? string.Empty;
                                             _state.ApplyFilter ();
                                             RefreshTable ();
+                                            RestoreCursorOrSelectFirst (selectedPackage);
                                         }
                                         else if (_state.InputMode == InputMode.Search)
                                         {
@@ -589,10 +591,8 @@ public sealed class App : Runnable
         string? src = _state.SourceFilter;
         string query = _state.SearchQuery;
 
-        // Remember the currently-selected package id so we can re-position the cursor on the
-        // same package after the refresh, instead of always jumping to row 0. Mirrors
-        // upstream's process_messages cursor-anchor behavior.
-        string? previousSelectedId = CurrentPackage ()?.Id;
+        // Remember the selected package so a refresh can restore the same ID and source.
+        Package? previousSelection = CurrentPackage ();
 
         // Don't hit `winget search` with an empty query — it dumps the entire catalog
         // (~13k packages) which is never what the user wants. Show a placeholder instead.
@@ -691,7 +691,7 @@ public sealed class App : Runnable
 
                                                                               RefreshTable ();
                                                                               RefreshStatusBar ();
-                                                                              RestoreCursorOrSelectFirst (previousSelectedId);
+                                                                              RestoreCursorOrSelectFirst (previousSelection);
                                                                           }, ct, () => gen == _state.ViewGeneration);
                                                  }
                                                  catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -772,7 +772,7 @@ public sealed class App : Runnable
                 },
                 [HeaderWithSort ("Id", SortField.Id)] = p => FormatIdForDisplay (p.Id),
                 [HeaderWithSort ("Version", SortField.Version)] = p => p.Version,
-                ["Available"] = p => p.AvailableVersion ?? string.Empty,
+                [HeaderWithSort ("Available", SortField.AvailableVersion)] = p => p.AvailableVersion ?? string.Empty,
                 ["Source"] = p => p.Source
             };
         }
@@ -889,7 +889,7 @@ public sealed class App : Runnable
         const int availW = 14, sourceW = 8, srcReserve = 6;
         const int nameMin = 14, idMin = 16, verMin = 9;
 
-        bool hasAvailable = names.Contains ("Available");
+        bool hasAvailable = names.Any (name => name.StartsWith ("Available", StringComparison.Ordinal));
         int dataCols = Math.Max (0, names.Length - 1); // exclude the 1-wide marker column
 
         // Reserve the marker, rough inter-column padding, and a minimum for the expanding Source
@@ -908,7 +908,7 @@ public sealed class App : Runnable
             int? w = name.StartsWith ("Name", StringComparison.Ordinal) ? nameW
                    : name.StartsWith ("Id", StringComparison.Ordinal) ? idW
                    : name.StartsWith ("Version", StringComparison.Ordinal) ? verW
-                   : name == "Available" ? availW
+                   : name.StartsWith ("Available", StringComparison.Ordinal) ? availW
                    : name == "Source" ? sourceW
                    : null;
 
@@ -961,7 +961,7 @@ public sealed class App : Runnable
 
     /// <summary>
     /// Maps a clicked column header to the field it sorts by, or null for non-sortable columns
-    /// (the marker, Available, Source). The header text may carry a trailing sort arrow.
+    /// (the marker and Source). The header text may carry a trailing sort arrow.
     /// </summary>
     internal static SortField? SortFieldForHeader (string columnName)
     {
@@ -978,6 +978,11 @@ public sealed class App : Runnable
         if (columnName.StartsWith ("Version", StringComparison.Ordinal))
         {
             return SortField.Version;
+        }
+
+        if (columnName.StartsWith ("Available", StringComparison.Ordinal))
+        {
+            return SortField.AvailableVersion;
         }
 
         return null;
@@ -1020,10 +1025,10 @@ public sealed class App : Runnable
 
     /// <summary>
     /// Try to position the cursor on the same package the user had selected before the
-    /// refresh (by id). If that package is no longer in the filtered list, fall back to
+    /// refresh (by ID and source). If that package is no longer in the filtered list, fall back to
     /// row 0. If the list is empty, clear the detail panel.
     /// </summary>
-    private void RestoreCursorOrSelectFirst (string? previousId)
+    private void RestoreCursorOrSelectFirst (Package? previousSelection)
     {
         if (_state.Filtered.Count == 0)
         {
@@ -1037,9 +1042,11 @@ public sealed class App : Runnable
 
         int row = 0;
 
-        if (!string.IsNullOrEmpty (previousId))
+        if (previousSelection is not null)
         {
-            int found = _state.Filtered.FindIndex (p => p.Id.Equals (previousId, StringComparison.OrdinalIgnoreCase));
+            int found = _state.Filtered.FindIndex (p =>
+                p.Id.Equals (previousSelection.Id, StringComparison.Ordinal)
+                && p.Source.Equals (previousSelection.Source, StringComparison.OrdinalIgnoreCase));
 
             if (found >= 0)
             {
@@ -1234,14 +1241,36 @@ public sealed class App : Runnable
 
     private void OnFilterKeyDown (object? sender, Key key)
     {
+        if (key.KeyCode == (KeyCode.C | KeyCode.CtrlMask))
+        {
+            RequestGracefulStop ();
+            key.Handled = true;
+
+            return;
+        }
+
+        if (key.KeyCode == (KeyCode.U | KeyCode.CtrlMask))
+        {
+            _filterInput.Text = string.Empty;
+            key.Handled = true;
+
+            return;
+        }
+
+        if (key.KeyCode == KeyCode.Backspace && _state.InputMode == InputMode.LocalFilter
+            && string.IsNullOrEmpty (_filterInput.Text))
+        {
+            ExitInputMode ();
+            key.Handled = true;
+
+            return;
+        }
+
         if (key.KeyCode == KeyCode.Esc)
         {
             if (_state.InputMode == InputMode.LocalFilter)
             {
-                _state.LocalFilter = string.Empty;
                 _filterInput.Text = string.Empty;
-                _state.ApplyFilter ();
-                RefreshTable ();
             }
 
             ExitInputMode ();
@@ -1585,6 +1614,12 @@ public sealed class App : Runnable
     /// </summary>
     private void SwitchToMode (AppMode mode)
     {
+        if (mode != AppMode.Upgrades && _state.SortField == SortField.AvailableVersion)
+        {
+            _state.SortField = SortField.None;
+            _state.SortDir = SortDir.Asc;
+        }
+
         _state.Mode = mode;
         _state.LocalFilter = string.Empty;
         _state.BatchSelected.Clear ();
