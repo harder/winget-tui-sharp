@@ -624,6 +624,10 @@ public sealed class ComBackend : IBackend
     // Writes
     // ------------------------------------------------------------------------
 
+    // Do not set asyncOp.Progress to null after an operation completes. The WinGet in-process
+    // COM server can access-violate in the WinRT progress setter at that point. Releasing the
+    // completed operation releases its callback; KeepAlive holds the projection until completion.
+
     public Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
         => WithMutationPackageManagerAsync (ct, (pm, token) => InstallCoreAsync (pm, id, version, settings, progress, token));
 
@@ -670,9 +674,7 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            BestEffortCleanup.Run (
-                () => asyncOp.Progress = null,
-                () => GC.KeepAlive (asyncOp));
+            GC.KeepAlive (asyncOp);
         }
 
         return result.Status == InstallResultStatus.Ok
@@ -716,9 +718,7 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            BestEffortCleanup.Run (
-                () => asyncOp.Progress = null,
-                () => GC.KeepAlive (asyncOp));
+            GC.KeepAlive (asyncOp);
         }
 
         return result.Status == InstallResultStatus.Ok
@@ -754,9 +754,7 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            BestEffortCleanup.Run (
-                () => asyncOp.Progress = null,
-                () => GC.KeepAlive (asyncOp));
+            GC.KeepAlive (asyncOp);
         }
 
         return result.Status == UninstallResultStatus.Ok
@@ -821,9 +819,7 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            BestEffortCleanup.Run (
-                () => asyncOp.Progress = null,
-                () => GC.KeepAlive (asyncOp));
+            GC.KeepAlive (asyncOp);
         }
 
         return result.Status == DownloadResultStatus.Ok
@@ -864,9 +860,7 @@ public sealed class ComBackend : IBackend
         }
         finally
         {
-            BestEffortCleanup.Run (
-                () => asyncOp.Progress = null,
-                () => GC.KeepAlive (asyncOp));
+            GC.KeepAlive (asyncOp);
         }
 
         if (result.Status == RepairResultStatus.Ok)
