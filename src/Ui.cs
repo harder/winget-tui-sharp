@@ -2,17 +2,62 @@
 
 namespace WingetTuiSharp;
 
+/// <summary>Clear resize guidance instead of overlapping two-pane content in a small terminal.</summary>
+public sealed class TerminalSizeGuardView : FrameView
+{
+    public const int MinimumWidth = 80;
+    public const int MinimumHeight = 24;
+
+    private readonly Label _message;
+
+    public TerminalSizeGuardView ()
+    {
+        X = 0;
+        Y = 0;
+        Width = Dim.Fill ();
+        Height = Dim.Fill ();
+        BorderStyle = LineStyle.None;
+        SchemeName = Theme.AppSchemeName;
+        CanFocus = false;
+        Visible = false;
+        _message = new ()
+        {
+            X = Pos.Center (),
+            Y = Pos.Center (),
+            TextAlignment = Alignment.Center,
+            Text = BuildMessage (MinimumWidth, MinimumHeight)
+        };
+        Add (_message);
+    }
+
+    public void UpdateForSize (int width, int height)
+    {
+        Visible = IsTooSmall (width, height);
+
+        if (Visible)
+        {
+            _message.Text = BuildMessage (width, height);
+            SetNeedsDraw ();
+        }
+    }
+
+    public static bool IsTooSmall (int width, int height) =>
+        width > 0 && height > 0 && (width < MinimumWidth || height < MinimumHeight);
+
+    public static string BuildMessage (int width, int height) =>
+        $"Terminal too small ({width}×{height})\nResize to at least {MinimumWidth}×{MinimumHeight}\nCtrl+Q quits";
+}
+
 /// <summary>
-/// Custom tab bar widget that renders 3 mutually-exclusive tabs with mouse hit-testing.
-/// Mirrors the navbar in src/ui.rs.
+/// Compact, right-aligned top navigation with mouse hit-testing.
 /// </summary>
 public sealed class TabBar : View
 {
     private static readonly (AppMode Mode, string Label) [] _tabs =
     [
-        (AppMode.Search, "1 ◇ Search"),
-        (AppMode.Installed, "2 ▣ Installed"),
-        (AppMode.Upgrades, "3 △ Upgrades")
+        (AppMode.Search, "◇ Search"),
+        (AppMode.Installed, "▣ Installed"),
+        (AppMode.Upgrades, "△ Upgrades")
     ];
 
     private AppMode _active = AppMode.Installed;
@@ -41,6 +86,10 @@ public sealed class TabBar : View
 
     public event EventHandler<AppMode>? TabClicked;
 
+    private static int TabsWidth => _tabs.Sum (tab => tab.Label.Length + 2) + _tabs.Length - 1;
+
+    private static int StartX (int width) => Math.Max (0, width - TabsWidth - 1);
+
     /// <inheritdoc />
     protected override bool OnDrawingContent (DrawContext? context)
     {
@@ -52,7 +101,7 @@ public sealed class TabBar : View
             AddStr (" ");
         }
 
-        int cursor = 0;
+        int cursor = StartX (Viewport.Width);
 
         foreach ((AppMode mode, string label) in _tabs)
         {
@@ -64,7 +113,7 @@ public sealed class TabBar : View
             }
 
             Attribute attr = mode == _active
-                                 ? new Attribute (Theme.TextOnAccent, Theme.Accent, TextStyle.Bold)
+                                 ? new Attribute (Theme.Accent, Theme.Bg, TextStyle.Bold)
                                  : new Attribute (Theme.AccentDim, Theme.Bg);
             SetAttribute (attr);
             Move (cursor, 0);
@@ -84,7 +133,7 @@ public sealed class TabBar : View
         }
 
         int x = mouse.Position.Value.X;
-        int cursor = 0;
+        int cursor = StartX (Viewport.Width);
 
         foreach ((AppMode mode, string label) in _tabs)
         {
@@ -676,7 +725,7 @@ public sealed class HelpDialog : Runnable
         General
           ?             Toggle this help
           t             Theme picker (Amber / Sage / Moss & Olive / Dusty Rose)
-          Esc           Cancel a running operation, else quit
-          q / Ctrl+C    Quit
+          Esc           Cancel a running operation; otherwise stay in the app
+          q / Ctrl+Q    Quit (Ctrl+Q works from fields and dialogs)
         """;
 }

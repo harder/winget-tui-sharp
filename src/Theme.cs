@@ -1,8 +1,7 @@
 namespace WingetTuiSharp;
 
 /// <summary>
-/// Switchable color palettes and the registered <see cref="Scheme"/>s for the app, plus the
-/// pixel-art "winget" wordart rendered as a <see cref="Logo"/> view. The default (Sage) and
+/// Switchable color palettes and the registered <see cref="Scheme"/>s for the app. The default (Sage) and
 /// the "Amber" alternative mirror the constants and shapes in shanselman/winget-tui's
 /// src/theme.rs; Amber is the exact upstream-matching palette.
 /// </summary>
@@ -230,47 +229,5 @@ public static class Theme
             HotNormal = new (Success, Bg),
             HotFocus = new (Success, Bg)
         });
-    }
-}
-
-/// <summary>
-/// Block-art "WINGET TUI #" wordmark rendered directly in 5 text rows for better legibility.
-/// </summary>
-public sealed class Logo : View
-{
-    // "WINGET TUI #" rendered as a compact 51×5 block wordmark with a 1-column gap
-    // between letters and a 2-column gap between words.
-    private static readonly string [] _lines =
-    [
-        "█   █ ███ █  █  ██  ████ ████  ████ █  █ ███   █ █ ",
-        "█   █  █  ██ █ █    █     █     █   █  █  █   █████",
-        "█ █ █  █  █ ██ █ ██ ███   █     █   █  █  █    █ █ ",
-        "██ ██  █  █  █ █  █ █     █     █   █  █  █   █████",
-        "█   █ ███ █  █  ███ ████  █     █    ██  ███   █ █ "
-    ];
-
-    public const int LogoWidth = 51;
-    public const int LogoHeight = 5;
-
-    public Logo ()
-    {
-        Width = LogoWidth;
-        Height = LogoHeight;
-        CanFocus = false;
-        SchemeName = Theme.AccentSchemeName;
-    }
-
-    /// <inheritdoc />
-    protected override bool OnDrawingContent (DrawContext? context)
-    {
-        SetAttribute (new (Theme.Accent, Theme.Bg, TextStyle.Bold));
-
-        for (int y = 0; y < _lines.Length && y < Viewport.Height; y++)
-        {
-            Move (0, y);
-            AddStr (_lines [y]);
-        }
-
-        return true;
     }
 }

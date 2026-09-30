@@ -52,7 +52,7 @@ This port is also MIT-licensed; see [LICENSE](LICENSE).
 | Area                                                                      | Status                                                                                |
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
 | Three-tab UI (Search / Installed / Upgrades)                              | ✅                                                                                    |
-| Pixel-art logo + tab bar header                                           | ✅ (3-row half-block art, mouse-clickable tabs)                                       |
+| Compact Skill View-style shell                                             | ✅ (border title, right-aligned clickable tabs, context row, resize guard)            |
 | Package list table (Name, Id, Version, Source / Available)                | ✅                                                                                    |
 | Detail panel: publisher, description, homepage, changelog, license        | ✅                                                                                    |
 | Richer COM-only detail: tags, product code, author, copyright, support / privacy / docs links | ✅ (populated from the COM API; absent fields omitted) |
@@ -211,8 +211,8 @@ The xUnit suite under `tests/` covers:
 - **Version comparison** - numeric vs lexical, longer-prefix-wins, empty handling.
 - **Terminal.Gui compatibility** - `Theme.Register` round-trip, every named scheme
   resolves, `Rune.GetColumns()` returns 2 for CJK and 1 for ASCII, `string.GetColumns()`
-  walks grapheme clusters correctly, `Logo` instantiates with expected dimensions,
-  `TabBar` reports clicks via `TabClicked`, `MarkedTableSource` nested type still exists.
+  walks grapheme clusters correctly, `TabBar` reports clicks via `TabClicked`,
+  `MarkedTableSource` nested type still exists.
   These catch breakages on Terminal.Gui version upgrades.
 - **App behavior** (`AppBehaviorTests.cs`) - click-to-sort header→sort-field mapping,
   truncated-id upgrade falling back to match-by-name, and the contextual empty-state
@@ -266,7 +266,8 @@ Mirrors `src/handler.rs` in the upstream:
 | `c`                             | Open changelog                                                                 |
 | `?`                             | Toggle help                                                                    |
 | `t`                             | Open theme picker (Amber / Sage / Moss & Olive / Dusty Rose)                   |
-| `q` / `Esc` / `Ctrl+C`          | Quit                                                                           |
+| `q` / `Ctrl+Q` / `Ctrl+C`       | Quit (`Ctrl+Q` also works from fields and dialogs)                             |
+| `Esc`                         | Cancel an operation or leave an input; at the top level, show the quit hint    |
 
 ## Architecture
 
@@ -277,13 +278,13 @@ Mirrors `src/handler.rs` in the upstream:
                           ▼
    ┌─────────────────────────────────────────────────────────────┐
    │                            App                              │
-   │  ┌────┐ ┌─────────┐  ┌──────────────┐  ┌─────────────────┐  │
-   │  │Logo│ │ TabBar  │  │ PackageList  │  │  DetailPanel    │  │
-   │  └────┘ └─────────┘  │ (TableView + │  │  (direct-draw   │  │
-   │                      │  MarkedTable │  │   span model)   │  │
-   │  ┌────────────────┐  │  Source)     │  │                 │  │
-   │  │   StatusBar    │  └──────────────┘  └─────────────────┘  │
-   │  └────────────────┘  ┌──────────────────────────────────┐   │
+   │  Window title + right-aligned TabBar + context row          │
+   │  ┌──────────────────────┐  ┌────────────────────────────┐  │
+   │  │ PackageList          │  │ DetailPanel                │  │
+   │  │ TableView + markers  │  │ Scrollable package details │  │
+   │  └──────────────────────┘  └────────────────────────────┘  │
+   │  StatusBar + small-terminal resize guard                    │
+   │  ┌──────────────────────────────────────────────────────┐   │
    │                      │  Modals: HelpDialog, VersionInput│   │
    │                      └──────────────────────────────────┘   │
    └────────────────────────────────┬────────────────────────────┘
@@ -348,7 +349,7 @@ winget-tui-sharp/
 │   ├── ComBackend.cs        # WinGet COM API backend (Windows TFM only; pins → CLI)
 │   ├── MockBackend.cs       # Fake packages so the UI runs anywhere
 │   ├── AppState.cs          # Filters, sort, selection, generation counters
-│   ├── Theme.cs             # Warm-amber palette + Schemes + pixel-art Logo
+│   ├── Theme.cs             # Switchable palettes + Schemes
 │   ├── DetailPanel.cs       # Scrollable package detail view with inline rich-text rendering
 │   ├── Ui.cs                # TabBar, StatusBar, Dialogs (widgets)
 │   └── App.cs               # Main Runnable; state coordination; nested MarkedTableSource
