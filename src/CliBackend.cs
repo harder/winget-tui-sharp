@@ -73,7 +73,7 @@ public sealed partial class CliBackend : IBackend
     public Task<IReadOnlyList<string>> ListVersionsAsync (string id, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<string>> ([]);
 
-    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
+    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, InstallSettings? settings, CancellationToken ct)
         => Task.FromResult<InstallerPreview?> (null);
 
     // No CLI equivalent to CheckInstalledStatus — null signals "verify unavailable on this backend".

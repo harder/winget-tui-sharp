@@ -474,13 +474,14 @@ public sealed class ComBackend : IBackend
         return versions;
     }
 
-    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
-        => WithPackageManagerAsync (ct, (pm, token) => GetInstallerPreviewCoreAsync (pm, id, version, token));
+    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, InstallSettings? settings, CancellationToken ct)
+        => WithPackageManagerAsync (ct, (pm, token) => GetInstallerPreviewCoreAsync (pm, id, version, settings, token));
 
     private static async Task<InstallerPreview?> GetInstallerPreviewCoreAsync (
         PackageManager pm,
         string id,
         string? version,
+        InstallSettings? settings,
         CancellationToken ct)
     {
         CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
@@ -491,14 +492,15 @@ public sealed class ComBackend : IBackend
         }
 
         PackageVersionInfo? versionInfo;
+        PackageVersionId? selectedVersionId = null;
 
         if (!string.IsNullOrEmpty (version))
         {
             // Explicit version: resolve exactly that. Do NOT fall back to a different version —
             // a fallback would compute the preview from the wrong installer while the confirm
             // dialog still says "Install X <version>".
-            PackageVersionId? vid = FindVersionId (pkg, version, ct);
-            versionInfo = vid is null ? null : SafeGetVersionInfo (pkg, vid);
+            selectedVersionId = FindVersionId (pkg, version, ct);
+            versionInfo = selectedVersionId is null ? null : SafeGetVersionInfo (pkg, selectedVersionId);
         }
         else
         {
@@ -514,8 +516,16 @@ public sealed class ComBackend : IBackend
         try
         {
             ct.ThrowIfCancellationRequested ();
-            // Resolve the installer that *would* be chosen for default options on this machine.
-            PackageInstallerInfo installer = versionInfo.GetApplicableInstaller (new InstallOptions ());
+            // Match the options passed to InstallPackageAsync, including advanced scope and
+            // architecture choices. Otherwise the confirmation could describe a different installer.
+            InstallOptions options = CreateInstallOptions (settings);
+
+            if (selectedVersionId is not null)
+            {
+                options.PackageVersionId = selectedVersionId;
+            }
+
+            PackageInstallerInfo installer = versionInfo.GetApplicableInstaller (options);
 
             if (installer is null)
             {
@@ -634,13 +644,7 @@ public sealed class ComBackend : IBackend
         }
 
         // Default to a silent install; advanced settings may override mode/scope/arch/args below.
-        InstallOptions options = new ()
-        {
-            PackageInstallMode = PackageInstallMode.Silent,
-            AcceptPackageAgreements = true
-        };
-
-        ApplyInstallSettings (options, settings);
+        InstallOptions options = CreateInstallOptions (settings);
 
         if (!string.IsNullOrEmpty (version))
         {
@@ -1194,6 +1198,20 @@ public sealed class ComBackend : IBackend
             Environment.GetFolderPath (Environment.SpecialFolder.UserProfile),
             "Downloads",
             "winget-tui");
+
+    /// <summary>Build the same COM options for installer preview and installation.</summary>
+    private static InstallOptions CreateInstallOptions (InstallSettings? settings)
+    {
+        InstallOptions options = new ()
+        {
+            PackageInstallMode = PackageInstallMode.Silent,
+            AcceptPackageAgreements = true
+        };
+
+        ApplyInstallSettings (options, settings);
+
+        return options;
+    }
 
     /// <summary>Map the user's advanced-install choices onto the WinGet InstallOptions.</summary>
     private static void ApplyInstallSettings (InstallOptions options, InstallSettings? settings)
