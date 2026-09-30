@@ -201,6 +201,62 @@ public class AppBehaviorTests
     }
 
     [Fact]
+    public void App_LocalFilter_KeepsSelectedSourceWhenIdsMatch ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+
+        state.Packages =
+        [
+            new () { Id = "shared.app", Name = "Desktop App", Version = "1", Source = "winget" },
+            new () { Id = "shared.app", Name = "Store App", Version = "2", Source = "msstore" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        table.Value = new (new (0, 1));
+        state.InputMode = InputMode.LocalFilter;
+
+        input.Text = "Store";
+        Assert.Equal ("msstore", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Source);
+
+        input.Text = string.Empty;
+        Assert.Equal ("msstore", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Source);
+    }
+
+    [Fact]
+    public void App_SortedAvailableColumn_KeepsItsReservedWidth ()
+    {
+        App app = new (new MockBackend ()) { Frame = new (0, 0, 140, 40) };
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+        LayoutView (app, new (140, 40));
+        state.Mode = AppMode.Upgrades;
+        state.Packages = [new () { Id = "test.app", Name = "Test App", Version = "1", AvailableVersion = "2" }];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        int availableColumn = Array.FindIndex (table.Table!.ColumnNames,
+            name => name.StartsWith ("Available", StringComparison.Ordinal));
+        int idColumn = Array.FindIndex (table.Table.ColumnNames,
+            name => name.StartsWith ("Id", StringComparison.Ordinal));
+        int idWidth = table.Style.GetOrCreateColumnStyle (idColumn).MinWidth;
+
+        state.SortField = SortField.AvailableVersion;
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+
+        Assert.Equal ("Available ↑", table.Table!.ColumnNames [availableColumn]);
+        Assert.Equal (14, table.Style.GetOrCreateColumnStyle (availableColumn).MinWidth);
+        Assert.Equal (14, table.Style.GetOrCreateColumnStyle (availableColumn).MaxWidth);
+        Assert.Equal (idWidth, table.Style.GetOrCreateColumnStyle (idColumn).MinWidth);
+    }
+
+    [Fact]
     public void App_FilterShortcuts_ClearTextAndExitOnEmptyBackspace ()
     {
         App app = new (new MockBackend ());
