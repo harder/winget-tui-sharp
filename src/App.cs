@@ -288,7 +288,8 @@ public sealed class App : Window
 
         if (_sizeGuard.Visible)
         {
-            if (key.AsRune.Value is 'q' or 'Q')
+            if (key.AsRune.Value is 'q' or 'Q'
+                || key.KeyCode == (KeyCode.C | KeyCode.CtrlMask))
             {
                 RequestGracefulStop ();
             }

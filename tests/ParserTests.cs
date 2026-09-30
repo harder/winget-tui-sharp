@@ -682,6 +682,24 @@ public class ParserTests
         Assert.Equal ("26.*", pins ["7zip.7zip"].GatingVersion);
     }
 
+    [Fact]
+    public void ParsePins_HandlesMultiwordSource ()
+    {
+        const string output = """
+            Name                Id        Version  Source            Pin type Pinned version
+            -------------------------------------------------------------------------------
+            Git                 Git.Git   2.55.0.5 My Private Source Blocking
+            7-Zip 26.02 (arm64) 7zip.7zip 26.02    My Private Source Gating   26.*
+            """;
+
+        IReadOnlyDictionary<string, PinState> pins = CliBackend.ParsePins (output);
+
+        Assert.Equal (2, pins.Count);
+        Assert.Equal (PinStateKind.Blocking, pins ["Git.Git"].Kind);
+        Assert.Equal (PinStateKind.Gating, pins ["7zip.7zip"].Kind);
+        Assert.Equal ("26.*", pins ["7zip.7zip"].GatingVersion);
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // ParseTable — special id formats that broke with earlier parser versions
     // ──────────────────────────────────────────────────────────────────────

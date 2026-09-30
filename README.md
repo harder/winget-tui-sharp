@@ -284,7 +284,7 @@ Mirrors `src/handler.rs` in the upstream:
    │  │ TableView + markers  │  │ Scrollable package details │  │
    │  └──────────────────────┘  └────────────────────────────┘  │
    │  StatusBar + small-terminal resize guard                    │
-   │  ┌──────────────────────────────────────────────────────┐   │
+   │                      ┌──────────────────────────────────┐   │
    │                      │  Modals: HelpDialog, VersionInput│   │
    │                      └──────────────────────────────────┘   │
    └────────────────────────────────┬────────────────────────────┘

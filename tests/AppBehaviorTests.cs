@@ -336,6 +336,20 @@ public class AppBehaviorTests
     }
 
     [Fact]
+    public void App_ResizeGuardCtrlC_RequestsShutdown ()
+    {
+        App app = new (new MockBackend ());
+        LayoutView (app, new (70, 20));
+        Assert.True (GetPrivateField<TerminalSizeGuardView> (app, "_sizeGuard").Visible);
+
+        Key quit = new (KeyCode.C | KeyCode.CtrlMask);
+        InvokePrivate (app, "OnGlobalKeyDown", app, quit);
+
+        Assert.True (quit.Handled);
+        Assert.Equal (0, GetPrivateInt (app, "_uiAccepting"));
+    }
+
+    [Fact]
     public void UpgradeQueryFor_TruncatedId_FallsBackToName ()
     {
         // winget truncates long ids in tabular output with `…`; an --id match can't succeed, so
