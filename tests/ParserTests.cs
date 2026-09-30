@@ -434,6 +434,9 @@ public class ParserTests
     [InlineData ("1.2", "1.2.0", 0)]            // missing segments treated as 0
     [InlineData ("2.0.0", "10.0.0", -1)]        // numeric comparison, not lexical
     [InlineData ("1.0.0-beta", "1.0.0-alpha", 1)]
+    [InlineData ("1.0", "1.beta", -1)]
+    [InlineData ("1.beta", "1.0", 1)]
+    [InlineData ("1.RC", "1.rc", 0)]
     public void CompareVersionsLike_OrdersAsExpected (string a, string b, int expectedSign)
     {
         int actual = CliBackend.CompareVersionsLike (a, b);

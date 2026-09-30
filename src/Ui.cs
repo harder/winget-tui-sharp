@@ -308,9 +308,9 @@ public sealed class StatusBar : View
     {
         return InputMode switch
         {
-            InputMode.Search => ["Esc Cancel", "Enter Search"],
-            InputMode.LocalFilter => ["Esc Clear", "Enter Done", "Bksp Del"],
-            InputMode.VersionInput => ["Esc Cancel", "Enter Confirm", "Bksp Del"],
+            InputMode.Search => ["Esc Cancel", "Enter Search", "Ctrl+U Clear"],
+            InputMode.LocalFilter => ["Esc Clear", "Enter Done", "Ctrl+U Clear", "Bksp Del"],
+            InputMode.VersionInput => ["Esc Cancel", "Enter Confirm", "Ctrl+U Clear"],
             _ => Mode switch
             {
                 AppMode.Search => ["/ Search", "f Source", "r Refresh", "e Export", "? Help", "q Quit"],
@@ -345,6 +345,14 @@ public sealed class VersionInputDialog : Runnable<string?>
 
         Label prompt = new () { X = 1, Y = 1, Text = "Version:" };
         _input = new () { X = Pos.Right (prompt) + 1, Y = 1, Width = Dim.Fill (1) };
+        _input.KeyDown += (_, key) =>
+                          {
+                              if (key.KeyCode == (KeyCode.U | KeyCode.CtrlMask))
+                              {
+                                  _input.Text = string.Empty;
+                                  key.Handled = true;
+                              }
+                          };
 
         Button confirm = new () { X = Pos.Center () - 8, Y = 4, Text = "_Confirm", IsDefault = true };
         Button cancel = new () { X = Pos.Center () + 2, Y = 4, Text = "Cancel" };
@@ -656,7 +664,7 @@ public sealed class HelpDialog : Runnable
           U             Batch upgrade selected
           e             Export visible list to CSV
           P             Cycle pin filter
-          S             Cycle sort columns (Name / Id / Version, ↑/↓)
+          S             Cycle sort columns (Name / Id / Version / Available in Upgrades, ↑/↓)
           o             Open package homepage
           c             Open changelog / release notes
 

@@ -26,7 +26,8 @@ public enum SortField
     None,
     Name,
     Id,
-    Version
+    Version,
+    AvailableVersion
 }
 
 public enum SortDir

@@ -1042,7 +1042,7 @@ public sealed partial class CliBackend : IBackend
             }
             else
             {
-                int cmp = string.CompareOrdinal (ap, bp);
+                int cmp = string.Compare (ap, bp, StringComparison.OrdinalIgnoreCase);
 
                 if (cmp != 0)
                 {

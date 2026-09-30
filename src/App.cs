@@ -165,9 +165,11 @@ public sealed class App : Runnable
                                     {
                                         if (_state.InputMode == InputMode.LocalFilter)
                                         {
+                                            string? selectedId = CurrentPackage ()?.Id;
                                             _state.LocalFilter = _filterInput.Text ?? string.Empty;
                                             _state.ApplyFilter ();
                                             RefreshTable ();
+                                            RestoreCursorOrSelectFirst (selectedId);
                                         }
                                         else if (_state.InputMode == InputMode.Search)
                                         {
@@ -772,7 +774,7 @@ public sealed class App : Runnable
                 },
                 [HeaderWithSort ("Id", SortField.Id)] = p => FormatIdForDisplay (p.Id),
                 [HeaderWithSort ("Version", SortField.Version)] = p => p.Version,
-                ["Available"] = p => p.AvailableVersion ?? string.Empty,
+                [HeaderWithSort ("Available", SortField.AvailableVersion)] = p => p.AvailableVersion ?? string.Empty,
                 ["Source"] = p => p.Source
             };
         }
@@ -961,7 +963,7 @@ public sealed class App : Runnable
 
     /// <summary>
     /// Maps a clicked column header to the field it sorts by, or null for non-sortable columns
-    /// (the marker, Available, Source). The header text may carry a trailing sort arrow.
+    /// (the marker and Source). The header text may carry a trailing sort arrow.
     /// </summary>
     internal static SortField? SortFieldForHeader (string columnName)
     {
@@ -978,6 +980,11 @@ public sealed class App : Runnable
         if (columnName.StartsWith ("Version", StringComparison.Ordinal))
         {
             return SortField.Version;
+        }
+
+        if (columnName.StartsWith ("Available", StringComparison.Ordinal))
+        {
+            return SortField.AvailableVersion;
         }
 
         return null;
@@ -1234,14 +1241,36 @@ public sealed class App : Runnable
 
     private void OnFilterKeyDown (object? sender, Key key)
     {
+        if (key.KeyCode == (KeyCode.C | KeyCode.CtrlMask))
+        {
+            RequestGracefulStop ();
+            key.Handled = true;
+
+            return;
+        }
+
+        if (key.KeyCode == (KeyCode.U | KeyCode.CtrlMask))
+        {
+            _filterInput.Text = string.Empty;
+            key.Handled = true;
+
+            return;
+        }
+
+        if (key.KeyCode == KeyCode.Backspace && _state.InputMode == InputMode.LocalFilter
+            && string.IsNullOrEmpty (_filterInput.Text))
+        {
+            ExitInputMode ();
+            key.Handled = true;
+
+            return;
+        }
+
         if (key.KeyCode == KeyCode.Esc)
         {
             if (_state.InputMode == InputMode.LocalFilter)
             {
-                _state.LocalFilter = string.Empty;
                 _filterInput.Text = string.Empty;
-                _state.ApplyFilter ();
-                RefreshTable ();
             }
 
             ExitInputMode ();
@@ -1585,6 +1614,12 @@ public sealed class App : Runnable
     /// </summary>
     private void SwitchToMode (AppMode mode)
     {
+        if (mode != AppMode.Upgrades && _state.SortField == SortField.AvailableVersion)
+        {
+            _state.SortField = SortField.None;
+            _state.SortDir = SortDir.Asc;
+        }
+
         _state.Mode = mode;
         _state.LocalFilter = string.Empty;
         _state.BatchSelected.Clear ();
