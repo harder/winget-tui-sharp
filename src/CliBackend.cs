@@ -382,6 +382,21 @@ public sealed partial class CliBackend : IBackend
             return pins;
         }
 
+        string pinHeader = StripControl (lines [sepIdx - 1]);
+        // Current English winget uses "Pin type" and can collapse adjacent columns to
+        // single spaces. ParseHeader cannot always distinguish those columns, even in a
+        // wide table. Use the header's Id/Version positions for the package ID, then read
+        // the trailing pin fields to tolerate names and sources containing spaces.
+        bool hasPinTypeHeader = pinHeader.Contains ("Pin type", StringComparison.OrdinalIgnoreCase);
+        bool hasPinnedVersionHeader = pinHeader.Contains ("Pinned version", StringComparison.OrdinalIgnoreCase);
+        Match pinIdHeader = Regex.Match (pinHeader, @"\bId\b", RegexOptions.IgnoreCase);
+        Match pinVersionHeader = Regex.Match (pinHeader, @"\bVersion\b", RegexOptions.IgnoreCase);
+        List<(string Name, int Start)> pinIdColumns = pinIdHeader.Success
+                                                        && pinVersionHeader.Success
+                                                        && pinVersionHeader.Index > pinIdHeader.Index
+                                                            ? [("Id", pinIdHeader.Index), ("Version", pinVersionHeader.Index)]
+                                                            : [];
+
         int idIdx = ColIndex (columns, "id", "id.");
         int versionIdx = ColIndex (columns, "pinned", "pinned version", "pinnedversion", "version", "versión", "versão");
         int typeIdx = ColIndex (columns, "type", "typ", "tipo");
@@ -419,6 +434,33 @@ public sealed partial class CliBackend : IBackend
                 break;
             }
 
+            if (hasPinTypeHeader)
+            {
+                string [] fields = sanitized.Split (' ', StringSplitOptions.RemoveEmptyEntries);
+
+                // Blocking rows leave Pinned version blank even when another row's gating
+                // pin causes the column to appear in the shared header.
+                bool hasPinnedVersion = hasPinnedVersionHeader
+                                        && fields.Length >= 6
+                                        && !LooksLikePinType (fields [^1])
+                                        && LooksLikePinType (fields [^2]);
+                int trailingFields = hasPinnedVersion ? 5 : 4;
+
+                if (fields.Length > trailingFields && pinIdColumns.Count > 0)
+                {
+                    string parsedId = SliceColumn (sanitized, pinIdColumns, 0).Trim ();
+                    string type = fields [^(hasPinnedVersion ? 2 : 1)];
+                    string parsedPinnedVersion = hasPinnedVersion ? fields [^1] : string.Empty;
+
+                    if (!string.IsNullOrEmpty (parsedId))
+                    {
+                        pins [parsedId] = ParsePinState (type, parsedPinnedVersion);
+                    }
+                }
+
+                continue;
+            }
+
             string id = SliceColumn (sanitized, columns, idIdx).Trim ();
 
             if (string.IsNullOrEmpty (id))
@@ -433,6 +475,11 @@ public sealed partial class CliBackend : IBackend
 
         return pins;
     }
+
+    private static bool LooksLikePinType (string value) =>
+        value.Contains ("block", StringComparison.OrdinalIgnoreCase)
+        || value.Contains ("gat", StringComparison.OrdinalIgnoreCase)
+        || value.Contains ("pin", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Map winget's pin-type column text to a <see cref="PinState"/>. Mirrors upstream's
@@ -453,7 +500,7 @@ public sealed partial class CliBackend : IBackend
             return new (PinStateKind.Gating, version);
         }
 
-        if (kind.Contains ("gate"))
+        if (kind.Contains ("gat"))
         {
             return string.IsNullOrEmpty (version)
                        ? new (PinStateKind.Pinned)

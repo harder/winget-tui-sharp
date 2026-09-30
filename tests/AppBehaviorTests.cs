@@ -72,7 +72,7 @@ public class AppBehaviorTests
     }
 
     [Fact]
-    public void App_WideWindow_PlacesTabsToTheRightOfTheLogo ()
+    public void App_WideWindow_UsesSkillViewStyleCompactHeader ()
     {
         App app = new (new MockBackend ())
         {
@@ -80,14 +80,28 @@ public class AppBehaviorTests
         };
         LayoutView (app, new (120, 40));
 
-        Logo logo = GetPrivateField<Logo> (app, "_logo");
         TabBar tabBar = GetPrivateField<TabBar> (app, "_tabBar");
+        Label context = GetPrivateField<Label> (app, "_contextLabel");
         FrameView listFrame = GetPrivateField<FrameView> (app, "_listFrame");
 
-        Assert.Equal (2, tabBar.Frame.Y);
-        Assert.True (tabBar.Frame.X >= logo.Frame.X + logo.Frame.Width);
-        // One row of breathing room below the wordmark before the list begins.
-        Assert.Equal (Logo.LogoHeight + 1, listFrame.Frame.Y);
+        Assert.Equal ("WinGet TUI — winget-tui", app.Title);
+        Assert.Equal (0, tabBar.Frame.Y);
+        Assert.Equal (app.Viewport.Width, tabBar.Frame.Width);
+        Assert.Equal (1, context.Frame.Y);
+        Assert.Equal ("Installed packages", context.Text);
+        Assert.Equal (2, listFrame.Frame.Y);
+    }
+
+    [Fact]
+    public void App_SmallWindow_ShowsResizeGuard ()
+    {
+        App app = new (new MockBackend ()) { Frame = new (0, 0, 70, 20) };
+        LayoutView (app, new (70, 20));
+
+        TerminalSizeGuardView guard = GetPrivateField<TerminalSizeGuardView> (app, "_sizeGuard");
+
+        Assert.True (guard.Visible);
+        Assert.Contains ("70×20", TerminalSizeGuardView.BuildMessage (70, 20));
     }
 
     [Fact]
@@ -322,6 +336,20 @@ public class AppBehaviorTests
     }
 
     [Fact]
+    public void App_ResizeGuardCtrlC_RequestsShutdown ()
+    {
+        App app = new (new MockBackend ());
+        LayoutView (app, new (70, 20));
+        Assert.True (GetPrivateField<TerminalSizeGuardView> (app, "_sizeGuard").Visible);
+
+        Key quit = new (KeyCode.C | KeyCode.CtrlMask);
+        InvokePrivate (app, "OnGlobalKeyDown", app, quit);
+
+        Assert.True (quit.Handled);
+        Assert.Equal (0, GetPrivateInt (app, "_uiAccepting"));
+    }
+
+    [Fact]
     public void UpgradeQueryFor_TruncatedId_FallsBackToName ()
     {
         // winget truncates long ids in tabular output with `…`; an --id match can't succeed, so
@@ -343,6 +371,8 @@ public class AppBehaviorTests
     [InlineData (AppMode.Upgrades, PinFilter.All, "", "All packages are up to date!")]
     [InlineData (AppMode.Upgrades, PinFilter.PinnedOnly, "", "No pinned packages with upgrades found.")]
     [InlineData (AppMode.Upgrades, PinFilter.UnpinnedOnly, "", "No unpinned packages with upgrades found.")]
+    [InlineData (AppMode.Installed, PinFilter.PinnedOnly, "", "No pinned packages found.")]
+    [InlineData (AppMode.Installed, PinFilter.UnpinnedOnly, "", "No unpinned packages found.")]
     [InlineData (AppMode.Installed, PinFilter.All, "", "No packages found.")]
     public void EmptyStateMessage_ReflectsModeAndPinFilter (AppMode mode, PinFilter pin, string filter, string expected)
     {

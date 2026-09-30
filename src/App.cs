@@ -4,14 +4,13 @@ using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
 namespace WingetTuiSharp;
 
 /// <summary>
-/// Top-level window. Hosts the header (logo + tabs), search/filter input,
+/// Top-level window. Hosts the compact header, search/filter input,
 /// 60/40 split between package list and detail panel, and the status bar at the bottom.
 /// </summary>
-public sealed class App : Runnable
+public sealed class App : Window
 {
-    /// <summary>Total rows reserved by the logo/header chrome before search or main content.</summary>
-    /// <remarks>One row of breathing room below the wordmark before the list/search start.</remarks>
-    private const int HeaderHeight = Logo.LogoHeight + 1;
+    /// <summary>One navigation row and one contextual row before the main content.</summary>
+    private const int HeaderHeight = 2;
 
     // Debounce before an uncached detail fetch fires. Scrolling the list changes the selection
     // rapidly; without this, every row the cursor passes over issues a full backend detail
@@ -24,12 +23,13 @@ public sealed class App : Runnable
 
     private readonly AppState _state;
     private readonly TabBar _tabBar;
-    private readonly Logo _logo;
+    private readonly Label _contextLabel;
     private readonly TextField _filterInput;
     private readonly FrameView _listFrame;
     private readonly SortableTableView _packageTable;
     private readonly DetailPanel _detailPanel;
     private readonly StatusBar _statusBar;
+    private readonly TerminalSizeGuardView _sizeGuard;
     private readonly Label _searchHint;
     private readonly Label _backendLabel;
     private readonly BackgroundTaskTracker _background = new ();
@@ -54,6 +54,7 @@ public sealed class App : Runnable
     private int _uiAccepting = 1;
     private PendingProgress? _pendingProgress;
     private bool _progressDispatcherRunning;
+    private bool _globalKeysAttached;
 
     public App (IBackend backend, TimeSpan? smokeDelay = null)
     {
@@ -62,21 +63,25 @@ public sealed class App : Runnable
         _viewCts = CreateLifetimeLinkedSource ();
         _detailCts = CreateLifetimeLinkedSource ();
         SchemeName = Theme.AppSchemeName;
-        Title = "winget-tui (Terminal.Gui port)";
+        Title = "WinGet TUI — winget-tui";
 
-        // --- Header: logo on the left, tabs to the right, vertically centered against the
-        // wordmark. Search/filter lives immediately below the logo header and temporarily
-        // pushes the list/detail panes down one row while active. ---
-        _logo = new () { X = 1, Y = 0 };
-        _tabBar = new () { X = Pos.Right (_logo) + 4, Y = (Logo.LogoHeight - 1) / 2, Width = Dim.Fill (1) };
+        // Skill View shell: brand in the window border, right-aligned tabs on the first row,
+        // and workspace context on the second. Search temporarily pushes the panes down one row.
+        _tabBar = new () { X = 0, Y = 0, Width = Dim.Fill () };
+        _contextLabel = new ()
+        {
+            X = 1,
+            Y = 1,
+            Width = Dim.Percent (50),
+            Text = "Installed packages",
+            SchemeName = Theme.AccentSchemeName
+        };
 
-        // Which backend is live + its winget version, dim in the top-right of the header. Empty
-        // until DescribeAsync resolves at startup (see OnIsRunningChanged). Anchored to the last
-        // logo row so it never collides with the tab row above it.
+        // Which backend is live + its winget version, dim on the context row.
         _backendLabel = new ()
         {
             X = Pos.AnchorEnd (),
-            Y = Logo.LogoHeight - 1,
+            Y = 1,
             Height = 1,
             Width = Dim.Auto (),
             Text = string.Empty,
@@ -147,7 +152,10 @@ public sealed class App : Runnable
             Width = Dim.Fill ()
         };
 
-        Add (_logo, _tabBar, _backendLabel, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar);
+        _sizeGuard = new ();
+
+        Add (_tabBar, _contextLabel, _backendLabel, _searchHint, _filterInput, _listFrame, _detailPanel, _statusBar, _sizeGuard);
+        FrameChanged += (_, _) => _sizeGuard.UpdateForSize (Frame.Width, Frame.Height);
 
         WireEvents ();
         RefreshTable ();
@@ -226,6 +234,12 @@ public sealed class App : Runnable
     {
         base.OnIsRunningChanged (newIsRunning);
 
+        if (newIsRunning && !_globalKeysAttached && App is { } keyboardApp)
+        {
+            keyboardApp.Keyboard.KeyDown += OnGlobalKeyDown;
+            _globalKeysAttached = true;
+        }
+
         if (newIsRunning && !_initialLoadDone)
         {
             _initialLoadDone = true;
@@ -247,8 +261,40 @@ public sealed class App : Runnable
         }
         else if (!newIsRunning)
         {
+            if (_globalKeysAttached && App is { } stoppingApp)
+            {
+                stoppingApp.Keyboard.KeyDown -= OnGlobalKeyDown;
+                _globalKeysAttached = false;
+            }
+
             BeginShutdown ();
             StopSpinner ();
+        }
+    }
+
+    private void OnGlobalKeyDown (object? sender, Key key)
+    {
+        if (key.KeyCode == (KeyCode.Q | KeyCode.CtrlMask))
+        {
+            if (App is { } app && app.TopRunnable is { } top && !ReferenceEquals (top, this))
+            {
+                app.RequestStop (top);
+            }
+
+            RequestGracefulStop ();
+            key.Handled = true;
+            return;
+        }
+
+        if (_sizeGuard.Visible)
+        {
+            if (key.AsRune.Value is 'q' or 'Q'
+                || key.KeyCode == (KeyCode.C | KeyCode.CtrlMask))
+            {
+                RequestGracefulStop ();
+            }
+
+            key.Handled = true;
         }
     }
 
@@ -955,6 +1001,8 @@ public sealed class App : Runnable
             AppMode.Upgrades when state.PinFilter == PinFilter.PinnedOnly => "No pinned packages with upgrades found.",
             AppMode.Upgrades when state.PinFilter == PinFilter.UnpinnedOnly => "No unpinned packages with upgrades found.",
             AppMode.Upgrades => "All packages are up to date!",
+            AppMode.Installed when state.PinFilter == PinFilter.PinnedOnly => "No pinned packages found.",
+            AppMode.Installed when state.PinFilter == PinFilter.UnpinnedOnly => "No unpinned packages found.",
             _ => "No packages found."
         };
     }
@@ -1021,7 +1069,16 @@ public sealed class App : Runnable
         RefreshTable ();
     }
 
-    private void SyncTabBar () => _tabBar.Active = _state.Mode;
+    private void SyncTabBar ()
+    {
+        _tabBar.Active = _state.Mode;
+        _contextLabel.Text = _state.Mode switch
+        {
+            AppMode.Search => "Search packages",
+            AppMode.Upgrades => "Available upgrades",
+            _ => "Installed packages"
+        };
+    }
 
     /// <summary>
     /// Try to position the cursor on the same package the user had selected before the
@@ -1336,8 +1393,8 @@ public sealed class App : Runnable
         {
             case KeyCode.Esc:
 
-                // While an operation is in flight, Esc cancels it (COM aborts cooperatively)
-                // rather than quitting. With nothing running, Esc quits as before.
+                // While an operation is in flight, Esc cancels it. At top level, keep the
+                // workspace open and point to the deliberate quit shortcuts.
                 if (Volatile.Read (ref _opCts) is { } opCts)
                 {
                     opCts.Cancel ();
@@ -1348,7 +1405,8 @@ public sealed class App : Runnable
                     return;
                 }
 
-                RequestGracefulStop ();
+                SetStatus ("Press q or Ctrl+Q to quit");
+                RefreshStatusBar ();
                 key.Handled = true;
 
                 return;
@@ -1358,6 +1416,7 @@ public sealed class App : Runnable
 
                 return;
             case KeyCode.C | KeyCode.CtrlMask:
+            case KeyCode.Q | KeyCode.CtrlMask:
                 RequestGracefulStop ();
                 key.Handled = true;
 
@@ -2792,7 +2851,7 @@ public sealed class App : Runnable
     }
 
     /// <summary>Forces a full-app repaint after a live theme swap. Scheme-named views and the
-    /// direct-draw Attribute calls in DetailPanel/Ui/Logo already re-read Theme.* fields at draw
+    /// direct-draw Attribute calls in DetailPanel/Ui already re-read Theme.* fields at draw
     /// time - this just needs to trigger that redraw.</summary>
     private void RefreshTheme ()
     {

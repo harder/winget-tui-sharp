@@ -1,12 +1,17 @@
 # Handoff — Windows COM-backend verification
 
-**Status (2026-07-16):** P0 (COM activates under Native AOT) and P1 (COM-backend operations) are both
-resolved and fully verified — P0 via read-only diagnostics + interactive TUI passes (sessions 3–4 below),
-P1 via a complete manual pass on Windows. Only **P2** (real-Windows review-flagged concerns: thread-
-agility, unhealthy-source recovery, pinning, win-arm64, accumulated Terminal.Gui/WinGet-COM version
-bumps) and two **P1.5** upstream-parity items (mouse click-to-sort, truncated-id fallback) remain open —
-see `WINDOWS-TESTING.md`, which has a self-contained runbook for testing those with an agent driving the
-interactive TUI on Windows.
+**Status (2026-09-30):** P0 (COM activation under Native AOT) remains verified, including a native
+ARM64 publish and live COM startup. The compact `winget pin list` parser failure with winget
+1.30.140-preview is fixed and the pin/unpin flow passed on the native ARM64 COM build. The checklist
+still records an ARM64/x64 advanced-install preview mismatch. Rapid COM navigation passed. The remaining interactive parity checks, unhealthy-
+source recovery, and a conclusive CLI cancellation test are still open; the checklist has the exact
+results and cleanup from this session.
+
+The current native ARM64 COM install path also has a newly reproduced `0xC0000005` crash during
+zoxide installation (WinGet COM 1.29.380). The crash reproduces from an unmodified-HEAD native
+AOT build, so the compact-header work did not introduce it. Direct WinGet and the app's CLI backend
+installed and uninstalled zoxide successfully; it is absent after cleanup. See the open P1 regression item in
+`WINDOWS-TESTING.md` before shipping the COM mutation path.
 
 This file exists for the non-obvious findings from getting P0/P1 there in the first place — the fix
 mechanism, the dead ends, and a couple of gotchas worth not re-discovering. It is not a task list; for

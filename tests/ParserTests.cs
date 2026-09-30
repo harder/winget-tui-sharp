@@ -636,6 +636,70 @@ public class ParserTests
         Assert.Equal ("2.45.*", pins ["Acme.Bar"].GatingVersion);
     }
 
+    [Fact]
+    public void ParsePins_HandlesCompactWindowsTable ()
+    {
+        const string output = """
+            Name Id      Version  Source Pin type
+            -------------------------------------
+            Git  Git.Git 2.55.0.5 winget Blocking
+            """;
+
+        IReadOnlyDictionary<string, PinState> pins = CliBackend.ParsePins (output);
+
+        Assert.Equal (PinStateKind.Blocking, pins ["Git.Git"].Kind);
+    }
+
+    [Fact]
+    public void ParsePins_HandlesCompactGatingTable ()
+    {
+        const string output = """
+            Name Id      Version  Source Pin type Pinned version
+            ----------------------------------------------------
+            Git  Git.Git 2.55.0.5 winget Gating   2.55.*
+            """;
+
+        IReadOnlyDictionary<string, PinState> pins = CliBackend.ParsePins (output);
+
+        Assert.Equal (PinStateKind.Gating, pins ["Git.Git"].Kind);
+        Assert.Equal ("2.55.*", pins ["Git.Git"].GatingVersion);
+    }
+
+    [Fact]
+    public void ParsePins_HandlesMixedBlockingAndGatingWindowsTable ()
+    {
+        const string output = """
+            Name                Id        Version  Source Pin type Pinned version
+            ---------------------------------------------------------------------
+            Git                 Git.Git   2.55.0.5 winget Blocking
+            7-Zip 26.02 (arm64) 7zip.7zip 26.02    winget Gating   26.*
+            """;
+
+        IReadOnlyDictionary<string, PinState> pins = CliBackend.ParsePins (output);
+
+        Assert.Equal (PinStateKind.Blocking, pins ["Git.Git"].Kind);
+        Assert.Equal (PinStateKind.Gating, pins ["7zip.7zip"].Kind);
+        Assert.Equal ("26.*", pins ["7zip.7zip"].GatingVersion);
+    }
+
+    [Fact]
+    public void ParsePins_HandlesMultiwordSource ()
+    {
+        const string output = """
+            Name                Id        Version  Source            Pin type Pinned version
+            -------------------------------------------------------------------------------
+            Git                 Git.Git   2.55.0.5 My Private Source Blocking
+            7-Zip 26.02 (arm64) 7zip.7zip 26.02    My Private Source Gating   26.*
+            """;
+
+        IReadOnlyDictionary<string, PinState> pins = CliBackend.ParsePins (output);
+
+        Assert.Equal (2, pins.Count);
+        Assert.Equal (PinStateKind.Blocking, pins ["Git.Git"].Kind);
+        Assert.Equal (PinStateKind.Gating, pins ["7zip.7zip"].Kind);
+        Assert.Equal ("26.*", pins ["7zip.7zip"].GatingVersion);
+    }
+
     // ──────────────────────────────────────────────────────────────────────
     // ParseTable — special id formats that broke with earlier parser versions
     // ──────────────────────────────────────────────────────────────────────
@@ -1092,39 +1156,11 @@ public class ParserTests
         Assert.Equal (4, "极速".GetColumns ());
     }
 
-    [Fact]
-    public void TerminalGui_LogoHasExpectedDimensions ()
-    {
-        // The Logo's wordmark is 51 cols × 5 rows. If View's Width/Height contract
-        // changes signature, this catches it.
-        Logo logo = new ();
-
-        Assert.Equal (51, Logo.LogoWidth);   // "WINGET TUI #" — 51 cols of 5-row block art
-        Assert.Equal (5, Logo.LogoHeight);
-    }
-
-    [Fact]
-    public void TerminalGui_LogoRendersWingetTuiHashWordmark ()
-    {
-        System.Reflection.FieldInfo linesField = typeof (Logo).GetField (
-            "_lines",
-            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!;
-
-        string [] lines = Assert.IsType<string []> (linesField.GetValue (null));
-
-        Assert.Equal (
-            [
-                "█   █ ███ █  █  ██  ████ ████  ████ █  █ ███   █ █ ",
-                "█   █  █  ██ █ █    █     █     █   █  █  █   █████",
-                "█ █ █  █  █ ██ █ ██ ███   █     █   █  █  █    █ █ ",
-                "██ ██  █  █  █ █  █ █     █     █   █  █  █   █████",
-                "█   █ ███ █  █  ███ ████  █     █    ██  ███   █ █ "
-            ],
-            lines);
-    }
-
-    [Fact]
-    public void TerminalGui_TabBarReportsClickedTabViaEvent ()
+    [Theory]
+    [InlineData (22, AppMode.Search)]
+    [InlineData (33, AppMode.Installed)]
+    [InlineData (47, AppMode.Upgrades)]
+    public void TerminalGui_TabBarReportsClickedTabViaEvent (int x, AppMode expected)
     {
         // Catches changes to View.OnMouseEvent signature, Mouse class shape, or our
         // hit-testing math. Use reflection because OnMouseEvent is protected.
@@ -1134,7 +1170,7 @@ public class ParserTests
 
         Mouse click = new ()
         {
-            Position = new (0, 0),                          // top-left, "1 ◇ Search" tab
+            Position = new (x, 0), // right-aligned tab region in a 60-column view
             Flags = MouseFlags.LeftButtonClicked
         };
 
@@ -1146,7 +1182,7 @@ public class ParserTests
         object? result = onMouse.Invoke (bar, [click]);
 
         Assert.True ((bool) result!);
-        Assert.Equal (AppMode.Search, clicked);
+        Assert.Equal (expected, clicked);
     }
 
     [Fact]
