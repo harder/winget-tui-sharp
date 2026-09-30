@@ -228,6 +228,33 @@ public class AppBehaviorTests
     }
 
     [Fact]
+    public void App_LocalFilter_KeepsSelectedPackageWhenIdsDifferOnlyByCase ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+
+        state.Packages =
+        [
+            new () { Id = "Example.App", Name = "Upper", Version = "1", Source = "winget" },
+            new () { Id = "example.app", Name = "Lower", Version = "1", Source = "winget" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        table.Value = new (new (0, 1));
+        state.InputMode = InputMode.LocalFilter;
+
+        input.Text = "Lower";
+        Assert.Equal ("example.app", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+
+        input.Text = string.Empty;
+        Assert.Equal ("example.app", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+    }
+
+    [Fact]
     public void App_SortedAvailableColumn_KeepsItsReservedWidth ()
     {
         App app = new (new MockBackend ()) { Frame = new (0, 0, 140, 40) };

@@ -1045,7 +1045,7 @@ public sealed class App : Runnable
         if (previousSelection is not null)
         {
             int found = _state.Filtered.FindIndex (p =>
-                p.Id.Equals (previousSelection.Id, StringComparison.OrdinalIgnoreCase)
+                p.Id.Equals (previousSelection.Id, StringComparison.Ordinal)
                 && p.Source.Equals (previousSelection.Source, StringComparison.OrdinalIgnoreCase));
 
             if (found >= 0)
