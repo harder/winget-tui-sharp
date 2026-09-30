@@ -1734,7 +1734,7 @@ public sealed class App : Runnable
     {
         FetchThen (
             "Checking installer…",
-            ct => _state.Backend.GetInstallerPreviewAsync (p.Id, version, ct),
+            ct => _state.Backend.GetInstallerPreviewAsync (p.Id, version, settings, ct),
             preview =>
             {
                 string title = version is null ? $"Install {p.Name}?" : $"Install {p.Name} {version}?";

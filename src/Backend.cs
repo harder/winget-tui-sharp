@@ -22,9 +22,10 @@ public interface IBackend
     Task<IReadOnlyList<string>> ListVersionsAsync (string id, CancellationToken ct);
 
     // What would be installed (installer type / architecture / scope / elevation) for a package,
-    // optionally at a specific version. Shown in the install confirm dialog. Returns null when the
-    // backend can't resolve it (CLI), in which case the confirm shows no preview line.
-    Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct);
+    // optionally at a specific version and with the selected install settings. Shown in the install
+    // confirm dialog. Returns null when the backend can't resolve it (CLI), in which case the
+    // confirm shows no preview line.
+    Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, InstallSettings? settings, CancellationToken ct);
 
     // The install/upgrade/uninstall operations optionally report structured progress through
     // `progress`. Backends that can't (CLI) ignore it; the COM backend maps the WinGet COM

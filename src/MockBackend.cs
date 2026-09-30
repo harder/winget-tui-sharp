@@ -121,7 +121,7 @@ public sealed class MockBackend : IBackend
         return Task.FromResult (versions);
     }
 
-    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, CancellationToken ct)
+    public Task<InstallerPreview?> GetInstallerPreviewAsync (string id, string? version, InstallSettings? settings, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested ();
         PackageTemplate? p = SearchTemplates.Concat (InstalledTemplates)
