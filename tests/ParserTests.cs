@@ -437,6 +437,10 @@ public class ParserTests
     [InlineData ("1.0", "1.beta", -1)]
     [InlineData ("1.beta", "1.0", 1)]
     [InlineData ("1.RC", "1.rc", 0)]
+    [InlineData ("1.", "1.0", -1)]
+    [InlineData ("1..2", "1.0.2", -1)]
+    [InlineData ("1+beta", "1-beta", 0)]
+    [InlineData ("1.2147483648", "1.2147483647", 1)] // overflowing segments compare as text
     public void CompareVersionsLike_OrdersAsExpected (string a, string b, int expectedSign)
     {
         int actual = CliBackend.CompareVersionsLike (a, b);
@@ -454,6 +458,88 @@ public class ParserTests
     {
         Assert.True (CliBackend.CompareVersionsLike (string.Empty, "1.0.0") < 0);
         Assert.True (CliBackend.CompareVersionsLike ("1.0.0", string.Empty) > 0);
+    }
+
+    [Fact]
+    public void CompareVersionsLike_SortingDoesNotAllocatePerComparison ()
+    {
+        // Sorting a large installed list calls this comparator many times. Warm the JIT and
+        // globalization paths before measuring allocations on the current thread.
+        for (int i = 0; i < 100; i++)
+        {
+            _ = CliBackend.CompareVersionsLike ("10.20.30-beta", "10.20.29-rc");
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread ();
+
+        for (int i = 0; i < 10_000; i++)
+        {
+            _ = CliBackend.CompareVersionsLike ("10.20.30-beta", "10.20.29-rc");
+        }
+
+        long allocated = GC.GetAllocatedBytesForCurrentThread () - before;
+        Assert.True (allocated < 1_024, $"Version comparisons allocated {allocated} bytes.");
+    }
+
+    [Fact]
+    public void CompareVersionsLike_PreservesSplitBasedOrderingAcrossMixedSegments ()
+    {
+        string [] segments = ["", "0", "01", "2", "10", "2147483648", "alpha", "BETA", "é"];
+        char [] separators = ['.', '-', '+'];
+        Random random = new (314159);
+        string [] versions = Enumerable.Range (0, 300).Select (_ =>
+        {
+            int count = random.Next (1, 6);
+            StringBuilder version = new ();
+
+            for (int i = 0; i < count; i++)
+            {
+                if (i > 0)
+                {
+                    version.Append (separators [random.Next (separators.Length)]);
+                }
+
+                version.Append (segments [random.Next (segments.Length)]);
+            }
+
+            return version.ToString ();
+        }).ToArray ();
+
+        for (int i = 0; i < versions.Length; i++)
+        {
+            for (int j = 0; j < versions.Length; j++)
+            {
+                string a = versions [i], b = versions [j];
+                string [] aParts = a.Split (separators);
+                string [] bParts = b.Split (separators);
+                int expected = 0;
+
+                if (a.Length == 0 || b.Length == 0)
+                {
+                    expected = a.Length == b.Length ? 0 : a.Length == 0 ? -1 : 1;
+                }
+                else
+                {
+                    for (int part = 0; part < Math.Max (aParts.Length, bParts.Length); part++)
+                    {
+                        string left = part < aParts.Length ? aParts [part] : "0";
+                        string right = part < bParts.Length ? bParts [part] : "0";
+                        int comparison = int.TryParse (left, out int leftNumber)
+                                         && int.TryParse (right, out int rightNumber)
+                                             ? leftNumber.CompareTo (rightNumber)
+                                             : string.Compare (left, right, StringComparison.OrdinalIgnoreCase);
+
+                        if (comparison != 0)
+                        {
+                            expected = Math.Sign (comparison);
+                            break;
+                        }
+                    }
+                }
+
+                Assert.Equal (expected, Math.Sign (CliBackend.CompareVersionsLike (a, b)));
+            }
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────

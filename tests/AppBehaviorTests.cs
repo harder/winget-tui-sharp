@@ -72,6 +72,36 @@ public class AppBehaviorTests
     }
 
     [Fact]
+    public void DetailPanel_LinkRowsKeepTheirLayoutAfterWrappingAndResize ()
+    {
+        DetailPanel panel = CreateDetailPanel ();
+        PackageDetail detail = new ()
+        {
+            Id = "pkg.links",
+            Name = "Linked package",
+            Homepage = "https://example.invalid/a-long-homepage-address",
+            Documentation =
+            [
+                new DocLink ("First guide", "https://example.invalid/a-long-first-guide-address"),
+                new DocLink ("Second guide", "https://example.invalid/a-long-second-guide-address")
+            ],
+            Description = string.Join ('\n', Enumerable.Repeat ("A long description line that wraps across the detail panel.", 100))
+        };
+
+        panel.SetDetail (detail, loading: false);
+        Markdown[] links = panel.SubViews.OfType<Markdown> ().ToArray ();
+        Assert.Equal (3, links.Length);
+        Assert.True (links [0].Frame.Y < links [1].Frame.Y);
+        Assert.True (links [1].Frame.Y < links [2].Frame.Y);
+
+        panel.Viewport = new (0, 0, 42, 6);
+        panel.ScrollToEnd ();
+
+        Assert.True (links [0].Frame.Y < links [1].Frame.Y);
+        Assert.True (links [1].Frame.Y < links [2].Frame.Y);
+    }
+
+    [Fact]
     public void App_WideWindow_UsesSkillViewStyleCompactHeader ()
     {
         App app = new (new MockBackend ())
@@ -212,6 +242,46 @@ public class AppBehaviorTests
 
         input.Text = string.Empty;
         Assert.Equal ("three", state.SelectedPackage (table.Value!.SelectedCell.Y)?.Id);
+    }
+
+    [Fact]
+    public void App_BatchSelectionUpdatesCellsWithoutRebuildingTableOrDetail ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = (TableView)typeof (App).GetField (
+            "_packageTable", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .GetValue (app)!;
+        DetailPanel detailPanel = GetPrivateField<DetailPanel> (app, "_detailPanel");
+        FrameView listFrame = GetPrivateField<FrameView> (app, "_listFrame");
+        state.Mode = AppMode.Upgrades;
+        state.Packages =
+        [
+            new () { Id = "first", Name = "First", AvailableVersion = "2" },
+            new () { Id = "second", Name = "Second", AvailableVersion = "2" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        ITableSource source = table.Table!;
+        CancellationTokenSource detailRequest = GetPrivateField<CancellationTokenSource> (app, "_detailCts");
+        detailPanel.SetDetail (CreateLongDetail (), loading: false);
+        detailPanel.ScrollToEnd ();
+        int scrollPosition = detailPanel.Viewport.Y;
+
+        InvokePrivate (app, "ToggleBatchSelect", state.Packages [0]);
+
+        Assert.Same (source, table.Table);
+        Assert.StartsWith ("[x] ", Assert.IsType<string> (source [0, 1]));
+        Assert.Contains ("1 selected", listFrame.Title);
+        Assert.Same (detailRequest, GetPrivateField<CancellationTokenSource> (app, "_detailCts"));
+        Assert.Equal (scrollPosition, detailPanel.Viewport.Y);
+
+        InvokePrivate (app, "ToggleSelectAll");
+
+        Assert.Same (source, table.Table);
+        Assert.StartsWith ("[x] ", Assert.IsType<string> (source [1, 1]));
+        Assert.Contains ("2 selected", listFrame.Title);
+        Assert.Equal (scrollPosition, detailPanel.Viewport.Y);
     }
 
     [Fact]
@@ -539,7 +609,7 @@ public class AppBehaviorTests
             fieldName,
             System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
 
-        return Assert.IsType<T> (field.GetValue (instance));
+        return Assert.IsAssignableFrom<T> (field.GetValue (instance));
     }
 
     private static int GetPrivateInt (object instance, string fieldName)

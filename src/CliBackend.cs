@@ -1070,15 +1070,13 @@ public sealed partial class CliBackend : IBackend
             return 1;
         }
 
-        char [] seps = ['.', '-', '+'];
-        string [] aParts = a.Split (seps);
-        string [] bParts = b.Split (seps);
-        int len = Math.Max (aParts.Length, bParts.Length);
+        int aOffset = 0;
+        int bOffset = 0;
 
-        for (int i = 0; i < len; i++)
+        while (aOffset >= 0 || bOffset >= 0)
         {
-            string ap = i < aParts.Length ? aParts [i] : "0";
-            string bp = i < bParts.Length ? bParts [i] : "0";
+            ReadOnlySpan<char> ap = aOffset >= 0 ? NextVersionPart (a, ref aOffset) : "0";
+            ReadOnlySpan<char> bp = bOffset >= 0 ? NextVersionPart (b, ref bOffset) : "0";
 
             if (int.TryParse (ap, out int an) && int.TryParse (bp, out int bn))
             {
@@ -1089,7 +1087,7 @@ public sealed partial class CliBackend : IBackend
             }
             else
             {
-                int cmp = string.Compare (ap, bp, StringComparison.OrdinalIgnoreCase);
+                int cmp = ap.CompareTo (bp, StringComparison.OrdinalIgnoreCase);
 
                 if (cmp != 0)
                 {
@@ -1099,6 +1097,22 @@ public sealed partial class CliBackend : IBackend
         }
 
         return 0;
+    }
+
+    private static ReadOnlySpan<char> NextVersionPart (string version, ref int offset)
+    {
+        ReadOnlySpan<char> remaining = version.AsSpan (offset);
+        int separator = remaining.IndexOfAny ('.', '-', '+');
+
+        if (separator < 0)
+        {
+            // An empty remainder after a trailing separator is still one final segment.
+            offset = -1;
+            return remaining;
+        }
+
+        offset += separator + 1;
+        return remaining [..separator];
     }
 
     private static string Quote (string s) => "'" + s.Replace ("\r", "\\r").Replace ("\n", "\\n").Replace ("\t", "\\t") + "'";

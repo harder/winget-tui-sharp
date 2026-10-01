@@ -22,22 +22,12 @@ internal static class CsvExporter
         for (int index = 0; index < packages.Count && rows.Count < MaxRows; index++)
         {
             Package package = packages [index];
-            string [] values =
-            [
-                package.Name,
-                package.Id,
-                package.Version,
-                package.AvailableVersion ?? string.Empty,
-                package.Source
-            ];
-            bool [] cellWasTruncated = new bool [values.Length];
-            int rowCharacters = 0;
-
-            for (int cell = 0; cell < values.Length; cell++)
-            {
-                values [cell] = TakeUtf16Prefix (values [cell], MaxCellCharacters, out cellWasTruncated [cell]);
-                rowCharacters += values [cell].Length;
-            }
+            string name = TakeUtf16Prefix (package.Name, MaxCellCharacters, out bool nameTruncated);
+            string id = TakeUtf16Prefix (package.Id, MaxCellCharacters, out bool idTruncated);
+            string version = TakeUtf16Prefix (package.Version, MaxCellCharacters, out bool versionTruncated);
+            string available = TakeUtf16Prefix (package.AvailableVersion ?? string.Empty, MaxCellCharacters, out bool availableTruncated);
+            string source = TakeUtf16Prefix (package.Source, MaxCellCharacters, out bool sourceTruncated);
+            int rowCharacters = name.Length + id.Length + version.Length + available.Length + source.Length;
 
             // Retain complete rows only. Emptying the tail of the last row to fit the aggregate
             // budget can erase its identity and produce a misleading CSV record.
@@ -46,9 +36,13 @@ internal static class CsvExporter
                 break;
             }
 
-            truncatedCells += cellWasTruncated.Count (truncated => truncated);
+            truncatedCells += (nameTruncated ? 1 : 0)
+                              + (idTruncated ? 1 : 0)
+                              + (versionTruncated ? 1 : 0)
+                              + (availableTruncated ? 1 : 0)
+                              + (sourceTruncated ? 1 : 0);
             retainedCharacters += rowCharacters;
-            rows.Add (new (values [0], values [1], values [2], values [3], values [4]));
+            rows.Add (new (name, id, version, available, source));
         }
 
         return new (
