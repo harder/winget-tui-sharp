@@ -770,19 +770,7 @@ public sealed class App : Window
 
     private void RefreshTable ()
     {
-        string title = _state.Mode switch
-        {
-            AppMode.Search => $" Search ({_state.Filtered.Count}) ",
-            AppMode.Upgrades => $" Upgrades ({_state.Filtered.Count} • {_state.BatchSelected.Count} selected) ",
-            _ => $" Installed ({_state.Filtered.Count}) "
-        };
-
-        if (_state.Mode != AppMode.Search && _state.PinFilter != PinFilter.All)
-        {
-            title = title.TrimEnd (' ') + $" • {AppState.PinLabel (_state.PinFilter).Trim ()} ";
-        }
-
-        _listFrame.Title = title;
+        UpdateListTitle ();
 
         if (_state.Filtered.Count == 0)
         {
@@ -844,6 +832,23 @@ public sealed class App : Window
 
         ApplyColumnStyles (marked);
         OnSelectedRowChanged ();
+    }
+
+    private void UpdateListTitle ()
+    {
+        string title = _state.Mode switch
+        {
+            AppMode.Search => $" Search ({_state.Filtered.Count}) ",
+            AppMode.Upgrades => $" Upgrades ({_state.Filtered.Count} • {_state.BatchSelected.Count} selected) ",
+            _ => $" Installed ({_state.Filtered.Count}) "
+        };
+
+        if (_state.Mode != AppMode.Search && _state.PinFilter != PinFilter.All)
+        {
+            title = title.TrimEnd (' ') + $" • {AppState.PinLabel (_state.PinFilter).Trim ()} ";
+        }
+
+        _listFrame.Title = title;
     }
 
     /// <summary>
@@ -2385,7 +2390,8 @@ public sealed class App : Window
             _state.BatchSelected.Remove (p.Id);
         }
 
-        RefreshTable ();
+        UpdateListTitle ();
+        _packageTable.SetNeedsDraw ();
     }
 
     private void ToggleSelectAll ()
@@ -2402,7 +2408,8 @@ public sealed class App : Window
             }
         }
 
-        RefreshTable ();
+        UpdateListTitle ();
+        _packageTable.SetNeedsDraw ();
     }
 
     private void AskBatchUpgrade ()

@@ -449,17 +449,21 @@ public sealed class DetailPanel : FrameView
             return;
         }
 
+        // Link rows are appended in source-line order. Walk them once while wrapping instead of
+        // searching every link for every line in a long description or installation note.
+        int markdownIndex = 0;
+
         for (int sourceLineIndex = 0; sourceLineIndex < _lines.Count; sourceLineIndex++)
         {
             List<List<Span>> wrapped = WrapLine (_lines [sourceLineIndex], maxWidth);
             int startLine = _wrappedLines.Count;
             _wrappedLines.AddRange (wrapped);
 
-            MarkdownRow? markdownRow = _markdownRows.FirstOrDefault (row => row.SourceLineIndex == sourceLineIndex);
-
-            if (markdownRow is not null)
+            if (markdownIndex < _markdownRows.Count
+                && _markdownRows [markdownIndex].SourceLineIndex == sourceLineIndex)
             {
-                LayoutMarkdownRow (markdownRow, startLine, wrapped.Count, maxWidth);
+                LayoutMarkdownRow (_markdownRows [markdownIndex], startLine, wrapped.Count, maxWidth);
+                markdownIndex++;
             }
         }
 

@@ -181,6 +181,12 @@ public sealed class StatusBar : View
     public OpProgress? Op { get; set; }
 
     private static readonly char [] _spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    private static readonly string [] _searchInputHints = ["Esc Cancel", "Enter Search", "Ctrl+U Clear"];
+    private static readonly string [] _filterInputHints = ["Esc Clear", "Enter Done", "Ctrl+U Clear", "Bksp Del"];
+    private static readonly string [] _versionInputHints = ["Esc Cancel", "Enter Confirm", "Ctrl+U Clear"];
+    private static readonly string [] _searchHints = ["/ Search", "f Source", "r Refresh", "e Export", "? Help", "q Quit"];
+    private static readonly string [] _installedHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "e Export", "? Help", "q Quit"];
+    private static readonly string [] _upgradeHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "Spc Select", "U Upgrade sel", "? Help", "q Quit"];
 
     /// <summary>Render a compact fixed-width progress bar like <c>▕████░░░░░░▏  42%</c>.</summary>
     private static string RenderBar (double fraction)
@@ -241,8 +247,8 @@ public sealed class StatusBar : View
         // Pairs are separated by a dim "│" glyph for visual grouping.
         string [] hintPairs = ComposeHintPairs ();
         int hintsAvailable = Viewport.Width - x0 - 8;
-        (string [] visiblePairs, bool elided) = TruncateHintPairs (hintPairs, hintsAvailable);
-        int hintsWidth = HintsWidth (visiblePairs, elided);
+        (int firstHint, bool elided) = TruncateHintPairs (hintPairs, hintsAvailable);
+        int hintsWidth = HintsWidth (hintPairs, firstHint, elided);
         int hintsStart = Math.Max (x0 + 1, Viewport.Width - hintsWidth);
 
         // Status message between filters and hints. A running operation shows a determinate
@@ -275,12 +281,12 @@ public sealed class StatusBar : View
         Move (x0, 0);
         AddStr (msg);
 
-        DrawHintPairs (hintsStart, visiblePairs, elided);
+        DrawHintPairs (hintsStart, hintPairs, firstHint, elided);
 
         return true;
     }
 
-    private void DrawHintPairs (int xStart, string [] pairs, bool elided)
+    private void DrawHintPairs (int xStart, string [] pairs, int first, bool elided)
     {
         Attribute primary = new (Theme.TextPrimary, Theme.Surface);
         Attribute dim = new (Theme.TextSecondary, Theme.Surface);
@@ -294,7 +300,7 @@ public sealed class StatusBar : View
             x += 2;
         }
 
-        for (int i = 0; i < pairs.Length; i++)
+        for (int i = first; i < pairs.Length; i++)
         {
             SetAttribute (primary);
             Move (x, 0);
@@ -311,14 +317,19 @@ public sealed class StatusBar : View
         }
     }
 
-    private static int HintsWidth (string [] pairs, bool elided)
+    private static int HintsWidth (string [] pairs, int first, bool elided)
     {
-        if (pairs.Length == 0)
+        if (first >= pairs.Length)
         {
             return elided ? 1 : 0;
         }
 
-        int width = (elided ? 2 : 0) + pairs.Sum (p => p.Length) + 3 * (pairs.Length - 1);
+        int width = (elided ? 2 : 0) + 3 * (pairs.Length - first - 1);
+
+        for (int i = first; i < pairs.Length; i++)
+        {
+            width += pairs [i].Length;
+        }
 
         return width;
     }
@@ -328,47 +339,45 @@ public sealed class StatusBar : View
     /// until what's left fits in <paramref name="available"/> columns including the " │ "
     /// separators between pairs and a leading "… " when anything was elided.
     /// </summary>
-    private static (string [] Pairs, bool Elided) TruncateHintPairs (string [] pairs, int available)
+    private static (int First, bool Elided) TruncateHintPairs (string [] pairs, int available)
     {
         if (pairs.Length == 0 || available <= 0)
         {
-            return (Array.Empty<string> (), false);
+            return (pairs.Length, false);
         }
 
-        if (HintsWidth (pairs, false) <= available)
+        if (HintsWidth (pairs, 0, false) <= available)
         {
-            return (pairs, false);
+            return (0, false);
         }
 
         for (int start = 1; start < pairs.Length; start++)
         {
-            string [] candidate = pairs [start..];
-
-            if (HintsWidth (candidate, true) <= available)
+            if (HintsWidth (pairs, start, true) <= available)
             {
-                return (candidate, true);
+                return (start, true);
             }
         }
 
-        return (Array.Empty<string> (), true);
+        return (pairs.Length, true);
     }
 
     private string [] ComposeHintPairs ()
     {
         return InputMode switch
         {
-            InputMode.Search => ["Esc Cancel", "Enter Search", "Ctrl+U Clear"],
-            InputMode.LocalFilter => ["Esc Clear", "Enter Done", "Ctrl+U Clear", "Bksp Del"],
-            InputMode.VersionInput => ["Esc Cancel", "Enter Confirm", "Ctrl+U Clear"],
+            InputMode.Search => _searchInputHints,
+            InputMode.LocalFilter => _filterInputHints,
+            InputMode.VersionInput => _versionInputHints,
             _ => Mode switch
             {
-                AppMode.Search => ["/ Search", "f Source", "r Refresh", "e Export", "? Help", "q Quit"],
+                AppMode.Search => _searchHints,
 
                 // Upgrades adds the multi-select hints. They sit just before Help/Quit so the
                 // left-dropping truncation sheds the lower-value pairs (Filter/Source/Pin) first,
                 // keeping "Spc Select / U Upgrade sel" — the non-obvious batch flow — visible.
-                AppMode.Upgrades => ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "Spc Select", "U Upgrade sel", "? Help", "q Quit"],
-                _ => ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "e Export", "? Help", "q Quit"]
+                AppMode.Upgrades => _upgradeHints,
+                _ => _installedHints
             }
         };
     }
