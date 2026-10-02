@@ -20,7 +20,8 @@ if (args.Length > 0 && args [0] == "--check-updates")
         }
         if (notifyOnChange)
         {
-            await UpdateNotification.TryShowAsync (unavailable, CancellationToken.None);
+            string? notificationError = await UpdateNotification.TryShowAsync (unavailable, CancellationToken.None);
+            if (notificationError is not null) Console.Error.WriteLine ($"Notification unavailable: {notificationError}");
         }
         Console.Error.WriteLine ($"Update check failed: {unavailable.Error}");
         Environment.ExitCode = 1;
@@ -37,7 +38,8 @@ if (args.Length > 0 && args [0] == "--check-updates")
     }
     if (notifyOnChange)
     {
-        await UpdateNotification.TryShowAsync (check, CancellationToken.None);
+        string? notificationError = await UpdateNotification.TryShowAsync (check, CancellationToken.None);
+        if (notificationError is not null) Console.Error.WriteLine ($"Notification unavailable: {notificationError}");
     }
 
     Console.WriteLine (check.Status == "Succeeded"

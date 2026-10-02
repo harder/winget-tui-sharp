@@ -144,7 +144,7 @@ public sealed class ScheduleDialog : Runnable<ScheduleChoice?>
         Label last = new () { X = 1, Y = 1, Width = Dim.Fill (1), Text = latest is null
             ? "No check has run yet."
             : latest.Status == "Succeeded"
-                ? $"Last check: {latest.CheckedAtUtc.ToLocalTime ():g} · {latest.Actionable} available · {latest.NewOrChanged} new"
+                ? $"Last check: {latest.CheckedAtUtc.ToLocalTime ():g} · {latest.Actionable} available · {latest.NewOrChanged} new or changed"
                 : $"Last check failed: {latest.Error}" };
         Label timeLabel = new () { X = 1, Y = 3, Text = "Daily time (HH:mm):" };
         TextField time = new () { X = 21, Y = 3, Width = 8, Text = settings.DailyAt };

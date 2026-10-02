@@ -151,49 +151,59 @@ public static class ScheduleWorkflow
 
 public static class UpdateNotification
 {
-    public static async Task TryShowAsync (UpdateCheckSnapshot snapshot, CancellationToken ct)
+    public static Task<string?> RegisterAsync (CancellationToken ct) => RunScriptAsync (null, ct);
+
+    public static async Task<string?> TryShowAsync (UpdateCheckSnapshot snapshot, CancellationToken ct)
     {
-        if (!OperatingSystem.IsWindows ()) return;
+        if (!OperatingSystem.IsWindows ()) return null;
         string? message = snapshot.Status == "Failed"
             ? "Scheduled update check failed. Open WinGet TUI for details."
             : snapshot.NewOrChanged > 0
                 ? $"{snapshot.NewOrChanged} new or changed upgrade(s) are ready for review."
                 : null;
-        if (message is null) return;
+        if (message is null) return null;
+        return await RunScriptAsync (message, ct);
+    }
 
-        // Use the Windows notification API from the scheduled user's session. Notification
-        // delivery is best effort; the persisted check result remains authoritative.
-        string encodedMessage = Convert.ToBase64String (Encoding.UTF8.GetBytes (message));
-        string script = "[Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime] | Out-Null;" +
-                        "[Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime] | Out-Null;" +
-                        $"$m=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encodedMessage}'));" +
-                        "$m=[Security.SecurityElement]::Escape($m);" +
-                        "$x=[Windows.Data.Xml.Dom.XmlDocument]::new();" +
-                        "$x.LoadXml(\"<toast><visual><binding template='ToastGeneric'><text>WinGet TUI</text><text>$m</text></binding></visual></toast>\");" +
-                        "$t=[Windows.UI.Notifications.ToastNotification]::new($x);" +
-                        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('WinGet TUI').Show($t)";
-        string encodedScript = Convert.ToBase64String (Encoding.Unicode.GetBytes (script));
+    private static async Task<string?> RunScriptAsync (string? message, CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows ()) return "Windows notifications are required.";
+        string? executable = UpdateTaskScheduler.ExecutablePath ();
+        if (executable is null) return "A published executable is required for notifications.";
         try
         {
-            using Process process = Process.Start (new ProcessStartInfo ("powershell.exe")
+            using Stream? resource = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WingetTuiSharp.notification.ps1");
+            if (resource is null) return "Notification script is missing.";
+            using StreamReader reader = new (resource);
+            string encodedScript = Convert.ToBase64String (Encoding.Unicode.GetBytes (await reader.ReadToEndAsync (ct)));
+            ProcessStartInfo start = new ("powershell.exe")
             {
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                RedirectStandardError = true,
                 ArgumentList = { "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript }
-            })!;
+            };
+            start.Environment.Remove ("WTS_NOTIFICATION_SHORTCUT");
+            start.Environment["WTS_NOTIFICATION_EXE"] = executable;
+            start.Environment["WTS_NOTIFICATION_MESSAGE"] = message ?? string.Empty;
+            using Process process = Process.Start (start) ?? throw new InvalidOperationException ("PowerShell did not start.");
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource (ct);
             timeout.CancelAfter (TimeSpan.FromSeconds (15));
+            Task<string> stderr = process.StandardError.ReadToEndAsync (timeout.Token);
             try { await process.WaitForExitAsync (timeout.Token); }
             catch (OperationCanceledException)
             {
                 try { if (!process.HasExited) process.Kill (entireProcessTree: true); }
                 catch (Exception) { }
                 if (ct.IsCancellationRequested) throw;
+                return "Notification delivery timed out.";
             }
+            string error = (await stderr).Trim ();
+            return process.ExitCode == 0 ? null : error.Length > 0 ? error : $"Notification process exited with code {process.ExitCode}.";
         }
-        catch (Exception) when (!ct.IsCancellationRequested)
+        catch (Exception ex) when (!ct.IsCancellationRequested)
         {
-            // A notification failure must not turn a successful inventory check into a failure.
+            return ex.Message;
         }
     }
 }

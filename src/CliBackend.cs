@@ -347,7 +347,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     internal static string [] UpgradeByIdArgs (string id, string? source = null) =>
         string.IsNullOrWhiteSpace (source)
             ? ["upgrade", "--id", id, "--accept-source-agreements", "--accept-package-agreements"]
-            : ["upgrade", "--id", id, "--exact", "--source", source, "--accept-source-agreements", "--accept-package-agreements"];
+            : ["upgrade", "--id", id, "--source", source, "--accept-source-agreements", "--accept-package-agreements"];
 
     internal static string [] UpgradeByNameArgs (string id, string? source = null) =>
         string.IsNullOrWhiteSpace (source)

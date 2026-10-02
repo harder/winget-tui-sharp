@@ -49,7 +49,8 @@ public sealed partial class App
                 if (_searchSelected.Count >= 100) break;
                 _searchSelected[BatchPlanning.Key (package)] = package;
             }
-            if (visible.Count > 100) SetStatus ("Selected the first 100 visible packages; refine the search for more.");
+            if (visible.Any (p => !_searchSelected.ContainsKey (BatchPlanning.Key (p))))
+                SetStatus ("Selection limit reached; refine the search or deselect packages to add more.");
         }
         UpdateListTitle ();
         _packageTable.SetNeedsDraw ();
@@ -223,7 +224,8 @@ public sealed partial class App
                     }
                     await DispatchAsync (() =>
                     {
-                        SetStatus ($"{plan.Action}ing {package.Name}… · Esc to cancel", owner: StatusOwner.Operation);
+                        string activity = plan.Action == "Upgrade" ? "Upgrading" : "Installing";
+                        SetStatus ($"{activity} {package.Name}… · Esc to cancel", owner: StatusOwner.Operation);
                         RefreshStatusBar ();
                     }, ct, () => OperationRequestIsCurrent (request));
                     try
@@ -356,9 +358,13 @@ public sealed partial class App
                         if (choice.Action == "Save")
                         {
                             string? path = UpdateTaskScheduler.ExecutablePath ();
-                            return path is null
-                                ? "Run a published executable to enable scheduled checks."
-                                : await UpdateTaskScheduler.RegisterAsync (path, choice.DailyAt, token);
+                            if (path is null) return "Run a published executable to enable scheduled checks.";
+                            if (choice.NotifyOnChange)
+                            {
+                                string? registrationError = await UpdateNotification.RegisterAsync (token);
+                                if (registrationError is not null) return $"Notification registration failed: {registrationError}";
+                            }
+                            return await UpdateTaskScheduler.RegisterAsync (path, choice.DailyAt, token);
                         }
                         return previous.Enabled ? await UpdateTaskScheduler.UnregisterAsync (token) : null;
                     }, ct);

@@ -2,6 +2,14 @@ namespace WingetTuiSharp.Tests;
 
 public sealed class WorkflowTests
 {
+    [Fact]
+    public void NotificationRegistrationScript_IsEmbeddedForPublishedBuilds ()
+    {
+        using Stream? script = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WingetTuiSharp.notification.ps1");
+        Assert.NotNull (script);
+        Assert.True (script.Length > 0);
+    }
+
     [Theory]
     [InlineData (OperationKind.Install)]
     [InlineData (OperationKind.Download)]
@@ -301,7 +309,7 @@ public sealed class WorkflowTests
         Assert.True (UpdateChecks.TryParseDailyTime ("09:30", out _));
         Assert.False (UpdateChecks.TryParseDailyTime ("25:00", out _));
         Assert.Contains ("--source", CliBackend.UpgradeByIdArgs ("A.Tool", "winget"));
-        Assert.Contains ("--exact", CliBackend.UpgradeByIdArgs ("A.Tool", "winget"));
+        Assert.DoesNotContain ("--exact", CliBackend.UpgradeByIdArgs ("A.Tool", "winget"));
         Assert.DoesNotContain ("--source", CliBackend.UpgradeByIdArgs ("A.Tool", ""));
         Assert.DoesNotContain ("--source", CliBackend.UpgradeByNameArgs ("A.Tool", " "));
         string [] install = CliBackend.InstallArgs ("A.Tool", null, source: "winget");
