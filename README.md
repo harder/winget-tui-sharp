@@ -19,6 +19,8 @@ You do **not** need .NET installed.
 1. Download the latest Windows binary from the [Releases page](https://github.com/harder/wingetscout/releases/latest):
    - `wingetscout-x64.exe` for Windows on Intel/AMD x86
    - `wingetscout-arm64.exe` for Windows on ARM
+
+   These filenames start with the first Scout release. Earlier releases retain the filenames shown on their release pages.
 2. Run it from Windows Terminal:
 
 ```powershell
@@ -97,6 +99,8 @@ Press `L` to see the 20 most recent operation runs. A run lists each package as 
 From Upgrades, press `C` to open the check settings. Choose **Check now** for a manual inventory check, or set a daily local time and enable checks. Enabling registers a current-user Windows Task Scheduler task that runs the published executable with `--check-updates`. Keep that executable and its companion files at the same path. Checks only inspect upgrades and pins; they never install or upgrade packages. The first successful check establishes a baseline. Later checks can notify when an unpinned upgrade appears or its available version changes, or when a check fails. If notifications are enabled, the portable app registers a current-user Start Menu shortcut with an app ID so Windows can display the toast. Notifications remain subject to Windows notification settings.
 
 The Upgrades header shows the last check time or failure. The latest result, last successful baseline, and schedule settings are stored under `%LOCALAPPDATA%\WinGetScout`. On first run, Scout copies existing local data from the previous app folder without overwriting newer files. It also migrates an existing daily check to the new executable when you run the published app. Disabling checks removes the scheduled task. Run the app from a published executable to enable a schedule; `dotnet run` supports **Check now** but cannot provide a stable executable path for Task Scheduler.
+
+The renamed MSIX has a new package identity. Remove a previously installed package before installing the Scout MSIX.
 
 ## Building
 
