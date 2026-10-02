@@ -25,6 +25,7 @@ public sealed class AppState
 
     public List<Package> Packages { get; set; } = [];
     public List<Package> Filtered { get; private set; } = [];
+    /// <summary>Selected upgrade rows keyed by source and package ID.</summary>
     public HashSet<string> BatchSelected { get; } = new (StringComparer.OrdinalIgnoreCase);
     public PackageDetail? CurrentDetail { get; set; }
     private readonly BoundedDetailCache _detailCache = new ();

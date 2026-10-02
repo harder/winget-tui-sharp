@@ -128,16 +128,13 @@ public sealed partial class App
             {
                 IReadOnlyList<Package> installed = await _state.Backend.ListInstalledAsync (null, lifetimeToken);
                 IReadOnlyList<string> sources = await _state.Backend.ListSourcesAsync (lifetimeToken);
-                for (int i = 0; i < selected.Count; i++)
+                selected = await BatchPlanning.ResolveUnresolvedAsync (selected, async (item, token) =>
                 {
-                    Package item = selected[i];
-                    if (!string.IsNullOrEmpty (item.Version)) continue;
-                    IReadOnlyList<Package> matches = await _state.Backend.SearchAsync (item.Id, item.Source, lifetimeToken);
-                    Package? exact = matches.FirstOrDefault (p =>
+                    IReadOnlyList<Package> matches = await _state.Backend.SearchAsync (item.Id, item.Source, token);
+                    return matches.FirstOrDefault (p =>
                         p.Id.Equals (item.Id, StringComparison.OrdinalIgnoreCase)
                         && p.Source.Equals (item.Source, StringComparison.OrdinalIgnoreCase));
-                    if (exact is not null) selected[i] = exact;
-                }
+                }, lifetimeToken);
                 BatchPlan plan = BatchPlanning.ForInstalls (selected, installed, sources);
                 await DispatchAsync (() =>
                 {
@@ -241,15 +238,17 @@ public sealed partial class App
                 await DispatchAsync (() =>
                 {
                     loading.Dispose ();
+                    string? historyError = null;
                     try { _workflowStore.SaveRun (record); }
-                    catch (Exception ex) { SetStatus ($"Run completed, but history could not be saved: {ex.Message}", isError: true); }
+                    catch (Exception ex) { historyError = ex.Message; }
                     foreach (RunItem item in results.Where (x => x.Status == "Succeeded"))
                     {
                         _state.InvalidateCachedDetail (item.Id);
                         if (plan.Action == "Install") _searchSelected.Remove ($"{item.Source}\u001f{item.Id}");
                     }
                     _state.BatchSelected.Clear ();
-                    CompleteOperationStatus (admission, record.Summary, record.Failed > 0);
+                    (string outcome, bool outcomeIsError) = record.Completion (historyError);
+                    CompleteOperationStatus (admission, outcome, outcomeIsError);
                     _foreground.Release (admission);
                     ReleaseOperationRequest (request);
                     using RunRecordDialog dialog = new (record);

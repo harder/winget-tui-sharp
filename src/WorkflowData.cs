@@ -14,6 +14,9 @@ public sealed record RunRecord (DateTimeOffset StartedAtUtc, DateTimeOffset Fini
     public int Skipped => Items.Count (x => x.Status == "Skipped");
     public int Failed => Items.Count (x => x.Status == "Failed");
     public string Summary => $"{Succeeded} succeeded · {Skipped} skipped · {Failed} failed";
+    public (string Message, bool IsError) Completion (string? historyError) => historyError is null
+        ? (Summary, Failed > 0)
+        : ($"{Summary} · history save failed: {historyError}", true);
 }
 public sealed record RunHistory (List<RunRecord> Runs);
 

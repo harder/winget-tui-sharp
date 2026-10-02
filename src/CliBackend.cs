@@ -264,7 +264,6 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         {
             args.Add ("--source");
             args.Add (source);
-            args.Add ("--exact");
         }
 
         AppendInstallSettings (args, settings);

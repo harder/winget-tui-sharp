@@ -12,6 +12,28 @@ public static class BatchPlanning
 {
     public static string Key (Package package) => $"{package.Source}\u001f{package.Id}";
 
+    public static List<Package> SelectedPackages (IEnumerable<Package> packages, IReadOnlySet<string> keys) =>
+        [.. packages.Where (p => keys.Contains (Key (p)))];
+
+    /// <summary>Resolve saved entries concurrently while preserving their order in the review plan.</summary>
+    public static async Task<List<Package>> ResolveUnresolvedAsync (
+        IReadOnlyList<Package> selected,
+        Func<Package, CancellationToken, Task<Package?>> resolve,
+        CancellationToken ct)
+    {
+        Package [] resolved = [.. selected];
+        await Parallel.ForEachAsync (Enumerable.Range (0, resolved.Length),
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+            async (index, token) =>
+            {
+                Package item = resolved [index];
+                if (!string.IsNullOrEmpty (item.Version)) return;
+                Package? match = await resolve (item, token);
+                if (match is not null) resolved [index] = match;
+            });
+        return [.. resolved];
+    }
+
     public static BatchPlan ForUpgrades (IEnumerable<Package> selected, bool pinsFresh)
     {
         List<BatchPlanItem> items = [];
@@ -37,7 +59,9 @@ public static class BatchPlanning
         IReadOnlyList<string> sources)
     {
         HashSet<string> installedKeys = new (installed.Select (Key), StringComparer.OrdinalIgnoreCase);
-        HashSet<string> installedIds = new (installed.Select (x => x.Id), StringComparer.OrdinalIgnoreCase);
+        HashSet<string> unknownSourceIds = new (
+            installed.Where (x => string.IsNullOrWhiteSpace (x.Source)).Select (x => x.Id),
+            StringComparer.OrdinalIgnoreCase);
         HashSet<string> knownSources = new (sources, StringComparer.OrdinalIgnoreCase);
         List<BatchPlanItem> items = [];
         foreach (Package package in selected)
@@ -46,7 +70,7 @@ public static class BatchPlanning
                 ? "Package ID is unavailable."
                 : string.IsNullOrWhiteSpace (package.Source) || !knownSources.Contains (package.Source)
                     ? "Source is unavailable. Refresh sources and try again."
-                    : installedKeys.Contains (Key (package)) || installedIds.Contains (package.Id)
+                    : installedKeys.Contains (Key (package)) || unknownSourceIds.Contains (package.Id)
                         ? "Already installed. Use Upgrades for a newer version."
                         : string.IsNullOrWhiteSpace (package.Version)
                             ? "Package has not been resolved in the catalog."

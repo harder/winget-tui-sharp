@@ -892,7 +892,7 @@ public sealed partial class App : Window
             {
                 [HeaderWithSort ("Name", SortField.Name)] = p =>
                 {
-                    string marker = _state.BatchSelected.Contains (p.Id) ? "[x] " : "    ";
+                    string marker = _state.BatchSelected.Contains (BatchPlanning.Key (p)) ? "[x] " : "    ";
                     string pin = p.PinState.IsPinned ? "📌 " : string.Empty;
 
                     return marker + pin + p.Name;
@@ -2570,9 +2570,10 @@ public sealed partial class App : Window
             return;
         }
 
-        if (!_state.BatchSelected.Add (p.Id))
+        string key = BatchPlanning.Key (p);
+        if (!_state.BatchSelected.Add (key))
         {
-            _state.BatchSelected.Remove (p.Id);
+            _state.BatchSelected.Remove (key);
         }
 
         UpdateListTitle ();
@@ -2582,15 +2583,15 @@ public sealed partial class App : Window
 
     private void ToggleSelectAll ()
     {
-        if (_state.BatchSelected.Count == _state.Filtered.Count)
+        if (_state.Filtered.Count > 0 && _state.Filtered.All (p => _state.BatchSelected.Contains (BatchPlanning.Key (p))))
         {
-            _state.BatchSelected.Clear ();
+            foreach (Package p in _state.Filtered) _state.BatchSelected.Remove (BatchPlanning.Key (p));
         }
         else
         {
             foreach (Package p in _state.Filtered)
             {
-                _state.BatchSelected.Add (p.Id);
+                _state.BatchSelected.Add (BatchPlanning.Key (p));
             }
         }
 
@@ -2614,7 +2615,7 @@ public sealed partial class App : Window
         using (OperationReservation activeReservation = reservation!)
         {
             BatchPlan plan = BatchPlanning.ForUpgrades (
-                _state.Packages.Where (p => _state.BatchSelected.Contains (p.Id)), _state.PinDataFresh);
+                BatchPlanning.SelectedPackages (_state.Packages, _state.BatchSelected), _state.PinDataFresh);
             using BatchPlanDialog review = new (plan);
             App.Run (review);
             if (review.Result != true)
