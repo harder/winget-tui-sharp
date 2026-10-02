@@ -1,6 +1,6 @@
 using System.Collections;
 
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class BoundedDetailCacheTests
 {

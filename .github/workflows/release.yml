@@ -59,8 +59,8 @@ jobs:
           dotnet-quality: 'preview'
           cache: true
           cache-dependency-path: |
-            WingetTuiSharp.csproj
-            tests/WingetTuiSharp.Tests.csproj
+            WinGetScout.csproj
+            tests/WinGetScout.Tests.csproj
 
       - name: Resolve version
         id: version
@@ -104,7 +104,7 @@ jobs:
           $p = @($v.Split('.')); while ($p.Count -lt 3) { $p += '0' }
           $msixVersion = ($p[0..2] -join '.') + '.0'
           $publisher = "${{ vars.MSIX_PUBLISHER }}"
-          if (-not $publisher) { $publisher = 'CN=winget-tui-sharp (Dev)' }
+          if (-not $publisher) { $publisher = 'CN=wingetscout (Dev)' }
           Write-Host "MSIX version=$msixVersion publisher=$publisher arch=$arch"
           ./packaging/build-msix.ps1 -Arch $arch -Version $msixVersion -Publisher $publisher
 
@@ -142,7 +142,7 @@ jobs:
         run: |
           $version = "${{ steps.version.outputs.version }}"
           $rid = "${{ matrix.rid }}"
-          $bundleName = "winget-tui-sharp-$version-$rid"
+          $bundleName = "wingetscout-$version-$rid"
           $exeSuffix = switch ($rid) {
             "win-x64" { "x64" }
             "win-arm64" { "arm64" }
@@ -155,7 +155,7 @@ jobs:
           # release page don't need to encode the version. NB: the exe on its own runs
           # on the CLI backend — the COM backend needs the in-process engine DLLs that
           # only the zip below bundles.
-          Copy-Item "publish/$rid/winget-tui-sharp.exe" "dist/winget-tui-sharp-$exeSuffix.exe"
+          Copy-Item "publish/$rid/wingetscout.exe" "dist/wingetscout-$exeSuffix.exe"
 
           # Portable bundle: the full publish output (exe + the in-process WinGet COM
           # engine — WindowsPackageManager.dll + Microsoft.Management.Deployment.InProc.dll
@@ -208,6 +208,8 @@ jobs:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           cat > release-notes.md <<EOF
+          # Scout for WinGet
+
           > ⚠️ **Proof of concept** Install / uninstall / upgrade / repair actions operate on your real package state. See [README](https://github.com/${{ github.repository }}#readme) before running on real systems.
 
           ## Downloads
@@ -216,20 +218,20 @@ jobs:
 
           | File | Backend | Install | Notes |
           |------|---------|---------|-------|
-          | \`winget-tui-sharp-${VERSION}-{x64,arm64}.msix\` | **COM** | yes (signed) | **Download B** — package identity → COM, smallest footprint. Requires the package to be signed (see below). |
-          | \`winget-tui-sharp-${VERSION}-win-{x64,arm64}.zip\` | **COM** | no (portable) | Exe + in-process engine + docs. COM with no install, no signing — the no-fuss COM option. |
-          | \`winget-tui-sharp-{x64,arm64}.exe\` | CLI | no (portable) | **Download A** — single exe, \`winget\` CLI backend, no COM features. |
+          | \`wingetscout-${VERSION}-{x64,arm64}.msix\` | **COM** | yes (signed) | **Download B** — package identity → COM, smallest footprint. Requires the package to be signed (see below). |
+          | \`wingetscout-${VERSION}-win-{x64,arm64}.zip\` | **COM** | no (portable) | Exe + in-process engine + docs. COM with no install, no signing — the no-fuss COM option. |
+          | \`wingetscout-{x64,arm64}.exe\` | CLI | no (portable) | **Download A** — single exe, \`winget\` CLI backend, no COM features. |
           | \`SHA256SUMS-*.txt\` | — | — | Per-architecture checksums |
 
           ## Quick start
 
           - **Just run it (CLI):** download the \`.exe\` for your architecture and run it.
-          - **COM, no install:** download the \`.zip\`, extract, run \`winget-tui-sharp.exe\` from the folder (the in-process engine sits beside it).
+          - **COM, no install:** download the \`.zip\`, extract, run \`wingetscout.exe\` from the folder (the in-process engine sits beside it).
           - **COM, installed (MSIX):** download the \`.msix\` and double-click. *Unsigned MSIX builds install only with Developer Mode enabled; a properly signed release installs normally.*
 
           \`\`\`powershell
           # Verify a download (PowerShell)
-          Get-FileHash .\winget-tui-sharp-x64.exe -Algorithm SHA256
+          Get-FileHash .\wingetscout-x64.exe -Algorithm SHA256
           # Compare against SHA256SUMS-win-x64.txt
           \`\`\`
 

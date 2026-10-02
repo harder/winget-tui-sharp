@@ -12,11 +12,11 @@
   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
 
-  <Identity Name="winget-tui-sharp" Publisher="{PUBLISHER}" Version="{VERSION}" ProcessorArchitecture="{ARCH}"/>
+  <Identity Name="wingetscout" Publisher="{PUBLISHER}" Version="{VERSION}" ProcessorArchitecture="{ARCH}"/>
 
   <Properties>
-    <DisplayName>winget-tui-sharp</DisplayName>
-    <PublisherDisplayName>winget-tui-sharp</PublisherDisplayName>
+    <DisplayName>Scout for WinGet</DisplayName>
+    <PublisherDisplayName>WinGet Scout</PublisherDisplayName>
     <Logo>assets\StoreLogo.png</Logo>
   </Properties>
 
@@ -33,10 +33,10 @@
   </Capabilities>
 
   <Applications>
-    <Application Id="wingettuisharp" Executable="winget-tui-sharp.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="wingetscout" Executable="wingetscout.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
-        DisplayName="winget-tui-sharp"
-        Description="A Terminal.Gui terminal UI for the Windows Package Manager (winget)."
+        DisplayName="WinGet Scout"
+        Description="Scout for WinGet finds, installs, and updates Windows packages."
         BackgroundColor="#1A1410"
         Square150x150Logo="assets\Square150x150Logo.png"
         Square44x44Logo="assets\Square44x44Logo.png"/>

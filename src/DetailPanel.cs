@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// Right-side package detail panel. Renders the package's metadata with inline styles —
@@ -739,7 +739,6 @@ public sealed class DetailPanel : FrameView
             new Span (" ", new (Theme.TextPrimary, Theme.Surface)),
 
             // Key rendered as a colored chip: text-on-accent foreground on accent background.
-            // Mirrors the [i] Install style in upstream src/ui.rs.
             new Span ($" {key} ", new (Theme.TextOnAccent, Theme.Accent, TextStyle.Bold)),
             new Span ($"  {description}", new (Theme.TextPrimary, Theme.Surface))
         ]);

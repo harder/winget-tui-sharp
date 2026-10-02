@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public static class UpdateChecks
 {
@@ -69,7 +69,8 @@ public static class UpdateChecks
 
 public static class UpdateTaskScheduler
 {
-    public const string TaskName = "winget-tui-sharp Daily Update Check";
+    public const string TaskName = "WinGet Scout Daily Update Check";
+    private const string PreviousTaskName = "winget-tui-sharp Daily Update Check";
 
     public static string? ExecutablePath ()
     {
@@ -87,14 +88,29 @@ public static class UpdateTaskScheduler
         if (!File.Exists (executablePath)) return "The executable is missing. Publish the app before scheduling checks.";
 
         string taskRun = $"\"{executablePath}\" --check-updates";
-        return await RunAsync (["/Create", "/F", "/SC", "DAILY", "/ST", time, "/TN", TaskName,
+        string? error = await RunAsync (["/Create", "/F", "/SC", "DAILY", "/ST", time, "/TN", TaskName,
             "/TR", taskRun, "/IT", "/RL", "LIMITED"], ct);
+        return error ?? await DeleteIfPresentAsync (PreviousTaskName, ct);
     }
 
     public static async Task<string?> UnregisterAsync (CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows ()) return "Windows Task Scheduler is required.";
-        return await RunAsync (["/Delete", "/F", "/TN", TaskName], ct);
+        string? error = await DeleteIfPresentAsync (TaskName, ct);
+        return error ?? await DeleteIfPresentAsync (PreviousTaskName, ct);
+    }
+
+    public static async Task<string?> MigrateAsync (string executablePath, string time, CancellationToken ct)
+    {
+        if (!OperatingSystem.IsWindows ()) return null;
+        if (await RunAsync (["/Query", "/TN", PreviousTaskName], ct) is not null) return null;
+        return await RegisterAsync (executablePath, time, ct);
+    }
+
+    private static async Task<string?> DeleteIfPresentAsync (string name, CancellationToken ct)
+    {
+        if (await RunAsync (["/Query", "/TN", name], ct) is not null) return null;
+        return await RunAsync (["/Delete", "/F", "/TN", name], ct);
     }
 
     private static async Task<string?> RunAsync (IReadOnlyList<string> arguments, CancellationToken ct)
@@ -157,7 +173,7 @@ public static class UpdateNotification
     {
         if (!OperatingSystem.IsWindows ()) return null;
         string? message = snapshot.Status == "Failed"
-            ? "Scheduled update check failed. Open WinGet TUI for details."
+            ? "Scheduled update check failed. Open WinGet Scout for details."
             : snapshot.NewOrChanged > 0
                 ? $"{snapshot.NewOrChanged} new or changed upgrade(s) are ready for review."
                 : null;
@@ -172,7 +188,7 @@ public static class UpdateNotification
         if (executable is null) return "A published executable is required for notifications.";
         try
         {
-            using Stream? resource = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WingetTuiSharp.notification.ps1");
+            using Stream? resource = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WinGetScout.notification.ps1");
             if (resource is null) return "Notification script is missing.";
             using StreamReader reader = new (resource);
             string encodedScript = Convert.ToBase64String (Encoding.Unicode.GetBytes (await reader.ReadToEndAsync (ct)));
@@ -183,9 +199,9 @@ public static class UpdateNotification
                 RedirectStandardError = true,
                 ArgumentList = { "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript }
             };
-            start.Environment.Remove ("WTS_NOTIFICATION_SHORTCUT");
-            start.Environment["WTS_NOTIFICATION_EXE"] = executable;
-            start.Environment["WTS_NOTIFICATION_MESSAGE"] = message ?? string.Empty;
+            start.Environment.Remove ("WGS_NOTIFICATION_SHORTCUT");
+            start.Environment["WGS_NOTIFICATION_EXE"] = executable;
+            start.Environment["WGS_NOTIFICATION_MESSAGE"] = message ?? string.Empty;
             using Process process = Process.Start (start) ?? throw new InvalidOperationException ("PowerShell did not start.");
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource (ct);
             timeout.CancelAfter (TimeSpan.FromSeconds (15));

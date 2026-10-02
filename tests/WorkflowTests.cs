@@ -1,11 +1,33 @@
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class WorkflowTests
 {
     [Fact]
+    public void LocalDataMigration_CopiesMissingFilesWithoutOverwritingNewState ()
+    {
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-migration-" + Guid.NewGuid ().ToString ("N"));
+        string previous = Path.Combine (root, "previous");
+        string current = Path.Combine (root, "current");
+        Directory.CreateDirectory (previous);
+        Directory.CreateDirectory (current);
+        File.WriteAllText (Path.Combine (previous, "sets.json"), "old sets");
+        File.WriteAllText (Path.Combine (previous, "schedule.json"), "old schedule");
+        File.WriteAllText (Path.Combine (current, "schedule.json"), "new schedule");
+        File.WriteAllText (Path.Combine (previous, "unrelated.txt"), "leave behind");
+        try
+        {
+            WorkflowStore.MigrateLocalData (previous, current);
+            Assert.Equal ("old sets", File.ReadAllText (Path.Combine (current, "sets.json")));
+            Assert.Equal ("new schedule", File.ReadAllText (Path.Combine (current, "schedule.json")));
+            Assert.False (File.Exists (Path.Combine (current, "unrelated.txt")));
+        }
+        finally { Directory.Delete (root, true); }
+    }
+
+    [Fact]
     public void NotificationRegistrationScript_IsEmbeddedForPublishedBuilds ()
     {
-        using Stream? script = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WingetTuiSharp.notification.ps1");
+        using Stream? script = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WinGetScout.notification.ps1");
         Assert.NotNull (script);
         Assert.True (script.Length > 0);
     }
@@ -172,7 +194,7 @@ public sealed class WorkflowTests
     [Fact]
     public void Store_RoundTripsSetsAndKeepsOnlyRecentRuns ()
     {
-        string root = Path.Combine (Path.GetTempPath (), "winget-tui-workflow-test-" + Guid.NewGuid ().ToString ("N"));
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-workflow-test-" + Guid.NewGuid ().ToString ("N"));
         try
         {
             WorkflowStore store = new (root);
@@ -198,7 +220,7 @@ public sealed class WorkflowTests
     [Fact]
     public void Store_DoesNotOverwriteUnreadableSetsOrRunHistory ()
     {
-        string root = Path.Combine (Path.GetTempPath (), "winget-tui-corrupt-test-" + Guid.NewGuid ().ToString ("N"));
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-corrupt-test-" + Guid.NewGuid ().ToString ("N"));
         Directory.CreateDirectory (root);
         try
         {
@@ -220,7 +242,7 @@ public sealed class WorkflowTests
     [Fact]
     public async Task ScheduleWorkflow_RestoresPreviousSettingsWhenTaskChangeFails ()
     {
-        string root = Path.Combine (Path.GetTempPath (), "winget-tui-schedule-test-" + Guid.NewGuid ().ToString ("N"));
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-schedule-test-" + Guid.NewGuid ().ToString ("N"));
         try
         {
             WorkflowStore store = new (root);
@@ -243,7 +265,7 @@ public sealed class WorkflowTests
     [Fact]
     public void ScheduleWorkflow_DoesNotTreatDamagedSettingsAsDisabled ()
     {
-        string root = Path.Combine (Path.GetTempPath (), "winget-tui-schedule-corrupt-" + Guid.NewGuid ().ToString ("N"));
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-schedule-corrupt-" + Guid.NewGuid ().ToString ("N"));
         Directory.CreateDirectory (root);
         try
         {
@@ -259,7 +281,7 @@ public sealed class WorkflowTests
     [Fact]
     public async Task UpdateChecks_UseBaselineThenReportNewVersion ()
     {
-        string root = Path.Combine (Path.GetTempPath (), "winget-tui-check-test-" + Guid.NewGuid ().ToString ("N"));
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-check-test-" + Guid.NewGuid ().ToString ("N"));
         try
         {
             WorkflowStore store = new (root);
@@ -287,7 +309,7 @@ public sealed class WorkflowTests
     [Fact]
     public async Task UpdateChecks_DoNotReplaceUnreadableBaseline ()
     {
-        string root = Path.Combine (Path.GetTempPath (), "winget-tui-baseline-test-" + Guid.NewGuid ().ToString ("N"));
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-baseline-test-" + Guid.NewGuid ().ToString ("N"));
         Directory.CreateDirectory (root);
         try
         {

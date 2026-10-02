@@ -1,4 +1,4 @@
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class ExportWorkflowTests
 {
@@ -187,7 +187,7 @@ public sealed class ExportWorkflowTests
     {
         internal TempDirectory ()
         {
-            Path = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"winget-tui-workflow-{Guid.NewGuid ():N}");
+            Path = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"wingetscout-workflow-{Guid.NewGuid ():N}");
             Directory.CreateDirectory (Path);
         }
 

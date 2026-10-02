@@ -1,12 +1,12 @@
 using System.Globalization;
 using System.Text.RegularExpressions;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 
 /// <summary>
 /// Shells out to the winget CLI and parses its tabular output.
-/// Mirrors src/cli_backend.rs from shanselman/winget-tui.
+/// Keeps command construction and parsing separate for testability.
 /// </summary>
 public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 {
@@ -141,7 +141,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         string dir = Path.Combine (
             Environment.GetFolderPath (Environment.SpecialFolder.UserProfile),
             "Downloads",
-            "winget-tui");
+            "wingetscout");
         Operation op = new () { Kind = OperationKind.Download, PackageId = id, Version = version };
 
         try
@@ -168,7 +168,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
     {
-        // Upstream tries id (non-exact) first, then falls back to name (exact). Match that.
+        // Try id (non-exact) first, then fall back to name (exact).
         (int code, string output) = await RunWithCodeAsync (UpgradeByIdArgs (id, source), ct);
 
         if (code != 0)
@@ -200,8 +200,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     // ──────────────────────────────────────────────────────────────────────
     // CLI argument construction — extracted as static helpers so they're
     // unit-testable without invoking the winget subprocess. Each method must
-    // match upstream src/cli_backend.rs exactly; tests in tests/ParserTests.cs
-    // catch any drift.
+    // preserve the tested CLI behavior; tests in tests/ParserTests.cs catch drift.
     // ──────────────────────────────────────────────────────────────────────
 
     internal static string [] SearchArgs (string query, string? source)
@@ -246,7 +245,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     internal static string [] InstallArgs (string id, string? version, InstallSettings? settings = null, string? source = null)
     {
-        // Match upstream's argument list: no `--exact`. Some ids need substring match
+        // Omit `--exact`. Some ids need substring match
         // against the catalog (e.g. monikered store packages).
         List<string> args = ["install", "--id", id, "--accept-source-agreements", "--accept-package-agreements"];
 
@@ -397,7 +396,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     /// <summary>
     /// Parses `winget pin list` output, distinguishing Blocking / Gating(version) / Pinned
-    /// states. Mirrors upstream src/cli_backend.rs::parse_pins_from_table + parse_pin_state.
+    /// states.
     /// </summary>
     public static IReadOnlyDictionary<string, PinState> ParsePins (string output)
     {
@@ -536,8 +535,8 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         || value.Contains ("pin", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Map winget's pin-type column text to a <see cref="PinState"/>. Mirrors upstream's
-    /// parse_pin_state: prefer Blocking, then Gating(version), then Pinned, in that order.
+    /// Map winget's pin-type column text to a <see cref="PinState"/>.
+    /// Prefer Blocking, then Gating(version), then Pinned, in that order.
     /// </summary>
     internal static PinState ParsePinState (string pinType, string pinnedVersion)
     {
@@ -727,7 +726,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     private static Encoding ResolveEncoding ()
     {
-        string? env = Environment.GetEnvironmentVariable ("WINGETTUI_ENCODING");
+        string? env = Environment.GetEnvironmentVariable ("WINGETSCOUT_ENCODING");
 
         if (!string.IsNullOrEmpty (env))
         {
@@ -763,9 +762,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         // `winget upgrade --include-pinned` can append further footer-delimited tables after
         // the first — one for packages explicitly targeted, one for packages whose pins block
         // upgrade, etc. Loop until a table produces no footer (i.e. it's the last one), rather
-        // than special-casing only a single secondary table. Mirrors upstream
-        // shanselman/winget-tui#393 ("fix: restore MSRV and multi-table parsing"), which
-        // generalized the old two-table-only handling the same way.
+        // than special-casing a single secondary table.
         BoundedPackageDeduper rows = new (maxRows);
         int nextTableStart = 0;
         int tableIndex = 0;
@@ -871,8 +868,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
             string sanitized = StripControl (raw);
 
-            // Stop at the first footer line (e.g. "61 upgrades available."). Upstream uses
-            // take_while-stop, we use the same — important so we don't accidentally pick up
+            // Stop at the first footer line (e.g. "61 upgrades available.") so we do not pick up
             // rows from the pinned-packages secondary table.
             if (IsFooterLine (sanitized))
             {
@@ -898,7 +894,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
             // Reject rows whose id is empty or doesn't look like a real package id. winget
             // sometimes emits long localized notices that land in the id column; valid ids
             // contain '.' (Microsoft.WindowsTerminal), '\' (ARP\Machine\…), or are pure
-            // alphanumeric Store product ids. Mirrors upstream's parse_table_row filter.
+            // alphanumeric Store product ids.
             if (string.IsNullOrWhiteSpace (id))
             {
                 continue;
@@ -930,8 +926,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     /// </summary>
     /// <remarks>
     /// A digit-space prefix alone is ambiguous: a package literally named e.g. "20 Minutes
-    /// Till Dawn" has the exact same shape (upstream fixed this in
-    /// shanselman/winget-tui#347, "fix: distinguish digit-leading packages from footers").
+    /// Till Dawn" has the exact same shape.
     /// The distinguishing signal isn't the id column (its slice position is layout-dependent
     /// and can coincidentally land on whitespace-free footer text), it's that real table
     /// rows are column-aligned with runs of 2+ spaces between fields, while footer messages
@@ -966,7 +961,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     private readonly record struct PackageColumnMap (int Name, int Id, int Version, int Available, int Source);
 
     /// <summary>
-    /// Locale-aware column-name → index map. Mirrors upstream's package_column_map: also
+    /// Locale-aware column-name → index map. Also
     /// accepts French (Nom), Spanish (Nombre, Versión, Origen), Portuguese (Nome, Versão,
     /// Fonte, Disponível), Italian (Versione, Origine, Disponibile), German (Quelle,
     /// Verfügbar). Falls back to positional indices for unrecognized locales.
@@ -1002,8 +997,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     /// <summary>
     /// Dedupe by (id, source_lowercase). When the same key appears twice, prefer the row
-    /// with more metadata (non-empty available_version and source). Mirrors upstream's
-    /// dedupe_packages + prefer_package.
+    /// with more metadata (non-empty available_version and source).
     /// </summary>
     internal static List<Package> DedupePackages (List<Package> rows)
     {
@@ -1020,8 +1014,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     private static bool PreferDuplicate (Package candidate, Package existing)
     {
         // Compare versions first: a newer version wins outright. Only when versions
-        // are equal (or unparseable) does metadata richness tiebreak. Mirrors upstream
-        // src/cli_backend.rs::prefer_package + compare_versions_like.
+        // are equal (or unparseable) does metadata richness tiebreak.
         int versionCmp = CompareVersionsLike (candidate.Version, existing.Version);
 
         if (versionCmp > 0)
@@ -1105,7 +1098,6 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     /// Compares two version-like strings (e.g. "1.119.0" vs "1.121.0"). Splits on common
     /// separators (`.`, `-`, `+`), compares each segment numerically when both are integers,
     /// lexicographically otherwise. Returns &gt;0 if a is newer, &lt;0 if older, 0 if equal.
-    /// Mirrors upstream's compare_versions_like in spirit.
     /// </summary>
     internal static int CompareVersionsLike (string a, string b)
     {
@@ -1233,8 +1225,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     /// important for the pin-list parser, where both "Version" and "Pinned Version" can be
     /// present in the same header: passing <c>"pinned version"</c> ahead of <c>"version"</c>
     /// in the lookup list now actually selects the pinned column, not the installed-version
-    /// column. Upstream's <c>find_column_ci</c> iterates columns-first and silently picks
-    /// the wrong one here (their tests don't cover the full pin-table parse).
+    /// column.
     /// </summary>
     private static int ColIndex (List<(string Name, int Start)> cols, params string [] lookups)
     {
@@ -1260,8 +1251,6 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     ///
     /// Walks the row by rune, accumulating display width via <see cref="Rune.GetColumns"/>,
     /// and keeps the runes whose accumulated display position falls inside the column.
-    /// Mirrors upstream src/cli_backend.rs::extract_field which uses the same approach via
-    /// the unicode-width crate.
     /// </summary>
     private static string SliceColumn (string row, List<(string Name, int Start)> cols, int idx)
     {
@@ -1512,7 +1501,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     /// <summary>
     /// Normalizes a `winget show` key to its canonical English snake_case form.
-    /// Mirrors the locale table in upstream's <c>normalize_show_key</c>: handles English,
+    /// Handles English,
     /// German, French, Italian, Spanish, Portuguese variants for the keys we care about.
     /// Returns an empty string for unknown keys so the caller skips them.
     /// </summary>

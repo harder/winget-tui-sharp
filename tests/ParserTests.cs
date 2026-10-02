@@ -1,8 +1,7 @@
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 /// <summary>
-/// Unit tests for the CliBackend parsing pipeline. Equivalent to the
-/// <c>#[cfg(test)] mod tests</c> block inside upstream's <c>src/cli_backend.rs</c>.
+/// Unit tests for the CliBackend parsing pipeline.
 ///
 /// Every test in here is anchored to a real bug that was found while porting:
 /// the bare-CR spinner overwrite that ate the header, the CJK display-width
@@ -150,8 +149,7 @@ public class ParserTests
     [Fact]
     public void ParseTable_HandlesThreeFooterDelimitedTables ()
     {
-        // Regression test ported from shanselman/winget-tui#393 ("fix: restore MSRV and
-        // multi-table parsing"). winget upgrade --include-pinned can append more than one
+        // winget upgrade --include-pinned can append more than one
         // extra section (e.g. "explicitly targeted" packages, then "pin blocks upgrade"
         // packages) — each is its own footer-delimited mini-table. The old two-call
         // handling (first table + exactly one secondary table) silently dropped anything
@@ -274,7 +272,7 @@ public class ParserTests
     [Fact]
     public void ParseShow_LocaleIndependentFoundLine_German ()
     {
-        // Upstream behavior: detect the "Prefix <name> [<id>]" pattern by trailing ] +
+        // Detect the "Prefix <name> [<id>]" pattern by trailing ] +
         // matching [, not by the English word "Found". German prefix is "Gefunden".
         const string output = """
             Gefunden Google Chrome [Google.Chrome]
@@ -864,8 +862,7 @@ public class ParserTests
     [Fact]
     public void ParseTable_DigitSpacePackageNameIsNotFooter ()
     {
-        // Regression test ported from shanselman/winget-tui#347 (fixed upstream in
-        // "fix: distinguish digit-leading packages from footers"). A package literally
+        // A package literally
         // named "20 Minutes Till Dawn" has the exact same shape as a winget count footer
         // ("20 upgrades available.") — digits immediately followed by a space — so
         // IsFooterLine's naive digit-then-space heuristic stops parsing before this row
@@ -946,7 +943,7 @@ public class ParserTests
     }
 
     // ──────────────────────────────────────────────────────────────────────
-    // ParseShow — edge cases that upstream tests cover
+    // ParseShow — edge cases
     // ──────────────────────────────────────────────────────────────────────
 
     [Fact]
@@ -1011,7 +1008,7 @@ public class ParserTests
     public void InstallArgs_DoNotIncludeExact_RegressionForCatalogMatch ()
     {
         // Regression: an earlier version added `--exact` to install, which caused
-        // failures when an id needed a substring catalog match. Upstream uses no
+        // failures when an id needed a substring catalog match. Use no
         // `--exact` on install.
         string [] args = CliBackend.InstallArgs ("Foo.Bar", version: null);
 
@@ -1037,7 +1034,7 @@ public class ParserTests
     [Fact]
     public void UpgradeByIdArgs_DoNotIncludeExact_OnlyTheNameFallbackDoes ()
     {
-        // Regression: an earlier version flipped these. Upstream's id flow is
+        // Regression: an earlier version flipped these. The id flow is
         // non-exact, name fallback is exact.
         string [] idArgs = CliBackend.UpgradeByIdArgs ("Foo.Bar");
         string [] nameArgs = CliBackend.UpgradeByNameArgs ("Foo.Bar");

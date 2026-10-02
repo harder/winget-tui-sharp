@@ -12,4 +12,4 @@ global using Terminal.Gui.Text;
 
 global using Xunit;
 
-global using WingetTuiSharp;
+global using WinGetScout;

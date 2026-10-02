@@ -1,4 +1,4 @@
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public class AppBehaviorTests
 {
@@ -114,7 +114,7 @@ public class AppBehaviorTests
         Label context = GetPrivateField<Label> (app, "_contextLabel");
         FrameView listFrame = GetPrivateField<FrameView> (app, "_listFrame");
 
-        Assert.Equal ("WinGet TUI — winget-tui", app.Title);
+        Assert.Equal ("Scout for WinGet", app.Title);
         Assert.Equal (0, tabBar.Frame.Y);
         Assert.Equal (app.Viewport.Width, tabBar.Frame.Width);
         Assert.Equal (1, context.Frame.Y);
@@ -624,7 +624,7 @@ public class AppBehaviorTests
     public void UpgradeQueryFor_TruncatedId_FallsBackToName ()
     {
         // winget truncates long ids in tabular output with `…`; an --id match can't succeed, so
-        // the upgrade query must be the exact name instead. Mirrors upstream winget-tui fd9e9dbe.
+        // the upgrade query must be the exact name instead..
         Package p = new () { Id = "Microsoft.Azure.Function…", Name = "Azure Functions Core Tools", Source = "winget" };
 
         Assert.Equal ("Azure Functions Core Tools", App.UpgradeQueryFor (p));

@@ -6,7 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>Runs a child with finite lifetime, bounded output, and kernel process containment.</summary>
 internal static class ProcessRunner

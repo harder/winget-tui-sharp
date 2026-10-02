@@ -1,4 +1,4 @@
-// Centralized using directives for the WingetTuiSharp example. Keeps every other file lean and
+// Centralized using directives for WinGet Scout. Keeps every other file lean and
 // removes repetition. The Attribute alias resolves the ambiguity between System.Attribute
 // (almost never wanted) and Terminal.Gui.Drawing.Attribute (what we mean every time).
 

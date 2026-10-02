@@ -1,7 +1,7 @@
 using System.Collections;
 using System.Diagnostics;
 
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class CrossCuttingWorkflowTests
 {

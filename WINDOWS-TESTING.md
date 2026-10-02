@@ -18,7 +18,7 @@ Work top-down; **P0** gates everything else.
 ```powershell
 # from the repo root, on Windows
 dotnet publish -c Release -f net10.0-windows10.0.26100.0 -r win-x64
-$exe = ".\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\winget-tui-sharp.exe"
+$exe = ".\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\wingetscout.exe"
 
 # confirm it's a real Native-AOT image (single native exe, no CoreCLR shipped):
 Test-Path ".\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\coreclr.dll"   # expect: False
@@ -41,7 +41,7 @@ For quick iteration without AOT, include the machine's runtime identifier: `dotn
 > routing activation to it with a registration-free WinRT manifest. The AOT default launch now reads
 > **`COM · winget 1.29.190-preview`** (the bundled in-proc engine version).
 >
-> **The fix** (`WingetTuiSharp.csproj` + `app.manifest`, Windows TFM only):
+> **The fix** (`WinGetScout.csproj` + `app.manifest`, Windows TFM only):
 > - Add `Microsoft.WindowsPackageManager.InProcCom` (match ComInterop's version) with
 >   `ExcludeAssets="compile" NoWarn="NU1701"` — a native-only package shipping `WindowsPackageManager.dll`
 >   (~7 MB) + `Microsoft.Management.Deployment.InProc.dll`. Keep ComInterop (it provides the managed projection).
@@ -117,7 +117,7 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 
 **Download-only** (`d`):
 
-- [x] `d` on a package downloads its installer **without installing**, showing the progress bar (Downloading phase), and reports the path (default `%USERPROFILE%\Downloads\winget-tui`). Verify the installer file actually lands there. *(Session 3, **on COM**: `DownloadAsync(ajeetdsouza.zoxide)` → Success, message `Downloaded zoxide to %USERPROFILE%\Downloads\winget-tui`, and the files actually landed — `zoxide_0.9.9_Arm64_portable_en-US.zip` (480 KB) + `.yaml` manifest (COM resolved the **arm64** installer for this host). Progress callback fired: 2 samples, phase **Downloading**, fraction → 1.00. Confirms the `IProgress<OpProgress>` marshaling — the headline "live progress" path — works on COM. Test artifacts cleaned up.)*
+- [x] `d` on a package downloads its installer **without installing**, showing the progress bar (Downloading phase), and reports the path (default `%USERPROFILE%\Downloads\wingetscout`). Verify the installer file actually lands there. *(Session 3, **on COM**: `DownloadAsync(ajeetdsouza.zoxide)` → Success, message `Downloaded zoxide to %USERPROFILE%\Downloads\wingetscout`, and the files actually landed — `zoxide_0.9.9_Arm64_portable_en-US.zip` (480 KB) + `.yaml` manifest (COM resolved the **arm64** installer for this host). Progress callback fired: 2 samples, phase **Downloading**, fraction → 1.00. Confirms the `IProgress<OpProgress>` marshaling — the headline "live progress" path — works on COM. Test artifacts cleaned up.)*
 - [x] `Esc` cancels a download in progress (same cooperative-cancel path as install). *(Manually verified on Windows, 2026-07-16.)*
 - [x] (CLI backend) `d` runs `winget download`; on an older winget without that verb, the failure message is shown rather than a crash. *(Manually verified on Windows, 2026-07-16.)*
 
@@ -184,9 +184,9 @@ Operations (pick a small, safe package to install/uninstall, e.g. a CLI tool):
 - [x] **Batch upgrade + Esc**: the in-flight item cancels and the remaining queue stops. *(Manually verified on Windows, 2026-07-16.)*
 - [x] **One-op-at-a-time guard**: triggering a second operation while one is running is ignored (no second progress bar, no crash). *(Manually verified on Windows, 2026-07-16.)*
 
-## P1.5 — Upstream parity ports (ported from `shanselman/winget-tui`, June 2026)
+## P1.5 — Package list behavior checks
 
-Three behavioural changes ported from upstream. Logic is unit-tested (`tests/AppBehaviorTests.cs`),
+Three behavior changes. Logic is unit-tested (`tests/AppBehaviorTests.cs`),
 but these paths need a real terminal / real winget to confirm end-to-end.
 
 > **Session 3:** `dotnet test -f net10.0` **passes** on this Windows host (exit 0; 18 facts/theories in
@@ -197,10 +197,10 @@ but these paths need a real terminal / real winget to confirm end-to-end.
 > is a straightforward CLI-backend keypress test (see P2's "for an agent" setup note, same applies here);
 > click-to-sort specifically needs the mouse (see the caveat under P2).
 
-- [ ] **Click-to-sort column headers** (upstream `66d464c4`). With the mouse, **click the `Name`, `Id`, or `Version` header** to sort by that column (ascending); **click the same header again** to reverse direction (the `↑`/`↓` arrow in the header should flip). Clicking the marker, **`Available`, or `Source`** header is a **no-op**. Verify in both **Installed** and **Upgrades** tabs (column indices differ between them). Keyboard `S` cycling must still work unchanged (already confirmed — see note). *(2026-09-30: on the native ARM64 COM build in a ConPTY session, SGR mouse clicks changed Name ↑ → Name ↓, then Id ↑ and Version ↑ in both Installed and Upgrades. A click on the visible Available column in Upgrades did not change the sort. The 80-column viewport clipped Source, so that particular no-op remains untested. This exercises Terminal.Gui's mouse event path, though not a physical mouse in Windows Terminal.)*
-- [ ] **Truncated-id upgrade falls back to name** (upstream `fd9e9dbe`). Find an Upgrades row whose **id is truncated with `…`** (winget does this to long ids in tabular output). Press **`u`**: instead of the old "Cannot upgrade: id was truncated" block, you should get a confirm reading **"Upgrade <name>? (id was truncated by winget — matching by name)"**, and on confirm the upgrade should actually run (CLI backend retries `--name --exact`). Needs the **`--cli`** backend (COM ids are never truncated). Confirm a non-truncated row still shows the plain "Upgrade <name>?" prompt.
+- [ ] **Click-to-sort column headers**. With the mouse, **click the `Name`, `Id`, or `Version` header** to sort by that column (ascending); **click the same header again** to reverse direction (the `↑`/`↓` arrow in the header should flip). Clicking the marker, **`Available`, or `Source`** header is a **no-op**. Verify in both **Installed** and **Upgrades** tabs (column indices differ between them). Keyboard `S` cycling must still work unchanged (already confirmed — see note). *(2026-09-30: on the native ARM64 COM build in a ConPTY session, SGR mouse clicks changed Name ↑ → Name ↓, then Id ↑ and Version ↑ in both Installed and Upgrades. A click on the visible Available column in Upgrades did not change the sort. The 80-column viewport clipped Source, so that particular no-op remains untested. This exercises Terminal.Gui's mouse event path, though not a physical mouse in Windows Terminal.)*
+- [ ] **Truncated-id upgrade falls back to name**. Find an Upgrades row whose **id is truncated with `…`** (winget does this to long ids in tabular output). Press **`u`**: instead of the old "Cannot upgrade: id was truncated" block, you should get a confirm reading **"Upgrade <name>? (id was truncated by winget — matching by name)"**, and on confirm the upgrade should actually run (CLI backend retries `--name --exact`). Needs the **`--cli`** backend (COM ids are never truncated). Confirm a non-truncated row still shows the plain "Upgrade <name>?" prompt.
   *(2026-09-30: CLI Upgrades loaded 20 real rows, but their underlying winget IDs were not truncated. The table's visual ellipses are viewport clipping, which does not trigger the fallback; no suitable row was available for this test.)*
-- [x] **Contextual empty-state message** (upstream `#228`). When the list is empty, the message should match the reason: **Upgrades + 📌-hide (`UnpinnedOnly`) → "No unpinned packages with upgrades found."**; Upgrades + 📌-only → "No pinned packages with upgrades found."; Upgrades + all → "All packages are up to date!"; an active local filter that hides everything → 'No packages match "<text>".'. Toggle the pin filter (`P`) in Upgrades and type a non-matching filter (`/`) to exercise each. *(Session 4, **on AOT/COM**, interactive: confirmed two variants on screen — Installed with `/zoxide` filter after uninstall → **'No packages match "zoxide".'**; Upgrades + `P` to 📌-only → **"No pinned packages with upgrades found."** The unpinned-only and all-up-to-date variants were not separately triggered.)*
+- [x] **Contextual empty-state message**. When the list is empty, the message should match the reason: **Upgrades + 📌-hide (`UnpinnedOnly`) → "No unpinned packages with upgrades found."**; Upgrades + 📌-only → "No pinned packages with upgrades found."; Upgrades + all → "All packages are up to date!"; an active local filter that hides everything → 'No packages match "<text>".'. Toggle the pin filter (`P`) in Upgrades and type a non-matching filter (`/`) to exercise each. *(Session 4, **on AOT/COM**, interactive: confirmed two variants on screen — Installed with `/zoxide` filter after uninstall → **'No packages match "zoxide".'**; Upgrades + `P` to 📌-only → **"No pinned packages with upgrades found."** The unpinned-only and all-up-to-date variants were not separately triggered.)*
 
 ## P2 — Review-flagged real-Windows concerns & measurements
 

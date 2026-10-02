@@ -15,7 +15,7 @@
 #if WINGET_COM
 using Microsoft.Management.Deployment;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// <see cref="IBackend"/> implementation over the WinGet COM API. Returns structured objects
@@ -1221,7 +1221,7 @@ public sealed class ComBackend : IBackend, IInstalledVersionLookup
         => Path.Combine (
             Environment.GetFolderPath (Environment.SpecialFolder.UserProfile),
             "Downloads",
-            "winget-tui");
+            "wingetscout");
 
     /// <summary>Build the same COM options for installer preview and installation.</summary>
     private static InstallOptions CreateInstallOptions (InstallSettings? settings)

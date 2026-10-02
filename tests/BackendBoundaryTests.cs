@@ -1,6 +1,6 @@
 using Xunit;
 
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class BackendBoundaryTests
 {

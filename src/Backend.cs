@@ -1,5 +1,5 @@
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public interface IBackend
 {

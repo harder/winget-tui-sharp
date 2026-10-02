@@ -1,4 +1,4 @@
-using WingetTuiSharp;
+using WinGetScout;
 
 if (args.Length > 0 && args [0] == "--check-updates")
 {
@@ -55,9 +55,9 @@ if (args.Length > 0 && args [0] is "--dump")
     // verbatim, plus a hex dump of the bytes immediately around the dash-line separator.
     // Use this on Windows to verify the encoding and figure out why ParseTable is empty:
     //
-    //     winget-tui-sharp.exe --dump search vscode
-    //     winget-tui-sharp.exe --dump list
-    //     winget-tui-sharp.exe --dump upgrade
+    //     wingetscout.exe --dump search vscode
+    //     wingetscout.exe --dump list
+    //     wingetscout.exe --dump upgrade
     string [] cmd = args.Length > 1
                         ? [.. args.Skip (1), "--accept-source-agreements"]
                         : ["list", "--accept-source-agreements"];
@@ -143,7 +143,7 @@ if (args.Length > 0 && args [0] is "--dump")
 // AOT-activation bug from a wedged WinGet OOP server (both surface as 0x80073D54
 // APPMODEL_ERROR_NO_PACKAGE). Prints the apartment state + catalog count for the main and a
 // threadpool thread; a healthy in-proc activation reports "activation OK; catalogs = 3".
-//   winget-tui-sharp.exe --comdiag
+//   wingetscout.exe --comdiag
 if (args.Length > 0 && args [0] is "--comdiag")
 {
     Console.WriteLine ($"main thread apartment = {Thread.CurrentThread.GetApartmentState ()}");
@@ -187,6 +187,21 @@ if (args.Length > 0 && args [0] is "--comdiag")
 // on PATH → mock. Scripts that need a guaranteed backend should check that note.
 bool smokeMode = args.Any (a => a == "--smoke");
 IBackend backend = SelectBackend (args);
+
+if (!smokeMode && UpdateTaskScheduler.ExecutablePath () is { } publishedPath)
+{
+    try
+    {
+        UpdateCheckSettings schedule = new WorkflowStore ().Schedule ();
+        if (schedule.Enabled)
+        {
+            string? migrationError = await UpdateTaskScheduler.MigrateAsync (
+                publishedPath, schedule.DailyAt, CancellationToken.None);
+            if (migrationError is not null) Console.Error.WriteLine ($"Scheduled check migration failed: {migrationError}");
+        }
+    }
+    catch (Exception ex) { Console.Error.WriteLine ($"Scheduled check migration failed: {ex.Message}"); }
+}
 
 // Theme selection: --theme=<amber|sage|moss|rose>. Defaults to Sage. An unrecognized id
 // degrades gracefully (stderr note, keep the default) rather than crashing. TryApply already
@@ -365,7 +380,7 @@ static bool IsWingetAvailable ()
     }
 }
 
-namespace WingetTuiSharp
+namespace WinGetScout
 {
     /// <summary>
     /// Startup-time diagnostics carried into the running app. Currently just the reason a requested

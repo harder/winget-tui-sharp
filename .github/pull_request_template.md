@@ -10,9 +10,9 @@ before merge.
 
 ## Type
 
-<!-- Pick one. Bug fixes against upstream parity are the most common kind. -->
+<!-- Pick one or more. -->
 
-- [ ] Bug fix — closes a gap against upstream `shanselman/winget-tui` behavior
+- [ ] Bug fix
 - [ ] Parser hardening — new edge case in winget output
 - [ ] Terminal.Gui version bump or compatibility fix
 - [ ] Docs / build / CI only
@@ -21,18 +21,11 @@ before merge.
 
 <!-- How did you confirm this works? -->
 
-- [ ] `dotnet test --project tests/WingetTuiSharp.Tests.csproj` — all 245+ tests pass
+- [ ] `dotnet test --project tests/WinGetScout.Tests.csproj` — all 245+ tests pass
 - [ ] Added test(s) for the changed behavior (specify which below if so)
 - [ ] Ran `dotnet run -- --mock` (UI iteration sanity)
 - [ ] Ran AOT publish on Windows: `dotnet publish -c Release -r win-x64`
 - [ ] Manual smoke on real `winget` (Windows host)
-
-## Upstream parity
-
-<!-- For parser / behavior changes, link the upstream Rust source that motivated this.
-     Skip if the change is purely additive (e.g. a new Terminal.Gui-only test). -->
-
-Upstream reference: `src/cli_backend.rs::<function>`
 
 ## Notes
 

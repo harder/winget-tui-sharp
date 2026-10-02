@@ -1,16 +1,14 @@
-# winget-tui-sharp
+# Scout for WinGet
 
-> ⚠️ **Proof of concept**, originally built to **benchmark [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) v2 against Ratatui** (feature parity, rendering fidelity, performance, UX) — but fully operational and **actively used as a daily winget TUI**: search, install, upgrade, uninstall, and manage pins without leaving the terminal. On Windows it drives the **WinGet COM API** by default for structured results (falling back to the `winget` CLI if COM can't activate), and ships as a single Native AOT `.exe` — no .NET runtime required. **Install / uninstall / upgrade / repair actions operate on your real package state** — run it on a machine you're comfortable changing.
+> **WinGet Scout** is a terminal app for managing Windows packages: search, install, upgrade, uninstall, and manage pins without leaving the terminal. On Windows it drives the **WinGet COM API** by default for structured results (falling back to the `winget` CLI if COM can't activate), and ships as a single Native AOT `.exe` — no .NET runtime required. **Install / uninstall / upgrade / repair actions operate on your real package state** — run it on a machine you're comfortable changing.
 
 [![C#](https://img.shields.io/badge/C%23-239120?style=flat&logo=csharp&logoColor=white)](https://learn.microsoft.com/dotnet/csharp/)
 [![Terminal.Gui](https://img.shields.io/badge/Terminal.Gui-v2-FF6F00?style=flat&logo=windowsterminal&logoColor=white)](https://github.com/gui-cs/Terminal.Gui)
 [![Windows](https://img.shields.io/badge/Windows-x64%20%7C%20arm64-0078D4?style=flat&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat)](LICENSE)
 
-[![CI](https://github.com/harder/winget-tui-sharp/actions/workflows/ci.yml/badge.svg)](https://github.com/harder/winget-tui-sharp/actions/workflows/ci.yml)
-[![Release](https://github.com/harder/winget-tui-sharp/actions/workflows/release.yml/badge.svg)](https://github.com/harder/winget-tui-sharp/actions/workflows/release.yml)
-
-![winget-tui-sharp screenshot](img/winget-tui-sharp.png)
+[![CI](https://github.com/harder/wingetscout/actions/workflows/ci.yml/badge.svg)](https://github.com/harder/wingetscout/actions/workflows/ci.yml)
+[![Release](https://github.com/harder/wingetscout/actions/workflows/release.yml/badge.svg)](https://github.com/harder/wingetscout/actions/workflows/release.yml)
 
 ## Quick start
 
@@ -18,30 +16,30 @@
 
 You do **not** need .NET installed.
 
-1. Download the latest Windows binary from the [Releases page](https://github.com/harder/winget-tui-sharp/releases/latest):
-   - `winget-tui-sharp-x64.exe` for Windows on Intel/AMD x86
-   - `winget-tui-sharp-arm64.exe` for Windows on ARM
+1. Download the latest Windows binary from the [Releases page](https://github.com/harder/wingetscout/releases/latest):
+   - `wingetscout-x64.exe` for Windows on Intel/AMD x86
+   - `wingetscout-arm64.exe` for Windows on ARM
 2. Run it from Windows Terminal:
 
 ```powershell
-.\winget-tui-sharp-x64.exe
+.\wingetscout-x64.exe
 
-.\winget-tui-sharp-arm64.exe
+.\wingetscout-arm64.exe
 ```
 
 The released binaries are **not code-signed** yet (see [code-signing.md](code-signing.md)), so Microsoft Defender SmartScreen will warn on first run. Workaround:
 
 ```powershell
-Unblock-File -Path .\winget-tui-sharp-x64.exe
+Unblock-File -Path .\wingetscout-x64.exe
 ```
 
 Or right-click the exe → *Properties* → check *Unblock* → *OK*. On the first run after unblocking, click *More info → Run anyway* and SmartScreen will remember the decision.
 
 ## Origin & attribution
 
-winget-tui-sharp began as a from-scratch C# / [Terminal.Gui](https://github.com/gui-cs/Terminal.Gui) port of [**shanselman/winget-tui**](https://github.com/shanselman/winget-tui) — Scott Hanselman's Rust + Ratatui TUI for winget — built to benchmark Terminal.Gui v2 against Ratatui on feature parity, rendering fidelity, performance, and UX. **Winget-tui** is a beautiful terminal app in its own right - go download it and try it too! [Go download winget-tui](https://github.com/shanselman/winget-tui). Winget-tui is copyright © [Scott Hanselman](https://github.com/shanselman), MIT-licensed.
+Scout for WinGet began as an independent C# and Terminal.Gui exploration inspired by [Scott Hanselman's Rust WinGet TUI](https://github.com/shanselman/winget-tui). That project is MIT-licensed; its code was not copied.
 
-UI layout, keybindings, color palette, table structure, winget output parsing, dedupe / pin-state / locale handling, and the "Found `<name>` [`<id>`]" detail-header convention all follow the [upstream source](https://github.com/shanselman/winget-tui/tree/main/src). **No upstream code was copied** - the upstream served as the behavioral and visual specification. (The app's default color theme is now **Sage** rather than the original warm-amber palette - that exact upstream-matching palette is still available as the **Amber** theme, selectable via `t` or `--theme=amber`; see [Choosing a theme at runtime](#choosing-a-theme-at-runtime).)
+The app now has its own workflows for scheduled checks, saved package sets, and run history. Its default theme is **Sage**; **Amber** remains available via `t` or `--theme=amber`.
 
 With the COM backend now stable under Native AOT, this port has grown from a benchmark exercise into a usable tool in its own right - the Terminal.Gui benchmarking goal continues alongside it, and differences between the two implementations, including Terminal.Gui feature gaps surfaced along the way, are tracked in [feature-gaps.md](feature-gaps.md).
 
@@ -84,7 +82,7 @@ This port is also MIT-licensed; see [LICENSE](LICENSE).
 | Rich-text detail panel: inline span styling, accent label, info-blue URLs | ✅ (via direct drawing, plus clickable homepage/release links via tiny Markdown rows) |
 | CJK / display-width column slicing                                        | ✅                                                                                    |
 | Bracketed-paste support on search/version inputs                          | ✅ (via Terminal.Gui v2 paste pipeline)                                               |
-| Switchable theme: Sage (default), Amber (exact upstream `theme.rs` match), Moss & Olive, Dusty Rose | ✅ (`t` in-app picker or `--theme=`)                          |
+| Switchable theme: Sage (default), Amber (warm palette), Moss & Olive, Dusty Rose | ✅ (`t` in-app picker or `--theme=`)                          |
 | Mock backend for non-Windows hosts                                        | ✅                                                                                    |
 | Native AOT standalone exe, no .NET runtime needed                         | ✅                                                                                    |
 
@@ -92,13 +90,13 @@ This port is also MIT-licensed; see [LICENSE](LICENSE).
 
 In Search, press `Space` to select one result or `a` to select the visible results. The selection count stays visible as you search. Press `B` to review an install plan: it checks the installed inventory and configured sources, then marks packages that cannot be installed. Only ready packages run after you confirm. Press `g` to save, load, or delete a named package set. Loading a set restores the selection; review it with `B` before installing. In Upgrades, the existing `Space` / `a` selection now gets a review plan before `U` upgrades the ready packages.
 
-Press `L` to see the 20 most recent operation runs. A run lists each package as succeeded, skipped, or failed, with a short reason. Package sets and run history are stored under `%LOCALAPPDATA%\WinGetTuiSharp`.
+Press `L` to see the 20 most recent operation runs. A run lists each package as succeeded, skipped, or failed, with a short reason. Package sets and run history are stored under `%LOCALAPPDATA%\WinGetScout`.
 
 ### Scheduled update checks
 
 From Upgrades, press `C` to open the check settings. Choose **Check now** for a manual inventory check, or set a daily local time and enable checks. Enabling registers a current-user Windows Task Scheduler task that runs the published executable with `--check-updates`. Keep that executable and its companion files at the same path. Checks only inspect upgrades and pins; they never install or upgrade packages. The first successful check establishes a baseline. Later checks can notify when an unpinned upgrade appears or its available version changes, or when a check fails. If notifications are enabled, the portable app registers a current-user Start Menu shortcut with an app ID so Windows can display the toast. Notifications remain subject to Windows notification settings.
 
-The Upgrades header shows the last check time or failure. The latest result, last successful baseline, and schedule settings are stored under `%LOCALAPPDATA%\WinGetTuiSharp`. Disabling checks removes the scheduled task. Run the app from a published executable to enable a schedule; `dotnet run` supports **Check now** but cannot provide a stable executable path for Task Scheduler.
+The Upgrades header shows the last check time or failure. The latest result, last successful baseline, and schedule settings are stored under `%LOCALAPPDATA%\WinGetScout`. On first run, Scout copies existing local data from the previous app folder without overwriting newer files. It also migrates an existing daily check to the new executable when you run the published app. Disabling checks removes the scheduled task. Run the app from a published executable to enable a schedule; `dotnet run` supports **Check now** but cannot provide a stable executable path for Task Scheduler.
 
 ## Building
 
@@ -120,18 +118,18 @@ Windows release builds must select the Windows TFM with `-f`:
 ```powershell
 # x64 (Intel/AMD)
 dotnet publish -c Release -f net10.0-windows10.0.26100.0 -r win-x64
-.\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\winget-tui-sharp.exe
+.\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\wingetscout.exe
 
 # arm64
 dotnet publish -c Release -f net10.0-windows10.0.26100.0 -r win-arm64
-.\bin\Release\net10.0-windows10.0.26100.0\win-arm64\publish\winget-tui-sharp.exe
+.\bin\Release\net10.0-windows10.0.26100.0\win-arm64\publish\wingetscout.exe
 ```
 
 **Cross-architecture compile** (`x64 → arm64` or `arm64 → x64`) works on Windows as long
 as the matching VS C++ build tools component is installed. Building on Windows arm64
 produces an arm64 exe that runs natively (no x64 emulation).
 
-For the COM backend, keep `winget-tui-sharp.exe` together with the `WindowsPackageManager.dll` and `Microsoft.Management.Deployment.InProc.dll` that `publish` drops next to it; the exe alone still runs but degrades to the CLI backend.
+For the COM backend, keep `wingetscout.exe` together with the `WindowsPackageManager.dll` and `Microsoft.Management.Deployment.InProc.dll` that `publish` drops next to it; the exe alone still runs but degrades to the CLI backend.
 
 > **Building Native AOT on an ARM64 host:** a plain `dotnet publish` fails at the ILC native-link step (`'vswhere.exe' is not recognized`) because ILC calls a bare `vswhere.exe` that isn't on PATH. Run the publish inside a VS Dev Shell for the x64 cross-target with the VS Installer dir on PATH:
 >
@@ -158,7 +156,7 @@ has no COM package references at all, so it's a plain CLI/mock build:
 
 ```powershell
 dotnet publish -c Release -f net10.0 -r win-x64
-.\bin\Release\net10.0\win-x64\publish\winget-tui-sharp.exe
+.\bin\Release\net10.0\win-x64\publish\wingetscout.exe
 ```
 
 This is exactly the "no COM available" case the runtime backend selection already handles —
@@ -203,13 +201,13 @@ The full activation story — including the alternative of giving the app **pack
 `--theme=<amber|sage|moss|rose>` picks the starting palette (default: `sage`). An unrecognized value falls back to the default with a stderr note instead of failing to launch. Switch at any time in-app with the `t` keybinding — see [Keybindings](#keybindings).
 
 ```powershell
-winget-tui-sharp.exe --theme=amber
+wingetscout.exe --theme=amber
 ```
 
 ### Run the test suite
 
 ```bash
-dotnet test --project tests/WingetTuiSharp.Tests.csproj
+dotnet test --project tests/WinGetScout.Tests.csproj
 ```
 
 The repository uses Microsoft.Testing.Platform through `global.json`, so the test project must
@@ -252,15 +250,15 @@ The `--dump` mode invokes winget and prints the raw output plus a parser trace. 
 when real `winget` output doesn't match what the parser expects:
 
 ```powershell
-winget-tui-sharp.exe --dump search vscode
-winget-tui-sharp.exe --dump list
-winget-tui-sharp.exe --dump upgrade
-winget-tui-sharp.exe --dump show --id Microsoft.VisualStudioCode --exact
+wingetscout.exe --dump search vscode
+wingetscout.exe --dump list
+wingetscout.exe --dump upgrade
+wingetscout.exe --dump show --id Microsoft.VisualStudioCode --exact
 ```
 
 ## Keybindings
 
-Mirrors `src/handler.rs` in the upstream:
+Keyboard controls:
 
 | Key                             | Action                                                                         |
 | ------------------------------- | ------------------------------------------------------------------------------ |
@@ -358,13 +356,13 @@ mutating `AppState` and triggering a redraw.
 ## Project layout
 
 ```
-winget-tui-sharp/
+wingetscout/
 ├── Program.cs               # Entry point + winget-detection + --dump / --comdiag diagnostics
-├── WingetTuiSharp.csproj         # Multi-targets net10.0 + net10.0-windows; Terminal.Gui; ComInterop + InProcCom; AOT-configured
+├── WinGetScout.csproj         # Multi-targets net10.0 + net10.0-windows; Terminal.Gui; ComInterop + InProcCom; AOT-configured
 ├── app.manifest             # Reg-free WinRT manifest routing COM activation to the in-process server (Windows build)
 ├── README.md
 ├── LICENSE                  # MIT
-├── feature-gaps.md          # Terminal.Gui parity findings vs upstream
+├── feature-gaps.md          # Terminal.Gui rendering notes
 ├── code-signing.md          # Code-signing options + the recommended next step
 ├── src/
 │   ├── GlobalUsings.cs      # Centralized using directives
@@ -379,18 +377,18 @@ winget-tui-sharp/
 │   ├── Ui.cs                # TabBar, StatusBar, Dialogs (widgets)
 │   └── App.cs               # Main Runnable; state coordination; nested MarkedTableSource
 └── tests/
-    ├── WingetTuiSharp.Tests.csproj
+    ├── WinGetScout.Tests.csproj
     ├── ParserTests.cs       # xUnit suite covering the parser pipeline + Terminal.Gui surfaces
     └── AppBehaviorTests.cs  # Sort-field mapping, truncated-id fallback, empty-state messages
 ```
 
 ## Status & roadmap
 
-This started as a POC and is now actively used as a daily winget TUI. The WinGet **COM backend is the default on Windows and activates under Native AOT** (via the in-process server described above), so the shipped AOT build runs the structured COM path rather than parsing CLI output. Things known to be unfinished or different from upstream are listed in [feature-gaps.md](feature-gaps.md). Terminal.Gui is under active development and this application will be updated periodically to reflect improvements, fixes, and new features in that library. PRs that close parity gaps, fix bugs, or add new features are all welcome.
+This started as a POC and is now actively used as a daily winget TUI. The WinGet **COM backend is the default on Windows and activates under Native AOT** (via the in-process server described above), so the shipped AOT build runs the structured COM path rather than parsing CLI output. Known limitations are listed in [feature-gaps.md](feature-gaps.md). Terminal.Gui is under active development and this application will be updated periodically to reflect improvements, fixes, and new features in that library. PRs that close parity gaps, fix bugs, or add new features are all welcome.
 
 Not yet implemented:
 
-- Configuration file support (`%APPDATA%\winget-tui\config.toml`)
+- Configuration file support
 
 ## Contributing
 
@@ -398,6 +396,6 @@ Contributions welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Related
 
-- **Upstream**: [shanselman/winget-tui](https://github.com/shanselman/winget-tui) (Rust + Ratatui)
+
 - **Terminal.Gui v2**: [gui-cs/Terminal.Gui](https://github.com/gui-cs/Terminal.Gui)
 - **winget**: [microsoft/winget-cli](https://github.com/microsoft/winget-cli)

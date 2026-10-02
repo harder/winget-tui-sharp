@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public sealed record PackageChoice (string Id, string Name, string Source);
 public sealed record PackageSet (string Name, List<PackageChoice> Packages);
@@ -82,10 +82,35 @@ public sealed record UpdateCheckSnapshot (
 internal partial class WorkflowJsonContext : JsonSerializerContext;
 
 /// <summary>Small local state files; writes replace complete JSON documents atomically.</summary>
-public sealed class WorkflowStore (string? root = null)
+public sealed class WorkflowStore
 {
-    public string Root { get; } = root ?? Path.Combine (
-        Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetTuiSharp");
+    public string Root { get; }
+
+    public WorkflowStore (string? root = null)
+    {
+        Root = root ?? Path.Combine (
+            Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetScout");
+        if (root is null)
+        {
+            string previous = Path.Combine (
+                Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetTuiSharp");
+            MigrateLocalData (previous, Root);
+        }
+    }
+
+    internal static void MigrateLocalData (string previous, string destination)
+    {
+        if (!Directory.Exists (previous)) return;
+        Directory.CreateDirectory (destination);
+        foreach (string file in new[] { "schedule.json", "latest-check.json", "last-successful-check.json", "sets.json", "runs.json" })
+        {
+            string source = Path.Combine (previous, file);
+            string target = Path.Combine (destination, file);
+            if (File.Exists (target) || !File.Exists (source)) continue;
+            try { File.Copy (source, target); }
+            catch (IOException) when (File.Exists (target)) { }
+        }
+    }
 
     private string PathFor (string file) => Path.Combine (Root, file);
 

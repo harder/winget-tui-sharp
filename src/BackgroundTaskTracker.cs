@@ -1,6 +1,6 @@
 using System.Collections.Concurrent;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// Owns fire-and-forget application work so shutdown can stop admission, cancel the shared

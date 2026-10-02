@@ -1,7 +1,7 @@
 using Process = System.Diagnostics.Process;
 using ProcessStartInfo = System.Diagnostics.ProcessStartInfo;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// Top-level window. Hosts the compact header, search/filter input,
@@ -67,7 +67,7 @@ public sealed partial class App : Window
         _viewCts = CreateLifetimeLinkedSource ();
         _detailCts = CreateLifetimeLinkedSource ();
         SchemeName = Theme.AppSchemeName;
-        Title = "WinGet TUI — winget-tui";
+        Title = "Scout for WinGet";
 
         // Skill View shell: brand in the window border, right-aligned tabs on the first row,
         // and workspace context on the second. Search temporarily pushes the panes down one row.
@@ -238,8 +238,7 @@ public sealed partial class App : Window
 
     /// <summary>
     /// Swap a frame's scheme AND border line style based on focus. Heavy lines (┏━┓) for the
-    /// focused frame, Rounded (╭─╮) for the unfocused one — the same effect upstream gets via
-    /// Bold-honoring box drawing in the Ratatui renderer.
+    /// focused frame, Rounded (╭─╮) for the unfocused one.
     /// </summary>
     private static void ApplyFocusStyle (FrameView frame, bool hasFocus)
     {
@@ -873,7 +872,7 @@ public sealed partial class App : Window
 
             // Render a single message row explaining *why* the list is empty, instead of a bare
             // headered table. The message is contextual: "All packages are up to date!" vs. a
-            // filter/pin-specific note. Mirrors upstream winget-tui's empty-state messages (#228).
+            // filter/pin-specific note.
             _packageTable.Table = new EnumerableTableSource<string> ([EmptyStateMessage (_state)], new ()
             {
                 { " ", message => message }
@@ -1093,8 +1092,7 @@ public sealed partial class App : Window
 
     /// <summary>
     /// Contextual message shown in the list when nothing matches. Distinguishes "up to date" from
-    /// a filter/pin that's hiding rows, so the user isn't misled. Mirrors upstream winget-tui's
-    /// draw_package_list empty-state arms (#228), plus a local-filter case the port adds.
+    /// a filter/pin that's hiding rows, so the user isn't misled.
     /// </summary>
     internal static string EmptyStateMessage (AppState state)
     {
@@ -1149,8 +1147,7 @@ public sealed partial class App : Window
 
     /// <summary>
     /// Sort the list when a sortable column header is clicked: first click sorts ascending, a
-    /// click on the already-active column toggles direction. Mirrors upstream winget-tui's
-    /// click-to-sort (commit 66d464c4). Clicks on non-sortable headers are a no-op.
+    /// click on the already-active column toggles direction. Clicks on non-sortable headers are a no-op.
     /// </summary>
     private void OnHeaderClicked (int column)
     {
@@ -1433,7 +1430,7 @@ public sealed partial class App : Window
     }
 
     // ------------------------------------------------------------------------
-    // Keyboard handling — mirrors src/handler.rs from shanselman/winget-tui.
+    // Keyboard handling for list navigation and package actions.
     // ------------------------------------------------------------------------
 
     private void OnFilterKeyDown (object? sender, Key key)
@@ -1491,8 +1488,7 @@ public sealed partial class App : Window
         }
 
         // Let the user navigate the filtered list while the filter input has focus.
-        // Mirrors upstream src/handler.rs:182-212 which forwards Up/Down/PgUp/PgDn/Home/End
-        // through to move_selection without closing the input box.
+        // Forward Up/Down/PgUp/PgDn/Home/End without closing the input box.
         switch (key.KeyCode)
         {
             case KeyCode.CursorDown:
@@ -1614,8 +1610,7 @@ public sealed partial class App : Window
         }
 
         // Tab and Shift+Tab both toggle focus between the package list and the detail panel.
-        // (Upstream binds it this way; previously Shift+Tab cycled mode backward which
-        // conflicted with the Left-arrow binding.)
+        // Shift+Tab previously cycled modes backward and conflicted with Left-arrow.
         if (key.KeyCode == KeyCode.Tab || key.KeyCode == (KeyCode.Tab | KeyCode.ShiftMask))
         {
             if (_packageTable.HasFocus)
@@ -2472,7 +2467,7 @@ public sealed partial class App : Window
 
         // Unlike install/uninstall/pin, a truncated id doesn't block an upgrade: the CLI backend's
         // UpgradeAsync tries `--id` then falls back to `--name --exact`, so handing it the name
-        // resolves the row winget truncated. Mirrors upstream winget-tui (commit fd9e9dbe).
+        // resolves the row winget truncated.
         // Truncation only arises from the CLI tabular parse; the COM backend always has full ids.
         string query = UpgradeQueryFor (p);
         string prompt = p.IsTruncated
@@ -2979,7 +2974,7 @@ public sealed partial class App : Window
             return;
         }
 
-        string path = Path.Combine (Environment.CurrentDirectory, "winget-tui-export.csv");
+        string path = Path.Combine (Environment.CurrentDirectory, "wingetscout-export.csv");
         string activity = $"Exporting {snapshot.Rows.Count} rows…";
         if (!_exportWorkflow.TryBegin (
                 _background.LifetimeToken,
@@ -3149,7 +3144,7 @@ public sealed partial class App : Window
     /// <summary>
     /// A <see cref="TableView"/> that reports clicks on a column header (raising
     /// <see cref="HeaderClicked"/> with the column index) so the app can sort by that column,
-    /// matching upstream winget-tui's click-to-sort. Clicks on body rows keep the base behaviour.
+    /// supporting click-to-sort. Clicks on body rows keep the base behaviour.
     /// </summary>
     private sealed class SortableTableView : TableView
     {

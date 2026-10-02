@@ -17,7 +17,7 @@ dist/
 .vscode/
 
 # Test/diagnostic output
-winget-tui-export.csv
+*-export.csv
 chrome-dump.txt
 raw.txt
 *.ans.actual

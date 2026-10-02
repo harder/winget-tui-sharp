@@ -1,4 +1,4 @@
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class CsvExporterTests
 {
@@ -211,7 +211,7 @@ public sealed class CsvExporterTests
     {
         internal TempDirectory ()
         {
-            Path = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"winget-tui-tests-{Guid.NewGuid ():N}");
+            Path = System.IO.Path.Combine (System.IO.Path.GetTempPath (), $"wingetscout-tests-{Guid.NewGuid ():N}");
             Directory.CreateDirectory (Path);
         }
 

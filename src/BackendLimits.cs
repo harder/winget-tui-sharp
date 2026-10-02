@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// Hard memory limits applied at backend trust boundaries: 1,000 search rows; 10,000 local
