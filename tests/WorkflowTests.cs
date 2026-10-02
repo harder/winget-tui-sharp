@@ -25,6 +25,24 @@ public sealed class WorkflowTests
     }
 
     [Fact]
+    public void LocalDataMigration_ContinuesAfterOneFileCannotBeCopied ()
+    {
+        string root = Path.Combine (Path.GetTempPath (), "wingetscout-migration-" + Guid.NewGuid ().ToString ("N"));
+        string previous = Path.Combine (root, "previous");
+        string current = Path.Combine (root, "current");
+        Directory.CreateDirectory (previous);
+        Directory.CreateDirectory (Path.Combine (current, "sets.json"));
+        File.WriteAllText (Path.Combine (previous, "sets.json"), "sets");
+        File.WriteAllText (Path.Combine (previous, "runs.json"), "runs");
+        try
+        {
+            WorkflowStore.MigrateLocalData (previous, current);
+            Assert.Equal ("runs", File.ReadAllText (Path.Combine (current, "runs.json")));
+        }
+        finally { Directory.Delete (root, true); }
+    }
+
+    [Fact]
     public void NotificationRegistrationScript_IsEmbeddedForPublishedBuilds ()
     {
         using Stream? script = typeof (UpdateNotification).Assembly.GetManifestResourceStream ("WinGetScout.notification.ps1");

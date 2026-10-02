@@ -624,7 +624,7 @@ public class AppBehaviorTests
     public void UpgradeQueryFor_TruncatedId_FallsBackToName ()
     {
         // winget truncates long ids in tabular output with `…`; an --id match can't succeed, so
-        // the upgrade query must be the exact name instead..
+        // the upgrade query must be the exact name instead.
         Package p = new () { Id = "Microsoft.Azure.Function…", Name = "Azure Functions Core Tools", Source = "winget" };
 
         Assert.Equal ("Azure Functions Core Tools", App.UpgradeQueryFor (p));

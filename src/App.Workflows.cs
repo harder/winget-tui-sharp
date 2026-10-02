@@ -349,6 +349,7 @@ public sealed partial class App
             try
             {
                 string? error;
+                string? warning = null;
                 try
                 {
                     UpdateCheckSettings previous = _workflowStore.Schedule ();
@@ -364,7 +365,9 @@ public sealed partial class App
                                 string? registrationError = await UpdateNotification.RegisterAsync (token);
                                 if (registrationError is not null) return $"Notification registration failed: {registrationError}";
                             }
-                            return await UpdateTaskScheduler.RegisterAsync (path, choice.DailyAt, token);
+                            TaskChangeResult registration = await UpdateTaskScheduler.RegisterAsync (path, choice.DailyAt, token);
+                            warning = registration.Warning;
+                            return registration.Error;
                         }
                         return previous.Enabled ? await UpdateTaskScheduler.UnregisterAsync (token) : null;
                     }, ct);
@@ -375,9 +378,10 @@ public sealed partial class App
                 {
                     if (error is null)
                     {
-                        SetStatus (choice.Action == "Save"
+                        SetStatus ((choice.Action == "Save"
                             ? $"Daily update checks scheduled for {choice.DailyAt}."
-                            : "Daily update checks disabled.");
+                            : "Daily update checks disabled.") + (warning is null ? string.Empty : $" {warning}"),
+                            isError: warning is not null);
                     }
                     else SetStatus ($"Schedule error: {error}", isError: true);
                     RefreshStatusBar ();

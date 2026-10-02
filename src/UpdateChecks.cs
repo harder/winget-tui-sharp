@@ -67,6 +67,8 @@ public static class UpdateChecks
     private static string Key (string id, string source, string version) => $"{source}\u001f{id}\u001f{version}";
 }
 
+public sealed record TaskChangeResult (string? Error, string? Warning);
+
 public static class UpdateTaskScheduler
 {
     public const string TaskName = "WinGet Scout Daily Update Check";
@@ -81,30 +83,38 @@ public static class UpdateTaskScheduler
         return name.Equals ("dotnet", StringComparison.OrdinalIgnoreCase) ? null : path;
     }
 
-    public static async Task<string?> RegisterAsync (string executablePath, string time, CancellationToken ct)
+    public static async Task<TaskChangeResult> RegisterAsync (string executablePath, string time, CancellationToken ct)
     {
-        if (!OperatingSystem.IsWindows ()) return "Windows Task Scheduler is required.";
-        if (!UpdateChecks.TryParseDailyTime (time, out _)) return "Enter a time in 24-hour HH:mm format.";
-        if (!File.Exists (executablePath)) return "The executable is missing. Publish the app before scheduling checks.";
+        if (!OperatingSystem.IsWindows ()) return new ("Windows Task Scheduler is required.", null);
+        if (!UpdateChecks.TryParseDailyTime (time, out _)) return new ("Enter a time in 24-hour HH:mm format.", null);
+        if (!File.Exists (executablePath)) return new ("The executable is missing. Publish the app before scheduling checks.", null);
 
         string taskRun = $"\"{executablePath}\" --check-updates";
         string? error = await RunAsync (["/Create", "/F", "/SC", "DAILY", "/ST", time, "/TN", TaskName,
             "/TR", taskRun, "/IT", "/RL", "LIMITED"], ct);
-        return error ?? await DeleteIfPresentAsync (PreviousTaskName, ct);
+        if (error is not null) return new (error, null);
+        string? cleanupError = await DeleteIfPresentAsync (PreviousTaskName, ct);
+        return new (null, cleanupError is null ? null : $"Previous scheduled check could not be removed: {cleanupError}");
     }
 
     public static async Task<string?> UnregisterAsync (CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows ()) return "Windows Task Scheduler is required.";
-        string? error = await DeleteIfPresentAsync (TaskName, ct);
-        return error ?? await DeleteIfPresentAsync (PreviousTaskName, ct);
+        string? error = await DeleteIfPresentAsync (PreviousTaskName, ct);
+        return error ?? await DeleteIfPresentAsync (TaskName, ct);
     }
 
-    public static async Task<string?> MigrateAsync (string executablePath, string time, CancellationToken ct)
+    public static async Task<TaskChangeResult> MigrateAsync (
+        string executablePath, string time, bool notifyOnChange, CancellationToken ct)
     {
-        if (!OperatingSystem.IsWindows ()) return null;
-        if (await RunAsync (["/Query", "/TN", PreviousTaskName], ct) is not null) return null;
-        return await RegisterAsync (executablePath, time, ct);
+        if (!OperatingSystem.IsWindows ()) return new (null, null);
+        if (await RunAsync (["/Query", "/TN", PreviousTaskName], ct) is not null) return new (null, null);
+        TaskChangeResult result = await RegisterAsync (executablePath, time, ct);
+        if (result.Error is not null || !notifyOnChange) return result;
+        string? notificationError = await UpdateNotification.RegisterAsync (ct);
+        if (notificationError is null) return result;
+        string warning = $"Notification shortcut could not be updated: {notificationError}";
+        return result with { Warning = result.Warning is null ? warning : $"{result.Warning} {warning}" };
     }
 
     private static async Task<string?> DeleteIfPresentAsync (string name, CancellationToken ct)

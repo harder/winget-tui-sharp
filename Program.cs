@@ -195,9 +195,10 @@ if (!smokeMode && UpdateTaskScheduler.ExecutablePath () is { } publishedPath)
         UpdateCheckSettings schedule = new WorkflowStore ().Schedule ();
         if (schedule.Enabled)
         {
-            string? migrationError = await UpdateTaskScheduler.MigrateAsync (
-                publishedPath, schedule.DailyAt, CancellationToken.None);
-            if (migrationError is not null) Console.Error.WriteLine ($"Scheduled check migration failed: {migrationError}");
+            TaskChangeResult migration = await UpdateTaskScheduler.MigrateAsync (
+                publishedPath, schedule.DailyAt, schedule.NotifyOnChange, CancellationToken.None);
+            if (migration.Error is not null) Console.Error.WriteLine ($"Scheduled check migration failed: {migration.Error}");
+            if (migration.Warning is not null) Console.Error.WriteLine ($"Scheduled check migration warning: {migration.Warning}");
         }
     }
     catch (Exception ex) { Console.Error.WriteLine ($"Scheduled check migration failed: {ex.Message}"); }

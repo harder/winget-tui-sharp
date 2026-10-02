@@ -101,14 +101,15 @@ public sealed class WorkflowStore
     internal static void MigrateLocalData (string previous, string destination)
     {
         if (!Directory.Exists (previous)) return;
-        Directory.CreateDirectory (destination);
+        try { Directory.CreateDirectory (destination); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return; }
         foreach (string file in new[] { "schedule.json", "latest-check.json", "last-successful-check.json", "sets.json", "runs.json" })
         {
             string source = Path.Combine (previous, file);
             string target = Path.Combine (destination, file);
             if (File.Exists (target) || !File.Exists (source)) continue;
             try { File.Copy (source, target); }
-            catch (IOException) when (File.Exists (target)) { }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
         }
     }
 
