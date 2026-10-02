@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text;
 
 namespace WingetTuiSharp;
 
@@ -10,6 +11,45 @@ public sealed record PackageSetFile (List<PackageSet> Sets);
 public sealed record RunItem (string Id, string Name, string Source, string Status, string Reason);
 public sealed record RunRecord (DateTimeOffset StartedAtUtc, DateTimeOffset FinishedAtUtc, string Action, List<RunItem> Items)
 {
+    public static RunRecord SinglePackage (
+        Package package, OperationKind kind, DateTimeOffset startedAtUtc, DateTimeOffset finishedAtUtc,
+        OpResult? result, bool cancelled)
+    {
+        if (!cancelled && result is null) throw new ArgumentNullException (nameof (result));
+        RunItem item = new (package.Id, package.Name, package.Source,
+            cancelled ? "Skipped" : result!.Success ? "Succeeded" : "Failed",
+            cancelled ? "Cancelled." : CompactReason (result!.Message));
+        return new (startedAtUtc, finishedAtUtc, kind.ToString (), [item]);
+    }
+
+    public static string CompactReason (string? message)
+    {
+        if (string.IsNullOrWhiteSpace (message)) return "Completed.";
+        StringBuilder compact = new ();
+        bool pendingSpace = false;
+        for (int i = 0; i < message.Length; i++)
+        {
+            char ch = message [i];
+            if (ch == '\u001b' && i + 1 < message.Length && message [i + 1] == '[')
+            {
+                i += 2;
+                while (i < message.Length && message [i] is < '@' or > '~') i++;
+                continue;
+            }
+            if (char.IsWhiteSpace (ch))
+            {
+                pendingSpace = compact.Length > 0;
+                continue;
+            }
+            if (char.IsControl (ch)) continue;
+            if (pendingSpace) compact.Append (' ');
+            pendingSpace = false;
+            compact.Append (ch);
+            if (compact.Length >= 320) break;
+        }
+        return compact.Length == 0 ? "Completed." : StatusOwnership.TruncateScalarSafe (compact.ToString (), 300);
+    }
+
     public int Succeeded => Items.Count (x => x.Status == "Succeeded");
     public int Skipped => Items.Count (x => x.Status == "Skipped");
     public int Failed => Items.Count (x => x.Status == "Failed");
@@ -49,13 +89,21 @@ public sealed class WorkflowStore (string? root = null)
 
     private string PathFor (string file) => Path.Combine (Root, file);
 
-    public UpdateCheckSettings Schedule () => Read (PathFor ("schedule.json"), WorkflowJsonContext.Default.UpdateCheckSettings)
-        ?? new (false, "09:00", true);
+    public UpdateCheckSettings Schedule ()
+    {
+        UpdateCheckSettings? settings = ReadStrict (PathFor ("schedule.json"), WorkflowJsonContext.Default.UpdateCheckSettings);
+        if (settings is null) return new (false, "09:00", true);
+        if (settings.DailyAt is null || !UpdateChecks.TryParseDailyTime (settings.DailyAt, out _))
+        {
+            throw new InvalidDataException ("Schedule settings are invalid.");
+        }
+        return settings;
+    }
 
     public void SaveSchedule (UpdateCheckSettings value) => Write (PathFor ("schedule.json"), value, WorkflowJsonContext.Default.UpdateCheckSettings);
 
     public UpdateCheckSnapshot? LatestCheck () => Read (PathFor ("latest-check.json"), WorkflowJsonContext.Default.UpdateCheckSnapshot);
-    public UpdateCheckSnapshot? LastSuccessfulCheck () => Read (PathFor ("last-successful-check.json"), WorkflowJsonContext.Default.UpdateCheckSnapshot);
+    public UpdateCheckSnapshot? LastSuccessfulCheck () => ReadStrict (PathFor ("last-successful-check.json"), WorkflowJsonContext.Default.UpdateCheckSnapshot);
 
     public void SaveCheck (UpdateCheckSnapshot value)
     {
@@ -66,7 +114,20 @@ public sealed class WorkflowStore (string? root = null)
         }
     }
 
-    public IReadOnlyList<PackageSet> Sets () => Read (PathFor ("sets.json"), WorkflowJsonContext.Default.PackageSetFile)?.Sets ?? [];
+    public IReadOnlyList<PackageSet> Sets ()
+    {
+        PackageSetFile? file = ReadStrict (PathFor ("sets.json"), WorkflowJsonContext.Default.PackageSetFile);
+        if (file is null) return [];
+        if (file.Sets is null || file.Sets.Any (set => set is null
+            || string.IsNullOrWhiteSpace (set.Name)
+            || set.Packages is null
+            || set.Packages.Any (item => item is null || string.IsNullOrWhiteSpace (item.Id)
+                || item.Name is null || item.Source is null)))
+        {
+            throw new InvalidDataException ("Saved sets are invalid.");
+        }
+        return file.Sets;
+    }
 
     public void SaveSet (PackageSet value)
     {
@@ -86,7 +147,20 @@ public sealed class WorkflowStore (string? root = null)
         new PackageSetFile ([.. Sets ().Where (x => !x.Name.Equals (name, StringComparison.OrdinalIgnoreCase))]),
         WorkflowJsonContext.Default.PackageSetFile);
 
-    public IReadOnlyList<RunRecord> Runs () => Read (PathFor ("runs.json"), WorkflowJsonContext.Default.RunHistory)?.Runs ?? [];
+    public IReadOnlyList<RunRecord> Runs ()
+    {
+        RunHistory? file = ReadStrict (PathFor ("runs.json"), WorkflowJsonContext.Default.RunHistory);
+        if (file is null) return [];
+        if (file.Runs is null || file.Runs.Any (run => run is null
+            || string.IsNullOrWhiteSpace (run.Action)
+            || run.Items is null
+            || run.Items.Any (item => item is null || item.Id is null || item.Name is null
+                || item.Source is null || item.Status is null || item.Reason is null)))
+        {
+            throw new InvalidDataException ("Run history is invalid.");
+        }
+        return file.Runs;
+    }
 
     public void SaveRun (RunRecord value)
     {
@@ -104,6 +178,13 @@ public sealed class WorkflowStore (string? root = null)
         {
             return default;
         }
+    }
+
+    private static T? ReadStrict<T> (string path, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> type)
+    {
+        if (!File.Exists (path)) return default;
+        T? value = JsonSerializer.Deserialize (File.ReadAllText (path), type);
+        return value ?? throw new InvalidDataException ($"Could not read {Path.GetFileName (path)}.");
     }
 
     private static void Write<T> (string path, T value, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> type)

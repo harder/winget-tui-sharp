@@ -666,7 +666,8 @@ public sealed class ComBackend : IBackend, IInstalledVersionLookup
         string? source)
     {
         Operation op = new () { Kind = OperationKind.Install, PackageId = id, Version = version };
-        CatalogPackage? pkg = await FindByIdAsync (pm, id, source, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id,
+            string.IsNullOrWhiteSpace (source) ? null : source, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -722,7 +723,8 @@ public sealed class ComBackend : IBackend, IInstalledVersionLookup
 
         // Installed context so the package carries both its installed version and the
         // correlated remote available versions that the upgrade resolves against.
-        CatalogPackage? pkg = await FindByIdAsync (pm, id, source, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id,
+            string.IsNullOrWhiteSpace (source) ? null : source, installedContext: true, ct);
 
         if (pkg is null)
         {

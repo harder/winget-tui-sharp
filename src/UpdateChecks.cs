@@ -94,19 +94,15 @@ public static class UpdateTaskScheduler
     public static async Task<string?> UnregisterAsync (CancellationToken ct)
     {
         if (!OperatingSystem.IsWindows ()) return "Windows Task Scheduler is required.";
-        if (!await ExistsAsync (ct)) return null;
         return await RunAsync (["/Delete", "/F", "/TN", TaskName], ct);
-    }
-
-    public static async Task<bool> ExistsAsync (CancellationToken ct)
-    {
-        if (!OperatingSystem.IsWindows ()) return false;
-        return await RunAsync (["/Query", "/TN", TaskName], ct) is null;
     }
 
     private static async Task<string?> RunAsync (IReadOnlyList<string> arguments, CancellationToken ct)
     {
         using Process process = new ();
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource (ct);
+        timeout.CancelAfter (TimeSpan.FromSeconds (30));
+        CancellationToken token = timeout.Token;
         process.StartInfo = new ProcessStartInfo ("schtasks.exe")
         {
             UseShellExecute = false,
@@ -116,11 +112,40 @@ public static class UpdateTaskScheduler
         };
         foreach (string argument in arguments) process.StartInfo.ArgumentList.Add (argument);
         process.Start ();
-        Task<string> output = process.StandardOutput.ReadToEndAsync (ct);
-        Task<string> error = process.StandardError.ReadToEndAsync (ct);
-        await process.WaitForExitAsync (ct);
+        Task<string> output = process.StandardOutput.ReadToEndAsync (token);
+        Task<string> error = process.StandardError.ReadToEndAsync (token);
+        try { await process.WaitForExitAsync (token); }
+        catch (OperationCanceledException)
+        {
+            try { if (!process.HasExited) process.Kill (entireProcessTree: true); }
+            catch (Exception) { }
+            return ct.IsCancellationRequested ? throw new OperationCanceledException (ct) : "Task Scheduler timed out.";
+        }
         string message = ((await error) + " " + (await output)).Trim ();
         return process.ExitCode == 0 ? null : (message.Length == 0 ? $"Task Scheduler exited with code {process.ExitCode}." : message);
+    }
+}
+
+public static class ScheduleWorkflow
+{
+    public static async Task<string?> ApplyAsync (
+        WorkflowStore store, UpdateCheckSettings desired,
+        Func<CancellationToken, Task<string?>> changeTask, CancellationToken ct)
+    {
+        UpdateCheckSettings previous = store.Schedule ();
+        store.SaveSchedule (desired);
+        string? error;
+        try { error = await changeTask (ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            store.SaveSchedule (previous);
+            throw;
+        }
+        catch (Exception ex) { error = ex.Message; }
+        if (error is null) return null;
+        try { store.SaveSchedule (previous); }
+        catch (Exception ex) { error += $" Settings could not be restored: {ex.Message}"; }
+        return error;
     }
 }
 
@@ -156,7 +181,15 @@ public static class UpdateNotification
                 CreateNoWindow = true,
                 ArgumentList = { "-NoProfile", "-NonInteractive", "-EncodedCommand", encodedScript }
             })!;
-            await process.WaitForExitAsync (ct);
+            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource (ct);
+            timeout.CancelAfter (TimeSpan.FromSeconds (15));
+            try { await process.WaitForExitAsync (timeout.Token); }
+            catch (OperationCanceledException)
+            {
+                try { if (!process.HasExited) process.Kill (entireProcessTree: true); }
+                catch (Exception) { }
+                if (ct.IsCancellationRequested) throw;
+            }
         }
         catch (Exception) when (!ct.IsCancellationRequested)
         {

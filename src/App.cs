@@ -2015,6 +2015,8 @@ public sealed partial class App : Window
                         string activity = version is null ? $"Installing {p.Name}" : $"Installing {p.Name} {version}";
                         RunOperation (
                             reservation,
+                            p,
+                            OperationKind.Install,
                             activity,
                             (prog, ct) => _state.Backend.InstallAsync (p.Id, version, settings, prog, ct, p.Source));
 
@@ -2069,6 +2071,8 @@ public sealed partial class App : Window
 
                 RunOperation (
                     reservation,
+                    p,
+                    OperationKind.Download,
                     $"Downloading {p.Name}",
                     (prog, ct) => _state.Backend.DownloadAsync (p.Id, null, prog, ct));
 
@@ -2230,6 +2234,8 @@ public sealed partial class App : Window
 
         RunOperation (
             reservation,
+            p,
+            OperationKind.Repair,
             $"Repairing {p.Name}",
             (prog, ct) => _state.Backend.RepairAsync (p.Id, prog, ct));
     }
@@ -2484,6 +2490,8 @@ public sealed partial class App : Window
 
                 RunOperation (
                     reservation,
+                    p,
+                    OperationKind.Upgrade,
                     $"Upgrading {p.Name}",
                     (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct, p.Source));
 
@@ -2516,6 +2524,8 @@ public sealed partial class App : Window
 
                 RunOperation (
                     reservation,
+                    p,
+                    OperationKind.Uninstall,
                     $"Uninstalling {p.Name}",
                     (prog, ct) => _state.Backend.UninstallAsync (p.Id, prog, ct));
 
@@ -2554,6 +2564,8 @@ public sealed partial class App : Window
 
                 RunOperation (
                     reservation,
+                    p,
+                    pinned ? OperationKind.Unpin : OperationKind.Pin,
                     $"{label}ning {p.Name}",
                     (_, ct) => pinned
                                    ? _state.Backend.UnpinAsync (p.Id, ct)
@@ -2634,6 +2646,8 @@ public sealed partial class App : Window
 
     private void RunOperation (
         OperationReservation reservation,
+        Package package,
+        OperationKind kind,
         string activity,
         Func<IProgress<OpProgress>, CancellationToken, Task<OpResult>> op)
     {
@@ -2689,7 +2703,7 @@ public sealed partial class App : Window
                                                  {
                                                      result = new ()
                                                      {
-                                                         Operation = new () { Kind = OperationKind.Install },
+                                                         Operation = new () { Kind = kind, PackageId = package.Id },
                                                          Success = false,
                                                          Message = ex.Message
                                                      };
@@ -2718,20 +2732,14 @@ public sealed partial class App : Window
                                                                                   RefreshTable ();
                                                                               }
 
-                                                                              if (result.Operation.PackageId is { } id)
-                                                                              {
-                                                                                  _state.InvalidateCachedDetail (id);
-                                                                              }
+                                                                              _state.InvalidateCachedDetail (package.Id);
                                                                           }
 
                                                                           try
                                                                           {
-                                                                              string packageId = result?.Operation.PackageId ?? string.Empty;
-                                                                              RunItem item = new (packageId, activity, string.Empty,
-                                                                                  cancelled ? "Skipped" : result!.Success ? "Succeeded" : "Failed",
-                                                                                  cancelled ? "Cancelled." : LimitReason (result!.Message));
-                                                                              _workflowStore.SaveRun (new (startedAt, DateTimeOffset.UtcNow,
-                                                                                  result?.Operation.Kind.ToString () ?? activity, [item]));
+                                                                              RunRecord record = RunRecord.SinglePackage (
+                                                                                  package, kind, startedAt, DateTimeOffset.UtcNow, result, cancelled);
+                                                                              _workflowStore.SaveRun (record);
                                                                           }
                                                                           catch (Exception ex)
                                                                           {

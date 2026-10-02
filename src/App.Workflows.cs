@@ -5,6 +5,8 @@ public sealed partial class App
     private readonly WorkflowStore _workflowStore = new ();
     private readonly Dictionary<string, Package> _searchSelected = new (StringComparer.OrdinalIgnoreCase);
     private UpdateCheckSnapshot? _lastCheck;
+    private int _scheduleChangeActive;
+    private int _updateCheckActive;
 
     private string CheckContextLabel ()
     {
@@ -57,7 +59,14 @@ public sealed partial class App
     private void ManagePackageSets ()
     {
         if (App is null) return;
-        IReadOnlyList<PackageSet> sets = _workflowStore.Sets ();
+        IReadOnlyList<PackageSet> sets;
+        try { sets = _workflowStore.Sets (); }
+        catch (Exception ex)
+        {
+            SetStatus ($"Could not load saved sets: {ex.Message}", isError: true);
+            RefreshStatusBar ();
+            return;
+        }
         using SetManagerDialog manager = new (sets, _searchSelected.Count);
         App.Run (manager);
         SetManagerChoice? choice = manager.Result;
@@ -278,13 +287,19 @@ public sealed partial class App
         }
     }
 
-    private static string LimitReason (string? reason) =>
-        StatusOwnership.TruncateScalarSafe (string.IsNullOrWhiteSpace (reason) ? "Completed." : reason.Trim (), 300);
+    private static string LimitReason (string? reason) => RunRecord.CompactReason (reason);
 
     private void ShowRunHistory ()
     {
         if (App is null) return;
-        IReadOnlyList<RunRecord> runs = _workflowStore.Runs ();
+        IReadOnlyList<RunRecord> runs;
+        try { runs = _workflowStore.Runs (); }
+        catch (Exception ex)
+        {
+            SetStatus ($"Could not load run history: {ex.Message}", isError: true);
+            RefreshStatusBar ();
+            return;
+        }
         if (runs.Count == 0)
         {
             SetStatus ("No operations have been recorded yet.");
@@ -302,7 +317,15 @@ public sealed partial class App
     private void ManageScheduledChecks ()
     {
         if (App is null) return;
-        using ScheduleDialog dialog = new (_workflowStore.Schedule (), _workflowStore.LatestCheck ());
+        UpdateCheckSettings settings;
+        try { settings = _workflowStore.Schedule (); }
+        catch (Exception ex)
+        {
+            SetStatus ($"Could not load schedule settings: {ex.Message}", isError: true);
+            RefreshStatusBar ();
+            return;
+        }
+        using ScheduleDialog dialog = new (settings, _workflowStore.LatestCheck ());
         App.Run (dialog);
         ScheduleChoice? choice = dialog.Result;
         if (choice is null) return;
@@ -311,60 +334,101 @@ public sealed partial class App
             CheckNow ();
             return;
         }
+        if (Interlocked.CompareExchange (ref _scheduleChangeActive, 1, 0) != 0)
+        {
+            SetStatus ("A schedule change is already in progress.");
+            RefreshStatusBar ();
+            return;
+        }
         SetStatus (choice.Action == "Save" ? "Registering daily check…" : "Removing daily check…");
         RefreshStatusBar ();
         bool admitted = _background.TryRun (async ct =>
         {
-            string? error;
-            if (choice.Action == "Save")
+            try
             {
-                string? path = UpdateTaskScheduler.ExecutablePath ();
-                error = path is null
-                    ? "Run a published executable to enable scheduled checks."
-                    : await UpdateTaskScheduler.RegisterAsync (path, choice.DailyAt, ct);
-            }
-            else
-            {
-                error = await UpdateTaskScheduler.UnregisterAsync (ct);
-            }
-            await DispatchAsync (() =>
-            {
-                if (error is null)
+                string? error;
+                try
                 {
-                    try
+                    UpdateCheckSettings previous = _workflowStore.Schedule ();
+                    UpdateCheckSettings desired = new (choice.Action == "Save", choice.DailyAt, choice.NotifyOnChange);
+                    error = await ScheduleWorkflow.ApplyAsync (_workflowStore, desired, async token =>
                     {
-                        _workflowStore.SaveSchedule (new (choice.Action == "Save", choice.DailyAt, choice.NotifyOnChange));
+                        if (choice.Action == "Save")
+                        {
+                            string? path = UpdateTaskScheduler.ExecutablePath ();
+                            return path is null
+                                ? "Run a published executable to enable scheduled checks."
+                                : await UpdateTaskScheduler.RegisterAsync (path, choice.DailyAt, token);
+                        }
+                        return previous.Enabled ? await UpdateTaskScheduler.UnregisterAsync (token) : null;
+                    }, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+                catch (Exception ex) { error = ex.Message; }
+                await DispatchAsync (() =>
+                {
+                    if (error is null)
+                    {
                         SetStatus (choice.Action == "Save"
                             ? $"Daily update checks scheduled for {choice.DailyAt}."
                             : "Daily update checks disabled.");
                     }
-                    catch (Exception ex) { SetStatus ($"Could not save schedule settings: {ex.Message}", isError: true); }
-                }
-                else SetStatus ($"Schedule error: {error}", isError: true);
-                RefreshStatusBar ();
-            }, ct);
+                    else SetStatus ($"Schedule error: {error}", isError: true);
+                    RefreshStatusBar ();
+                }, ct);
+            }
+            finally { Interlocked.Exchange (ref _scheduleChangeActive, 0); }
         });
-        if (!admitted) ReportRejectedBackgroundAdmission ();
+        if (!admitted)
+        {
+            Interlocked.Exchange (ref _scheduleChangeActive, 0);
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 
     private void CheckNow ()
     {
+        if (Interlocked.CompareExchange (ref _updateCheckActive, 1, 0) != 0)
+        {
+            SetStatus ("An update check is already in progress.");
+            RefreshStatusBar ();
+            return;
+        }
         SetStatus ("Checking for upgrades…");
         RefreshStatusBar ();
         bool admitted = _background.TryRun (async ct =>
         {
-            UpdateCheckSnapshot snapshot = await UpdateChecks.CheckAsync (_state.Backend, _workflowStore, ct);
-            await DispatchAsync (() =>
+            try
             {
-                _lastCheck = snapshot;
-                SyncTabBar ();
-                SetStatus (snapshot.Status == "Succeeded"
-                    ? $"Check complete: {snapshot.Actionable} available · {snapshot.Pinned} pinned · {snapshot.NewOrChanged} new or changed."
-                    : $"Update check failed: {snapshot.Error}", snapshot.Status != "Succeeded");
-                RefreshStatusBar ();
-                if (snapshot.Status == "Succeeded" && _state.Mode == AppMode.Upgrades) TriggerRefresh (_state.StatusMessage);
-            }, ct);
+                UpdateCheckSnapshot snapshot;
+                try { snapshot = await UpdateChecks.CheckAsync (_state.Backend, _workflowStore, ct); }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { return; }
+                catch (Exception ex)
+                {
+                    await DispatchAsync (() =>
+                    {
+                        SetStatus ($"Update check could not be saved: {ex.Message}", isError: true);
+                        RefreshStatusBar ();
+                    }, ct);
+                    return;
+                }
+                await DispatchAsync (() =>
+                {
+                    _lastCheck = snapshot;
+                    SyncTabBar ();
+                    SetStatus (snapshot.Status == "Succeeded"
+                        ? $"Check complete: {snapshot.Actionable} available · {snapshot.Pinned} pinned · {snapshot.NewOrChanged} new or changed."
+                        : $"Update check failed: {snapshot.Error}", snapshot.Status != "Succeeded");
+                    RefreshStatusBar ();
+                    if (snapshot.Status == "Succeeded" && _state.Mode == AppMode.Upgrades) TriggerRefresh (_state.StatusMessage);
+                }, ct);
+            }
+            finally { Interlocked.Exchange (ref _updateCheckActive, 0); }
         });
-        if (!admitted) ReportRejectedBackgroundAdmission ();
+        if (!admitted)
+        {
+            Interlocked.Exchange (ref _updateCheckActive, 0);
+            ReportRejectedBackgroundAdmission ();
+        }
     }
 }

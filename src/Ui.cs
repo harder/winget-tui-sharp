@@ -187,7 +187,7 @@ public sealed class StatusBar : View
     private static readonly string [] _searchInputHints = ["Esc Close", "Enter Search", "Ctrl+U Clear", "←→ Tabs"];
     private static readonly string [] _filterInputHints = ["Esc Clear", "Enter Done", "Ctrl+U Clear", "Bksp Del", "←→ Tabs"];
     private static readonly string [] _versionInputHints = ["Esc Cancel", "Enter Confirm", "Ctrl+U Clear"];
-    private static readonly string [] _searchHints = ["/ Search", "f Source", "r Refresh", "Spc Select", "g Sets", "B Install sel", "←→ Tabs", "? Help", "q Quit"];
+    private static readonly string [] _searchHints = ["/ Search", "f Source", "r Refresh", "Spc Select", "g Sets", "B Install sel", "L Runs", "←→ Tabs", "? Help", "q Quit"];
     private static readonly string [] _installedHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "L Runs", "←→ Tabs", "? Help", "q Quit"];
     private static readonly string [] _upgradeHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "Spc Select", "U Upgrade sel", "C Checks", "L Runs", "←→ Tabs", "? Help", "q Quit"];
 

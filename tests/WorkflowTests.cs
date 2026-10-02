@@ -2,6 +2,74 @@ namespace WingetTuiSharp.Tests;
 
 public sealed class WorkflowTests
 {
+    [Theory]
+    [InlineData (OperationKind.Install)]
+    [InlineData (OperationKind.Download)]
+    [InlineData (OperationKind.Repair)]
+    [InlineData (OperationKind.Upgrade)]
+    [InlineData (OperationKind.Uninstall)]
+    [InlineData (OperationKind.Pin)]
+    [InlineData (OperationKind.Unpin)]
+    public void SinglePackageRun_PreservesIdentityAndShortAction (OperationKind kind)
+    {
+        Package package = new () { Id = "Mozilla.Firefox", Name = "Firefox", Source = "winget" };
+        OpResult result = new ()
+        {
+            Operation = new () { Kind = kind, PackageId = package.Id },
+            Success = true,
+            Message = "Done."
+        };
+        RunRecord run = RunRecord.SinglePackage (package, kind, DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow, result, cancelled: false);
+
+        Assert.Equal (kind.ToString (), run.Action);
+        RunItem item = Assert.Single (run.Items);
+        Assert.Equal ("Mozilla.Firefox", item.Id);
+        Assert.Equal ("Firefox", item.Name);
+        Assert.Equal ("winget", item.Source);
+        Assert.Equal ("Succeeded", item.Status);
+    }
+
+    [Fact]
+    public void SinglePackageRun_CancellationAndFailureKeepSelectedIdentity ()
+    {
+        Package package = new () { Id = "Mozilla.Firefox", Name = "Firefox", Source = "winget" };
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        RunRecord cancelled = RunRecord.SinglePackage (package, OperationKind.Install, now, now,
+            result: null, cancelled: true);
+        Assert.Equal ("Install", cancelled.Action);
+        Assert.Equal ("Mozilla.Firefox", Assert.Single (cancelled.Items).Id);
+        Assert.Equal ("Firefox", cancelled.Items [0].Name);
+        Assert.Equal ("winget", cancelled.Items [0].Source);
+        Assert.Equal ("Skipped", cancelled.Items [0].Status);
+
+        OpResult failure = new ()
+        {
+            Operation = new () { Kind = OperationKind.Install },
+            Success = false,
+            Message = "Access denied"
+        };
+        RunRecord failed = RunRecord.SinglePackage (package, OperationKind.Repair, now, now,
+            failure, cancelled: false);
+        Assert.Equal ("Repair", failed.Action);
+        Assert.Equal ("Mozilla.Firefox", Assert.Single (failed.Items).Id);
+        Assert.Equal ("Failed", failed.Items [0].Status);
+    }
+
+    [Fact]
+    public void RunReason_StaysOnOneLineWithoutTerminalControlCodes ()
+    {
+        string compact = RunRecord.CompactReason ("Starting\r\n\u001b[31mAccess denied\u001b[0m\tTry again.");
+        Assert.Equal ("Starting Access denied Try again.", compact);
+    }
+
+    [Fact]
+    public void PinCommandFailure_CannotBecomeAnEmptyPinSnapshot ()
+    {
+        ProcessRunner.RunResult failed = new (1, "No pins", false, false, false);
+        Assert.Throws<InvalidOperationException> (() => CliBackend.ParsePinCommandResult (failed));
+    }
+
     [Fact]
     public void InstallPlan_SkipsInstalledUnavailableAndUnresolvedPackages ()
     {
@@ -120,6 +188,67 @@ public sealed class WorkflowTests
     }
 
     [Fact]
+    public void Store_DoesNotOverwriteUnreadableSetsOrRunHistory ()
+    {
+        string root = Path.Combine (Path.GetTempPath (), "winget-tui-corrupt-test-" + Guid.NewGuid ().ToString ("N"));
+        Directory.CreateDirectory (root);
+        try
+        {
+            WorkflowStore store = new (root);
+            string sets = Path.Combine (root, "sets.json");
+            string runs = Path.Combine (root, "runs.json");
+            File.WriteAllText (sets, "{broken");
+            File.WriteAllText (runs, "{broken");
+
+            Assert.Throws<System.Text.Json.JsonException> (() => store.SaveSet (new ("Tools", [new ("A.Tool", "Tool", "winget")])));
+            Assert.Throws<System.Text.Json.JsonException> (() => store.SaveRun (new (DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+                "Install", [new ("A.Tool", "Tool", "winget", "Succeeded", "Done")])));
+            Assert.Equal ("{broken", File.ReadAllText (sets));
+            Assert.Equal ("{broken", File.ReadAllText (runs));
+        }
+        finally { Directory.Delete (root, true); }
+    }
+
+    [Fact]
+    public async Task ScheduleWorkflow_RestoresPreviousSettingsWhenTaskChangeFails ()
+    {
+        string root = Path.Combine (Path.GetTempPath (), "winget-tui-schedule-test-" + Guid.NewGuid ().ToString ("N"));
+        try
+        {
+            WorkflowStore store = new (root);
+            UpdateCheckSettings previous = new (false, "09:00", false);
+            store.SaveSchedule (previous);
+            UpdateCheckSettings desired = new (true, "14:30", true);
+            string? error = await ScheduleWorkflow.ApplyAsync (store, desired,
+                _ => Task.FromResult<string?> ("Task registration failed"), CancellationToken.None);
+            Assert.Equal ("Task registration failed", error);
+            Assert.Equal (previous, store.Schedule ());
+
+            error = await ScheduleWorkflow.ApplyAsync (store, desired,
+                _ => Task.FromResult<string?> (null), CancellationToken.None);
+            Assert.Null (error);
+            Assert.Equal (desired, store.Schedule ());
+        }
+        finally { if (Directory.Exists (root)) Directory.Delete (root, true); }
+    }
+
+    [Fact]
+    public void ScheduleWorkflow_DoesNotTreatDamagedSettingsAsDisabled ()
+    {
+        string root = Path.Combine (Path.GetTempPath (), "winget-tui-schedule-corrupt-" + Guid.NewGuid ().ToString ("N"));
+        Directory.CreateDirectory (root);
+        try
+        {
+            string path = Path.Combine (root, "schedule.json");
+            File.WriteAllText (path, "{broken");
+            WorkflowStore store = new (root);
+            Assert.Throws<System.Text.Json.JsonException> (() => store.Schedule ());
+            Assert.Equal ("{broken", File.ReadAllText (path));
+        }
+        finally { Directory.Delete (root, true); }
+    }
+
+    [Fact]
     public async Task UpdateChecks_UseBaselineThenReportNewVersion ()
     {
         string root = Path.Combine (Path.GetTempPath (), "winget-tui-check-test-" + Guid.NewGuid ().ToString ("N"));
@@ -148,12 +277,33 @@ public sealed class WorkflowTests
     }
 
     [Fact]
+    public async Task UpdateChecks_DoNotReplaceUnreadableBaseline ()
+    {
+        string root = Path.Combine (Path.GetTempPath (), "winget-tui-baseline-test-" + Guid.NewGuid ().ToString ("N"));
+        Directory.CreateDirectory (root);
+        try
+        {
+            string baseline = Path.Combine (root, "last-successful-check.json");
+            File.WriteAllText (baseline, "{broken");
+            WorkflowStore store = new (root);
+            UpdateCheckSnapshot check = await UpdateChecks.CheckAsync (new MockBackend (), store, CancellationToken.None);
+
+            Assert.Equal ("Failed", check.Status);
+            Assert.Equal ("{broken", File.ReadAllText (baseline));
+            Assert.Equal ("Failed", store.LatestCheck ()?.Status);
+        }
+        finally { Directory.Delete (root, true); }
+    }
+
+    [Fact]
     public void ScheduledTime_AndSourceScopedUpgradeArguments ()
     {
         Assert.True (UpdateChecks.TryParseDailyTime ("09:30", out _));
         Assert.False (UpdateChecks.TryParseDailyTime ("25:00", out _));
         Assert.Contains ("--source", CliBackend.UpgradeByIdArgs ("A.Tool", "winget"));
         Assert.Contains ("--exact", CliBackend.UpgradeByIdArgs ("A.Tool", "winget"));
+        Assert.DoesNotContain ("--source", CliBackend.UpgradeByIdArgs ("A.Tool", ""));
+        Assert.DoesNotContain ("--source", CliBackend.UpgradeByNameArgs ("A.Tool", " "));
         string [] install = CliBackend.InstallArgs ("A.Tool", null, source: "winget");
         Assert.Contains ("--source", install);
         Assert.DoesNotContain ("--exact", install);

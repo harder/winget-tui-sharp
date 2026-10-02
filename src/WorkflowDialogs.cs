@@ -29,7 +29,7 @@ public sealed class RunRecordDialog : Runnable
 {
     public RunRecordDialog (RunRecord record)
     {
-        Title = $" {record.Action} results ";
+        Title = $" {StatusOwnership.TruncateScalarSafe (record.Action, 24)} results ";
         BorderStyle = LineStyle.Rounded;
         Width = Dim.Percent (78);
         Height = Dim.Percent (65);
@@ -117,7 +117,7 @@ public sealed class RunHistoryDialog : Runnable<int?>
         SchemeName = Theme.SurfaceSchemeName;
         ListView rows = new () { X = 1, Y = 1, Width = Dim.Fill (1), Height = Dim.Fill (3), SchemeName = Theme.SurfaceSchemeName };
         rows.SetSource (new ObservableCollection<string> (runs.Select (x =>
-            $"{x.FinishedAtUtc.ToLocalTime ():g}  {x.Action,-10} {x.Summary}").ToList ()));
+            $"{x.FinishedAtUtc.ToLocalTime ():g}  {StatusOwnership.TruncateScalarSafe (x.Action, 10),-10} {x.Summary}").ToList ()));
         Button open = new () { X = Pos.Center () - 7, Y = Pos.AnchorEnd (1), Text = "_Open", IsDefault = true };
         Button close = new () { X = Pos.Center () + 2, Y = Pos.AnchorEnd (1), Text = "Close" };
         open.Accepting += (_, e) => { Result = rows.SelectedItem; RequestStop (); e.Handled = true; };

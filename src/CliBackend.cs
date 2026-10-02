@@ -39,11 +39,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         EnsureCompleteForParsing (upgrades, "winget", ListUpgradesArgs (null));
         if (upgrades.Code != 0) throw new InvalidOperationException ($"winget upgrade exited with code {upgrades.Code}.");
 
-        ProcessRunner.RunResult pins = await RunDetailedWithCodeAsync (
-            PinListArgs (), "winget", CommandTimeout (PinListArgs ()), ct);
-        EnsureCompleteForParsing (pins, "winget", PinListArgs ());
-        if (pins.Code != 0) throw new InvalidOperationException ($"winget pin list exited with code {pins.Code}.");
-        return (ParseTable (upgrades.Output, hasAvailable: true), ParsePins (pins.Output));
+        return (ParseTable (upgrades.Output, hasAvailable: true), await ListPinsAsync (ct));
     }
 
     /// <summary>
@@ -349,12 +345,12 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         ["uninstall", "--id", id, "--accept-source-agreements"];
 
     internal static string [] UpgradeByIdArgs (string id, string? source = null) =>
-        source is null
+        string.IsNullOrWhiteSpace (source)
             ? ["upgrade", "--id", id, "--accept-source-agreements", "--accept-package-agreements"]
             : ["upgrade", "--id", id, "--exact", "--source", source, "--accept-source-agreements", "--accept-package-agreements"];
 
     internal static string [] UpgradeByNameArgs (string id, string? source = null) =>
-        source is null
+        string.IsNullOrWhiteSpace (source)
             ? ["upgrade", "--name", id, "--exact", "--accept-source-agreements", "--accept-package-agreements"]
             : ["upgrade", "--name", id, "--exact", "--source", source, "--accept-source-agreements", "--accept-package-agreements"];
 
@@ -368,9 +364,16 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     public async Task<IReadOnlyDictionary<string, PinState>> ListPinsAsync (CancellationToken ct)
     {
-        string output = await RunAsync (["pin", "list"], ct);
+        ProcessRunner.RunResult result = await RunDetailedWithCodeAsync (
+            PinListArgs (), "winget", CommandTimeout (PinListArgs ()), ct);
+        EnsureCompleteForParsing (result, "winget", PinListArgs ());
+        return ParsePinCommandResult (result);
+    }
 
-        return ParsePins (output);
+    internal static IReadOnlyDictionary<string, PinState> ParsePinCommandResult (ProcessRunner.RunResult result)
+    {
+        if (result.Code != 0) throw new InvalidOperationException ($"winget pin list exited with code {result.Code}.");
+        return ParsePins (result.Output);
     }
 
     public async Task<string> DescribeAsync (CancellationToken ct)
