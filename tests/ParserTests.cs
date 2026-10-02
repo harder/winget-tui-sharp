@@ -13,6 +13,22 @@ namespace WingetTuiSharp.Tests;
 public class ParserTests
 {
     [Fact]
+    public void InstalledById_UsesExactMatchAndRejectsDifferentRows ()
+    {
+        Assert.Equal (
+            ["list", "--id", "AndreaGrandi.LogBasset", "--exact", "--accept-source-agreements", "--disable-interactivity"],
+            CliBackend.InstalledByIdArgs ("AndreaGrandi.LogBasset"));
+
+        Package[] rows =
+        [
+            new () { Id = "AndreaGrandi.LogBasset.Tools", Name = "Other", Version = "9.0" },
+            new () { Id = "AndreaGrandi.LogBasset", Name = "LogBasset", Version = "0.5.0" }
+        ];
+        Assert.Equal ("0.5.0", CliBackend.FindInstalledVersion ("andreagrandi.logbasset", rows));
+        Assert.Null (CliBackend.FindInstalledVersion ("Different.Package", rows));
+    }
+
+    [Fact]
     public void ParseSearchTable_CapsRowsAtSharedSearchLimit ()
     {
         StringBuilder output = new ();

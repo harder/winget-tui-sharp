@@ -158,6 +158,16 @@ dotnet run -f net10.0                # any host: auto-falls back to mock if wing
 dotnet run -f net10.0 -- --mock      # any host: force the mock backend (UI development)
 ```
 
+On Windows, select the COM-capable target **and the machine's architecture** for a COM development run:
+
+```powershell
+dotnet run -f net10.0-windows10.0.26100.0 -r win-arm64 # ARM64
+dotnet run -f net10.0-windows10.0.26100.0 -r win-x64   # Intel/AMD x64
+dotnet run -f net10.0-windows10.0.26100.0 -r win-arm64 -- --comdiag # activation check on ARM64
+```
+
+Bare `dotnet run` cannot choose between this project's two target frameworks. A Windows-target Debug run without a runtime identifier may omit the in-process native DLLs from the executable's directory and fall back to CLI with `0x8007007E`. The header badge shows the live backend; `?` Help includes the COM fallback reason.
+
 #### Choosing a backend at runtime
 
 | Flag        | Backend       | Notes                                                            |

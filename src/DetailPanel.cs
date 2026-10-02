@@ -26,6 +26,8 @@ public sealed class DetailPanel : FrameView
     }
 
     public AppMode Mode { get; set; } = AppMode.Installed;
+    public bool CanVerify { get; set; }
+    public bool CanRepair { get; set; }
     public event EventHandler<string>? LinkActivated;
 
     public void SetDetail (PackageDetail? detail, bool loading)
@@ -236,15 +238,29 @@ public sealed class DetailPanel : FrameView
 
                 AddAction ("x", "Uninstall");
                 AddAction ("p", "Pin/Unpin");
-                AddAction ("V", "Verify install");
-                AddAction ("R", "Repair install");
+                if (CanVerify)
+                {
+                    AddAction ("V", "Verify install");
+                }
+
+                if (CanRepair)
+                {
+                    AddAction ("R", "Repair install");
+                }
 
                 break;
             case AppMode.Upgrades:
                 AddAction ("u", "Upgrade");
                 AddAction ("x", "Uninstall");
-                AddAction ("V", "Verify install");
-                AddAction ("R", "Repair install");
+                if (CanVerify)
+                {
+                    AddAction ("V", "Verify install");
+                }
+
+                if (CanRepair)
+                {
+                    AddAction ("R", "Repair install");
+                }
                 AddAction ("Spc", "Select");
                 AddAction ("a", "Toggle All");
                 AddAction ("U", "Upgrade selected");

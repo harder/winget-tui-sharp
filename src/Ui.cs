@@ -181,12 +181,13 @@ public sealed class StatusBar : View
     public OpProgress? Op { get; set; }
 
     private static readonly char [] _spinner = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-    private static readonly string [] _searchInputHints = ["Esc Cancel", "Enter Search", "Ctrl+U Clear"];
-    private static readonly string [] _filterInputHints = ["Esc Clear", "Enter Done", "Ctrl+U Clear", "Bksp Del"];
+    internal static char SpinnerGlyph (int tick) => _spinner [tick % _spinner.Length];
+    private static readonly string [] _searchInputHints = ["Esc Close", "Enter Search", "Ctrl+U Clear", "←→ Tabs"];
+    private static readonly string [] _filterInputHints = ["Esc Clear", "Enter Done", "Ctrl+U Clear", "Bksp Del", "←→ Tabs"];
     private static readonly string [] _versionInputHints = ["Esc Cancel", "Enter Confirm", "Ctrl+U Clear"];
-    private static readonly string [] _searchHints = ["/ Search", "f Source", "r Refresh", "e Export", "? Help", "q Quit"];
-    private static readonly string [] _installedHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "e Export", "? Help", "q Quit"];
-    private static readonly string [] _upgradeHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "Spc Select", "U Upgrade sel", "? Help", "q Quit"];
+    private static readonly string [] _searchHints = ["/ Search", "f Source", "r Refresh", "e Export", "←→ Tabs", "? Help", "q Quit"];
+    private static readonly string [] _installedHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "e Export", "←→ Tabs", "? Help", "q Quit"];
+    private static readonly string [] _upgradeHints = ["/ Filter", "f Source", "p Pin", "P Pins", "r Refresh", "Spc Select", "U Upgrade sel", "←→ Tabs", "? Help", "q Quit"];
 
     /// <summary>Render a compact fixed-width progress bar like <c>▕████░░░░░░▏  42%</c>.</summary>
     private static string RenderBar (double fraction)
@@ -261,7 +262,7 @@ public sealed class StatusBar : View
         }
         else if (IsLoading)
         {
-            char spin = _spinner [Tick % _spinner.Length];
+            char spin = SpinnerGlyph (Tick);
             msg = $"{spin} {msg}";
         }
 
@@ -701,7 +702,8 @@ public sealed class HelpDialog : Runnable
           dn / j        Move down
           PgUp / PgDn   Page navigation
           Home / End    Jump to start / end
-          lt / rt       Switch tabs (Search/Installed/Upgrades)
+          ← / →         Switch tabs (Search/Installed/Upgrades)
+          1 / 2 / 3     Jump directly to Search/Installed/Upgrades
           Tab / S-Tab   Toggle focus between list and detail
           /  or  s      Search (Search tab) / local filter
           f             Cycle source filter
@@ -709,20 +711,20 @@ public sealed class HelpDialog : Runnable
 
         Actions
           i             Install
-          I             Install specific version (pick from list)
+          I             Install specific version (COM list, CLI version entry)
           A             Advanced install (scope / mode / arch / args)
           d             Download installer only (no install)
           u             Upgrade
           x             Uninstall
-          V             Verify install (check files / registration)
-          R             Repair install (re-run the installer's repair)
+          V             Verify install (COM backend)
+          R             Repair install (COM backend)
           p             Pin / Unpin
           Space         Toggle batch select (Upgrades only)
           a             Select / deselect all (Upgrades only)
           U             Batch upgrade selected
           e             Export visible list to CSV
           P             Cycle pin filter
-          S             Cycle sort columns (Name / Id / Version / Available in Upgrades, ↑/↓)
+          S             Cycle sort field (↑/↓; Available on Upgrades)
           o             Open package homepage
           c             Open changelog / release notes
 

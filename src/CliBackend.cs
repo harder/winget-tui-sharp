@@ -8,7 +8,7 @@ namespace WingetTuiSharp;
 /// Shells out to the winget CLI and parses its tabular output.
 /// Mirrors src/cli_backend.rs from shanselman/winget-tui.
 /// </summary>
-public sealed partial class CliBackend : IBackend
+public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 {
     public async Task<IReadOnlyList<Package>> SearchAsync (string query, string? source, CancellationToken ct)
     {
@@ -66,6 +66,28 @@ public sealed partial class CliBackend : IBackend
         return ParseShow (id, output);
     }
 
+    /// <summary>Correlate a selected search result with the local inventory by exact id.</summary>
+    public async Task<string?> FindInstalledVersionAsync (string id, CancellationToken ct)
+    {
+        try
+        {
+            string output = await RunAsync (InstalledByIdArgs (id), ct);
+            return FindInstalledVersion (id, ParseTable (output, hasAvailable: false));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // The optional installed badge should not prevent manifest details from loading.
+            return null;
+        }
+    }
+
+    internal static string? FindInstalledVersion (string id, IReadOnlyList<Package> rows) =>
+        rows.FirstOrDefault (p => p.Id.Equals (id, StringComparison.OrdinalIgnoreCase))?.Version;
+
     // The CLI has no structured version list or applicable-installer query worth scraping, so
     // these degrade: an empty version list makes the UI fall back to a free-text version prompt,
     // and a null preview means the install confirm shows no installer summary line. The COM
@@ -77,6 +99,7 @@ public sealed partial class CliBackend : IBackend
         => Task.FromResult<InstallerPreview?> (null);
 
     // No CLI equivalent to CheckInstalledStatus — null signals "verify unavailable on this backend".
+    public bool CanVerify => false;
     public Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct)
         => Task.FromResult<InstallVerification?> (null);
 
@@ -206,6 +229,9 @@ public sealed partial class CliBackend : IBackend
 
     internal static string [] ShowArgs (string id) =>
         ["show", "--id", id, "--exact", "--accept-source-agreements"];
+
+    internal static string [] InstalledByIdArgs (string id) =>
+        ["list", "--id", id, "--exact", "--accept-source-agreements", "--disable-interactivity"];
 
     internal static string [] InstallArgs (string id, string? version, InstallSettings? settings = null)
     {

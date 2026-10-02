@@ -43,7 +43,7 @@ namespace WingetTuiSharp;
 ///    backend. If the COM server is registered but winget.exe isn't reachable, pin operations
 ///    fail (visibly, via the returned OpResult) while everything else keeps working.
 /// </summary>
-public sealed class ComBackend : IBackend
+public sealed class ComBackend : IBackend, IInstalledVersionLookup
 {
     private readonly BoundedAsyncGate _mutationGate = new (maxQueuedWaiters: 32);
 
@@ -223,6 +223,27 @@ public sealed class ComBackend : IBackend
     public Task<IReadOnlyList<Package>> ListUpgradesAsync (string? source, CancellationToken ct)
         => WithPackageManagerAsync (ct, (pm, token) => ListLocalAsync (pm, source, upgradesOnly: true, token));
 
+    public async Task<string?> FindInstalledVersionAsync (string id, CancellationToken ct)
+    {
+        try
+        {
+            return await WithPackageManagerAsync (ct, async (pm, token) =>
+            {
+                CatalogPackage? package = await FindByIdAsync (pm, id, null, installedContext: true, token);
+                return package is null ? null : SafeVersion (SafeInstalledVersion (package));
+            });
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch
+        {
+            // A failed optional lookup must not hide otherwise usable manifest details.
+            return null;
+        }
+    }
+
     /// <summary>
     /// Installed packages, optionally filtered to those with an available upgrade. Uses a
     /// composite catalog with <see cref="CompositeSearchBehavior.LocalCatalogs"/>: results come
@@ -250,14 +271,14 @@ public sealed class ComBackend : IBackend
                 CatalogPackage pkg = m.CatalogPackage;
                 bool updateAvailable = SafeIsUpdateAvailable (pkg);
 
-                if (upgradesOnly && !updateAvailable)
+                string installed = SafeVersion (SafeInstalledVersion (pkg)) ?? string.Empty;
+                string? packageId = ExactIdentity (pkg.Id);
+                string? latest = updateAvailable ? LatestAvailableVersion (pkg) : null;
+                string? availableVersion = HasDistinctAvailableVersion (installed, latest) ? latest : null;
+                if (upgradesOnly && availableVersion is null)
                 {
                     continue;
                 }
-
-                string installed = SafeVersion (SafeInstalledVersion (pkg)) ?? string.Empty;
-                string? packageId = ExactIdentity (pkg.Id);
-                string? availableVersion = updateAvailable ? LatestAvailableVersion (pkg) : null;
                 string? rawSource = SourceOf (pkg);
 
                 if (packageId is null
@@ -299,6 +320,10 @@ public sealed class ComBackend : IBackend
 
         return packages;
     }
+
+    internal static bool HasDistinctAvailableVersion (string? installed, string? available) =>
+        !string.IsNullOrWhiteSpace (available)
+        && !string.Equals (installed, available, StringComparison.OrdinalIgnoreCase);
 
     public Task<PackageDetail?> ShowAsync (string id, CancellationToken ct)
         => WithPackageManagerAsync (ct, (pm, token) => ShowCoreAsync (pm, id, token));
@@ -827,6 +852,7 @@ public sealed class ComBackend : IBackend
                    : Fail (op, $"Download failed: {result.Status} (hr 0x{HResultOf (result.ExtendedErrorCode):X8})");
     }
 
+    public bool CanVerify => true;
     public bool CanRepair => true;
 
     public Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)

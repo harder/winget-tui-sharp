@@ -159,6 +159,7 @@ public sealed class MockBackend : IBackend
         return Task.FromResult<InstallVerification?> (v);
     }
 
+    public bool CanVerify => true;
     public bool CanRepair => true;
 
     public async Task<OpResult> RepairAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)

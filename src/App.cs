@@ -27,6 +27,7 @@ public sealed class App : Window
     private readonly TextField _filterInput;
     private readonly FrameView _listFrame;
     private readonly SortableTableView _packageTable;
+    private readonly Label _mainLoadingLabel;
     private readonly DetailPanel _detailPanel;
     private readonly StatusBar _statusBar;
     private readonly TerminalSizeGuardView _sizeGuard;
@@ -55,6 +56,8 @@ public sealed class App : Window
     private PendingProgress? _pendingProgress;
     private bool _progressDispatcherRunning;
     private bool _globalKeysAttached;
+    private AppMode? _mainLoadingMode;
+    private readonly HashSet<AppMode> _loadedModes = [];
 
     public App (IBackend backend, TimeSpan? smokeDelay = null)
     {
@@ -132,10 +135,23 @@ public sealed class App : Window
         _packageTable.Style.ShowHorizontalHeaderUnderline = true;
         _packageTable.Style.ExpandLastColumn = true;
 
-        // Reflow column widths when the table is resized (e.g. terminal resize) so the Available
-        // column stays visible on a narrow window instead of being pushed off the right edge.
-        _packageTable.ViewportChanged += (_, _) => ApplyColumnWidths ();
-        _listFrame.Add (_packageTable);
+        _mainLoadingLabel = new ()
+        {
+            X = 0,
+            Y = Pos.Center () - 1,
+            Width = Dim.Fill (),
+            Height = 3,
+            TextAlignment = Alignment.Center,
+            SchemeName = Theme.AccentSchemeName,
+            CanFocus = false,
+            Visible = false
+        };
+
+        // The list frame stays visible while the table is replaced or hidden for loading. Its
+        // interior width is the stable column budget; the table's own viewport can change when
+        // selection or scrolling updates its content.
+        _listFrame.ViewportChanged += (_, _) => ApplyColumnWidths ();
+        _listFrame.Add (_packageTable, _mainLoadingLabel);
 
         _detailPanel = new ()
         {
@@ -144,6 +160,8 @@ public sealed class App : Window
             Width = Dim.Fill (),
             Height = Dim.Fill (1)
         };
+        _detailPanel.CanVerify = backend.CanVerify;
+        _detailPanel.CanRepair = backend.CanRepair;
 
         _statusBar = new ()
         {
@@ -243,7 +261,7 @@ public sealed class App : Window
         if (newIsRunning && !_initialLoadDone)
         {
             _initialLoadDone = true;
-            TriggerRefresh ();
+            TriggerRefresh (prominent: true);
             StartSpinner ();
             LoadBackendDescription ();
             LoadSources ();
@@ -606,6 +624,11 @@ public sealed class App : Window
 
                                                                             _statusBar.Tick++;
 
+                                                                            if (_mainLoadingMode is { } mode)
+                                                                            {
+                                                                                _mainLoadingLabel.Text = MainLoadingText (mode, _statusBar.Tick);
+                                                                            }
+
                                                                             if (_statusBar.IsLoading)
                                                                             {
                                                                                 _statusBar.SetNeedsDraw ();
@@ -628,7 +651,7 @@ public sealed class App : Window
     // line (e.g. "Done", "Uninstalled X") so the reload keeps showing it — with the spinner as a
     // "refreshing" cue — instead of overwriting it with "Loading Installed…" (the slow reload would
     // otherwise mask the brief result). Null on a normal refresh, which shows the usual messages.
-    private void TriggerRefresh (string? keepMessage = null)
+    private void TriggerRefresh (string? keepMessage = null, bool prominent = false)
     {
         CancellationTokenSource request = ReplaceLifetimeLinkedSource (ref _viewCts);
         CancellationToken ct = request.Token;
@@ -636,6 +659,8 @@ public sealed class App : Window
         AppMode mode = _state.Mode;
         string? src = _state.SourceFilter;
         string query = _state.SearchQuery;
+        bool mainLoading = prominent || _mainLoadingLabel.Visible
+                           || (mode == AppMode.Search && !_loadedModes.Contains (mode));
 
         // Remember the selected package so a refresh can restore the same ID and source.
         Package? previousSelection = CurrentPackage ();
@@ -644,9 +669,10 @@ public sealed class App : Window
         // (~13k packages) which is never what the user wants. Show a placeholder instead.
         if (mode == AppMode.Search && string.IsNullOrWhiteSpace (query))
         {
+            HideMainLoading ();
             _state.Packages = [];
             _state.ApplyFilter ();
-            SetStatus ("Press / to search for packages");
+            SetStatus ("Type a package name and press Enter to search");
             RefreshTable ();
             RefreshStatusBar ();
             SyncTabBar ();
@@ -655,6 +681,10 @@ public sealed class App : Window
         }
 
         IDisposable loading = _state.AcquireLoading ();
+        if (mainLoading)
+        {
+            ShowMainLoading (mode);
+        }
         SetStatus (
             keepMessage ?? $"Loading {_state.Mode}…",
             keepMessage is not null && _state.StatusIsError);
@@ -708,6 +738,11 @@ public sealed class App : Window
 
                                                                               _state.ApplyFilter ();
                                                                               loading.Dispose ();
+                                                                              _loadedModes.Add (mode);
+                                                                              if (mainLoading)
+                                                                              {
+                                                                                  HideMainLoading ();
+                                                                              }
 
                                                                               // Keep the op's result line visible after the reload rather than replacing it
                                                                               // with a package count, so the user sees what just happened.
@@ -738,6 +773,10 @@ public sealed class App : Window
                                                                               RefreshTable ();
                                                                               RefreshStatusBar ();
                                                                               RestoreCursorOrSelectFirst (previousSelection);
+                                                                              if (mainLoading && mode != AppMode.Search)
+                                                                              {
+                                                                                  _packageTable.SetFocus ();
+                                                                              }
                                                                           }, ct, () => gen == _state.ViewGeneration);
                                                  }
                                                  catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -751,6 +790,10 @@ public sealed class App : Window
                                                                           {
                                                                               loading.Dispose ();
                                                                               SetStatus (msg, isError: true);
+                                                                              if (mainLoading)
+                                                                              {
+                                                                                  ShowMainLoadError (mode);
+                                                                              }
                                                                               RefreshStatusBar ();
                                                                           }, ct, () => gen == _state.ViewGeneration);
                                                  }
@@ -765,7 +808,53 @@ public sealed class App : Window
         {
             loading.Dispose ();
             ReportRejectedBackgroundAdmission ();
+            if (mainLoading)
+            {
+                ShowMainLoadError (mode);
+            }
         }
+    }
+
+    private static string MainLoadingName (AppMode mode) => mode switch
+    {
+        AppMode.Search => "search results",
+        AppMode.Upgrades => "available upgrades",
+        _ => "installed packages"
+    };
+
+    private static string MainLoadingText (AppMode mode, int tick) =>
+        $"\n{StatusBar.SpinnerGlyph (tick)}  Loading {MainLoadingName (mode)}…";
+
+    private void ShowMainLoading (AppMode mode)
+    {
+        _state.Packages = [];
+        _state.ApplyFilter ();
+        _state.CurrentDetail = null;
+        CancelPendingDetailLoad ();
+        _packageTable.Table = null;
+        _packageTable.Visible = false;
+        _mainLoadingMode = mode;
+        _mainLoadingLabel.Text = MainLoadingText (mode, _statusBar.Tick);
+        _mainLoadingLabel.Visible = true;
+        _listFrame.Title = $" {mode} (loading…) ";
+        _detailPanel.SetDetail (null, true);
+    }
+
+    private void HideMainLoading ()
+    {
+        _mainLoadingMode = null;
+        _mainLoadingLabel.Visible = false;
+        _packageTable.Visible = true;
+    }
+
+    private void ShowMainLoadError (AppMode mode)
+    {
+        _mainLoadingMode = null;
+        _mainLoadingLabel.Text = $"\nCould not load {MainLoadingName (mode)}. See status bar.";
+        _mainLoadingLabel.Visible = true;
+        _packageTable.Visible = false;
+        _detailPanel.SetDetail (null, false);
+        _listFrame.Title = $" {mode} (error) ";
     }
 
     private void RefreshTable ()
@@ -902,7 +991,7 @@ public sealed class App : Window
 
         // Pin per-column widths (MinWidth = MaxWidth). Otherwise TableView's CalculateMaxCellWidth
         // recomputes widths every frame from the visible rows' content, so scrolling jumps columns
-        // around. Width depends on the table's current size, so re-run on resize (ViewportChanged).
+        // around. Width depends on the list pane's size, so re-run when that pane is resized.
         ApplyColumnWidths (force: true);
     }
 
@@ -912,7 +1001,8 @@ public sealed class App : Window
     /// Sizes the data columns to the table's current width. Name/Id/Version shrink toward minimums
     /// when the terminal is narrow so the <b>Available</b> column stays visible — it sits just
     /// before the expanding Source column and is otherwise the first to be pushed off-screen, so a
-    /// user on a small window can't tell it exists. Wired to ViewportChanged to reflow on resize.
+    /// user on a small window can't tell it exists. Wired to the list frame's ViewportChanged
+    /// so moving the selection cannot trigger a different column layout.
     /// </summary>
     private void ApplyColumnWidths (bool force = false)
     {
@@ -923,7 +1013,7 @@ public sealed class App : Window
             return;
         }
 
-        int avail = _packageTable.Viewport.Width;
+        int avail = _listFrame.Viewport.Width;
 
         if (avail <= 0 || (!force && avail == _lastColumnLayoutWidth))
         {
@@ -1158,6 +1248,10 @@ public sealed class App : Window
 
         if (_state.TryGetCachedDetail (p, out PackageDetail cached))
         {
+            if (_state.Mode != AppMode.Search && !string.IsNullOrEmpty (p.Version))
+            {
+                cached.InstalledVersion = p.Version;
+            }
             _state.CurrentDetail = cached;
             _detailPanel.SetDetail (cached, false);
             RefreshStatusBar ();
@@ -1181,6 +1275,15 @@ public sealed class App : Window
                                                      await Task.Delay (DetailLoadDebounceMs, ct);
 
                                                      PackageDetail? detail = await _state.Backend.ShowAsync (p.Id, ct);
+                                                     string? installedVersion = null;
+                                                     if (_state.Mode == AppMode.Search
+                                                         && _state.Backend is IInstalledVersionLookup lookup
+                                                         && string.IsNullOrEmpty (p.InstalledVersion)
+                                                         && string.IsNullOrEmpty (detail?.InstalledVersion)
+                                                         && !p.IsTruncated)
+                                                     {
+                                                         installedVersion = await lookup.FindInstalledVersionAsync (p.Id, ct);
+                                                     }
                                                      await DispatchAsync (() =>
                                                                           {
                                                                               loading.Dispose ();
@@ -1190,6 +1293,20 @@ public sealed class App : Window
                                                                               // packages with unusual characters in id like ".115Chrome").
                                                                               PackageDetail final = detail ?? BuildStubDetail (p);
                                                                               final.MergeContext (p);
+                                                                              if (_state.Mode != AppMode.Search && !string.IsNullOrEmpty (p.Version))
+                                                                              {
+                                                                                  final.InstalledVersion = p.Version;
+                                                                              }
+                                                                              if (!string.IsNullOrEmpty (installedVersion))
+                                                                              {
+                                                                                  final.InstalledVersion = installedVersion;
+                                                                                  if (_state.Mode == AppMode.Search
+                                                                                      && string.IsNullOrEmpty (final.AvailableVersion)
+                                                                                      && !string.Equals (final.Version, installedVersion, StringComparison.OrdinalIgnoreCase))
+                                                                                  {
+                                                                                      final.AvailableVersion = final.Version;
+                                                                                  }
+                                                                              }
                                                                               final.EnsureDetailHint ();
                                                                               _state.CacheDetail (p.Id, final);
                                                                               _state.CurrentDetail = final;
@@ -1303,6 +1420,11 @@ public sealed class App : Window
 
     private void OnFilterKeyDown (object? sender, Key key)
     {
+        if (key.Handled)
+        {
+            return;
+        }
+
         if (key.KeyCode == (KeyCode.C | KeyCode.CtrlMask))
         {
             RequestGracefulStop ();
@@ -1316,6 +1438,15 @@ public sealed class App : Window
             _filterInput.Text = string.Empty;
             key.Handled = true;
 
+            return;
+        }
+
+        // SkillView keeps tab arrows available even while a text field is focused.
+        if (key.KeyCode is KeyCode.CursorLeft or KeyCode.CursorRight)
+        {
+            _state.CycleMode (key.KeyCode == KeyCode.CursorRight);
+            SwitchToMode (_state.Mode);
+            key.Handled = true;
             return;
         }
 
@@ -1389,7 +1520,7 @@ public sealed class App : Window
 
     private void OnKeyDown (object? sender, Key key)
     {
-        if (_state.InputMode != InputMode.Normal)
+        if (key.Handled || _state.InputMode != InputMode.Normal)
         {
             return;
         }
@@ -1443,9 +1574,10 @@ public sealed class App : Window
                 return;
         }
 
-        // Left/Right arrows cycle modes (Search ↔ Installed ↔ Upgrades) only when focus is
-        // not on the list — otherwise the list's column-aware navigation handles them.
-        if (key.KeyCode == KeyCode.CursorRight && _packageTable.HasFocus == false)
+        // Match SkillView: left/right always cycle the top-level tabs, including while the
+        // package table or detail pane has focus. The table's horizontal movement is less
+        // useful here than a reliable way to reach the adjacent tab.
+        if (key.KeyCode == KeyCode.CursorRight)
         {
             _state.CycleMode (true);
             SwitchToMode (_state.Mode);
@@ -1454,7 +1586,7 @@ public sealed class App : Window
             return;
         }
 
-        if (key.KeyCode == KeyCode.CursorLeft && _packageTable.HasFocus == false)
+        if (key.KeyCode == KeyCode.CursorLeft)
         {
             _state.CycleMode (false);
             SwitchToMode (_state.Mode);
@@ -1693,7 +1825,11 @@ public sealed class App : Window
             ExitInputMode ();
         }
 
-        TriggerRefresh ();
+        TriggerRefresh (prominent: true);
+        if (mode == AppMode.Search)
+        {
+            EnterFilterMode ();
+        }
     }
 
     private void EnterFilterMode ()
@@ -2982,7 +3118,7 @@ public sealed class App : Window
     {
         if (!snapshot.WasTruncated)
         {
-            return $"Exported {snapshot.Rows.Count} rows to {path}";
+            return $"Exported {snapshot.Rows.Count} {(snapshot.Rows.Count == 1 ? "row" : "rows")} to {path}";
         }
 
         return $"Exported {snapshot.Rows.Count} of {snapshot.SourceRowCount} rows to {path}; "

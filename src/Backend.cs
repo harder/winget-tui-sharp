@@ -40,6 +40,7 @@ public interface IBackend
 
     // Check whether an installed package's files/registration are intact (COM
     // CheckInstalledStatus). Returns null when the backend has no equivalent (CLI).
+    bool CanVerify { get; }
     Task<InstallVerification?> VerifyInstalledAsync (string id, CancellationToken ct);
 
     // True when this backend can repair an installed package (COM only). The UI gates the Repair
@@ -58,4 +59,10 @@ public interface IBackend
     // "Mock backend". Shown in the help dialog and at startup so it's obvious which backend the
     // app actually selected (the COM build can silently fall back to CLI if activation fails).
     Task<string> DescribeAsync (CancellationToken ct);
+}
+
+/// <summary>Optional exact local-inventory lookup for enriching a selected search result.</summary>
+public interface IInstalledVersionLookup
+{
+    Task<string?> FindInstalledVersionAsync (string id, CancellationToken ct);
 }

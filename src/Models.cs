@@ -170,6 +170,15 @@ public sealed class PackageDetail
             InstalledVersion = context.InstalledVersion;
         }
 
+        // The catalog's latest version is only an upgrade when it differs from the installed
+        // version. On an uninstalled search result, avoid repeating the manifest version.
+        string? comparisonVersion = !string.IsNullOrEmpty (InstalledVersion) ? InstalledVersion : Version;
+        if (!string.IsNullOrEmpty (comparisonVersion)
+            && string.Equals (AvailableVersion, comparisonVersion, StringComparison.OrdinalIgnoreCase))
+        {
+            AvailableVersion = null;
+        }
+
         if (!PinState.IsPinned && context.PinState.IsPinned)
         {
             PinState = context.PinState;

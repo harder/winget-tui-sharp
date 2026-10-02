@@ -30,7 +30,7 @@ Test-Path ".\bin\Release\net10.0-windows10.0.26100.0\win-x64\publish\coreclr.dll
 & $exe --comdiag  # COM-activation probe only (no TUI) — run FIRST after a clean reboot, see P0
 ```
 
-For quick iteration without AOT: `dotnet run -f net10.0-windows10.0.26100.0`.
+For quick iteration without AOT, include the machine's runtime identifier: `dotnet run -f net10.0-windows10.0.26100.0 -r win-arm64` on ARM64, or `-r win-x64` on x64. A framework-only Debug run can fail COM activation with `0x8007007E` because the in-process native DLLs are not placed beside the executable. Use the header badge and `?` Help to confirm the live backend and fallback reason.
 
 ---
 

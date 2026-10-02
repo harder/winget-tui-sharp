@@ -123,6 +123,92 @@ public class AppBehaviorTests
     }
 
     [Fact]
+    public void App_OpeningSearch_ShowsTheSearchFieldImmediately ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+
+        InvokePrivate (app, "SwitchToMode", AppMode.Search);
+
+        Assert.Equal (AppMode.Search, state.Mode);
+        Assert.Equal (InputMode.Search, state.InputMode);
+        Assert.True (input.Visible);
+    }
+
+    [Fact]
+    public void App_SwitchingTabs_ClearsOldRowsAndShowsMainLoading ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = GetPrivateField<TableView> (app, "_packageTable");
+        Label loading = GetPrivateField<Label> (app, "_mainLoadingLabel");
+        state.Packages = [new () { Id = "old.package", Name = "Old package", Version = "1" }];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+
+        InvokePrivate (app, "SwitchToMode", AppMode.Upgrades);
+
+        Assert.Empty (state.Packages);
+        Assert.Null (table.Table);
+        Assert.False (table.Visible);
+        Assert.True (loading.Visible);
+        Assert.Contains ("Loading available upgrades", loading.Text.ToString (), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void App_RefreshingCurrentTab_KeepsRowsWhileStatusShowsLoading ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = GetPrivateField<TableView> (app, "_packageTable");
+        Label loading = GetPrivateField<Label> (app, "_mainLoadingLabel");
+        state.Packages = [new () { Id = "current.package", Name = "Current package", Version = "1" }];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        ITableSource current = table.Table!;
+
+        InvokePrivate (app, "TriggerRefresh", null!, false);
+
+        Assert.Same (current, table.Table);
+        Assert.True (table.Visible);
+        Assert.False (loading.Visible);
+    }
+
+    [Fact]
+    public void PackageDetail_MergeContext_HidesIdenticalAvailableVersion ()
+    {
+        PackageDetail detail = new ()
+        {
+            Id = "Docker.DockerDesktop",
+            Name = "Docker Desktop",
+            Version = "4.93.0",
+            AvailableVersion = "4.93.0"
+        };
+
+        detail.MergeContext (new () { Id = detail.Id, Name = detail.Name, Version = "4.93.0" });
+
+        Assert.Null (detail.AvailableVersion);
+    }
+
+    [Fact]
+    public void PackageDetail_MergeContext_KeepsUpgradeWhenInstalledVersionIsOlder ()
+    {
+        PackageDetail detail = new ()
+        {
+            Id = "example.package",
+            Name = "Example",
+            Version = "2.0",
+            AvailableVersion = "2.0",
+            InstalledVersion = "1.0"
+        };
+
+        detail.MergeContext (new () { Id = detail.Id, Name = detail.Name, Version = "2.0" });
+
+        Assert.Equal ("2.0", detail.AvailableVersion);
+    }
+
+    [Fact]
     public void App_SmallWindow_ShowsResizeGuard ()
     {
         App app = new (new MockBackend ()) { Frame = new (0, 0, 70, 20) };
@@ -367,6 +453,104 @@ public class AppBehaviorTests
         Assert.Equal (idWidth, table.Style.GetOrCreateColumnStyle (idColumn).MinWidth);
     }
 
+    [Theory]
+    [InlineData (AppMode.Installed)]
+    [InlineData (AppMode.Upgrades)]
+    public void App_ColumnWidths_StayFixedAfterFirstSelectionMove (AppMode mode)
+    {
+        App app = new (new MockBackend ()) { Frame = new (0, 0, 140, 40) };
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = GetPrivateField<TableView> (app, "_packageTable");
+        FrameView frame = GetPrivateField<FrameView> (app, "_listFrame");
+        state.Mode = mode;
+
+        InvokePrivate (app, "ShowMainLoading", mode);
+        LayoutView (app, new (140, 40));
+        state.Packages =
+        [
+            new () { Id = "Example.First", Name = "First", Version = "1", AvailableVersion = "2", Source = "winget" },
+            new () { Id = "Example.Second", Name = "Second", Version = "1", AvailableVersion = "2", Source = "winget" }
+        ];
+        state.ApplyFilter ();
+        InvokePrivate (app, "HideMainLoading");
+        InvokePrivate (app, "RefreshTable");
+        int [] before = Enumerable.Range (0, table.Table!.Columns)
+            .Select (i => table.Style.GetOrCreateColumnStyle (i).MinWidth).ToArray ();
+        int viewportBefore = table.Viewport.Width;
+        int frameBefore = table.Frame.Width;
+        int listBefore = frame.Viewport.Width;
+
+        table.Value = new (new (0, 1));
+        int [] after = Enumerable.Range (0, table.Table.Columns)
+            .Select (i => table.Style.GetOrCreateColumnStyle (i).MinWidth).ToArray ();
+
+        Assert.True (before.SequenceEqual (after),
+            $"{mode}: widths {string.Join (',', before)} -> {string.Join (',', after)}; "
+            + $"table viewport {viewportBefore}->{table.Viewport.Width}, frame {frameBefore}->{table.Frame.Width}, "
+            + $"list viewport {listBefore}->{frame.Viewport.Width}");
+    }
+
+    [Theory]
+    [InlineData (AppMode.Installed)]
+    [InlineData (AppMode.Upgrades)]
+    public void App_ColumnWidths_UseStableListPaneWidth (AppMode mode)
+    {
+        App app = new (new MockBackend ()) { Frame = new (0, 0, 140, 40) };
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = GetPrivateField<TableView> (app, "_packageTable");
+        FrameView frame = GetPrivateField<FrameView> (app, "_listFrame");
+        LayoutView (app, new (140, 40));
+        state.Mode = mode;
+        state.Packages = [new () { Id = "Example.App", Name = "Example", Version = "1", AvailableVersion = "2", Source = "winget" }];
+        state.ApplyFilter ();
+        InvokePrivate (app, "RefreshTable");
+        int [] before = Enumerable.Range (0, table.Table!.Columns)
+            .Select (i => table.Style.GetOrCreateColumnStyle (i).MinWidth).ToArray ();
+        int paneWidth = frame.Viewport.Width;
+
+        // Simulate a transient table viewport change while the containing pane stays put.
+        table.Frame = new (table.Frame.X, table.Frame.Y, table.Frame.Width + 30, table.Frame.Height);
+        Assert.True (table.Viewport.Width > paneWidth);
+        InvokePrivate (app, "ApplyColumnWidths", true);
+        int [] after = Enumerable.Range (0, table.Table.Columns)
+            .Select (i => table.Style.GetOrCreateColumnStyle (i).MinWidth).ToArray ();
+
+        Assert.Equal (paneWidth, frame.Viewport.Width);
+        Assert.Equal (before, after);
+    }
+
+    [Fact]
+    public void App_ColumnWidths_ReflowWhenListPaneResizes ()
+    {
+        App app = new (new MockBackend ()) { Frame = new (0, 0, 140, 40) };
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TableView table = GetPrivateField<TableView> (app, "_packageTable");
+        state.Mode = AppMode.Upgrades;
+        state.Packages = [new () { Id = "Example.App", Name = "Example", Version = "1", AvailableVersion = "2", Source = "winget" }];
+        state.ApplyFilter ();
+        LayoutView (app, new (140, 40));
+        InvokePrivate (app, "RefreshTable");
+        int idColumn = Array.FindIndex (table.Table!.ColumnNames,
+            name => name.StartsWith ("Id", StringComparison.Ordinal));
+        int narrowWidth = table.Style.GetOrCreateColumnStyle (idColumn).MinWidth;
+
+        app.Frame = new (0, 0, 190, 40);
+        LayoutView (app, new (190, 40));
+
+        Assert.True (table.Style.GetOrCreateColumnStyle (idColumn).MinWidth > narrowWidth);
+    }
+
+    [Fact]
+    public void HelpDialog_DefaultWidth_DoesNotNeedHorizontalScrolling ()
+    {
+        using HelpDialog dialog = new ("COM · winget 1.29.380");
+        LayoutView (dialog, new (140, 40));
+        Code content = Assert.Single (dialog.SubViews.OfType<Code> ());
+
+        Assert.True (content.GetContentWidth () <= content.Viewport.Width,
+            $"Help content width {content.GetContentWidth ()}, viewport width {content.Viewport.Width}");
+    }
+
     [Fact]
     public void App_FilterShortcuts_ClearTextAndExitOnEmptyBackspace ()
     {
@@ -388,6 +572,23 @@ public class AppBehaviorTests
 
         Assert.True (backspace.Handled);
         Assert.Equal (InputMode.Normal, state.InputMode);
+    }
+
+    [Fact]
+    public void App_SearchField_RightArrowSwitchesToInstalled ()
+    {
+        App app = new (new MockBackend ());
+        AppState state = GetPrivateField<AppState> (app, "_state");
+        TextField input = GetPrivateField<TextField> (app, "_filterInput");
+        InvokePrivate (app, "SwitchToMode", AppMode.Search);
+
+        Key right = new (KeyCode.CursorRight);
+        InvokePrivate (app, "OnFilterKeyDown", input, right);
+
+        Assert.True (right.Handled);
+        Assert.Equal (AppMode.Installed, state.Mode);
+        Assert.Equal (InputMode.Normal, state.InputMode);
+        Assert.False (input.Visible);
     }
 
     [Fact]
