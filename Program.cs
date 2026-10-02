@@ -1,5 +1,54 @@
 using WingetTuiSharp;
 
+if (args.Length > 0 && args [0] == "--check-updates")
+{
+    WorkflowStore store = new ();
+    bool notifyOnChange = false;
+    try { notifyOnChange = store.Schedule ().NotifyOnChange; }
+    catch (Exception ex) { Console.Error.WriteLine ($"Notification settings unavailable: {ex.Message}"); }
+    IBackend checkBackend = SelectBackend (args);
+    if (checkBackend is MockBackend)
+    {
+        UpdateCheckSnapshot unavailable = new (DateTimeOffset.UtcNow, "Failed",
+            "A real WinGet backend is unavailable.", "Unavailable", [], 0);
+        try { store.SaveCheck (unavailable); }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine ($"Update check could not be saved: {ex.Message}");
+            Environment.ExitCode = 1;
+            return;
+        }
+        if (notifyOnChange)
+        {
+            string? notificationError = await UpdateNotification.TryShowAsync (unavailable, CancellationToken.None);
+            if (notificationError is not null) Console.Error.WriteLine ($"Notification unavailable: {notificationError}");
+        }
+        Console.Error.WriteLine ($"Update check failed: {unavailable.Error}");
+        Environment.ExitCode = 1;
+        return;
+    }
+
+    UpdateCheckSnapshot check;
+    try { check = await UpdateChecks.CheckAsync (checkBackend, store, CancellationToken.None); }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine ($"Update check could not be saved: {ex.Message}");
+        Environment.ExitCode = 1;
+        return;
+    }
+    if (notifyOnChange)
+    {
+        string? notificationError = await UpdateNotification.TryShowAsync (check, CancellationToken.None);
+        if (notificationError is not null) Console.Error.WriteLine ($"Notification unavailable: {notificationError}");
+    }
+
+    Console.WriteLine (check.Status == "Succeeded"
+        ? $"{check.Actionable} available, {check.Pinned} pinned, {check.NewOrChanged} new or changed."
+        : $"Update check failed: {check.Error}");
+    Environment.ExitCode = check.Status == "Succeeded" ? 0 : 1;
+    return;
+}
+
 if (args.Length > 0 && args [0] is "--dump")
 {
     // Diagnostic mode: invoke winget the way the backend would and print the raw output

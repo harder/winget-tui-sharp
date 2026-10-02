@@ -112,6 +112,7 @@
   <ItemGroup>
     <!-- Expose internal parser helpers (DedupePackages, ParsePinState, CompareVersionsLike) to the test project. -->
     <InternalsVisibleTo Include="WingetTuiSharp.Tests" />
+    <EmbeddedResource Include="src/notification.ps1" LogicalName="WingetTuiSharp.notification.ps1" />
   </ItemGroup>
 
   <ItemGroup>

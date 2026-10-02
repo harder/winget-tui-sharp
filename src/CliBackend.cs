@@ -31,6 +31,17 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         return ParseTable (output, hasAvailable: true);
     }
 
+    /// <summary>Strict inventory read for scheduled checks: failed CLI commands cannot look like an empty upgrade list.</summary>
+    internal async Task<(IReadOnlyList<Package> Packages, IReadOnlyDictionary<string, PinState> Pins)> ReadUpdateCheckAsync (CancellationToken ct)
+    {
+        ProcessRunner.RunResult upgrades = await RunDetailedWithCodeAsync (
+            ListUpgradesArgs (null), "winget", CommandTimeout (ListUpgradesArgs (null)), ct);
+        EnsureCompleteForParsing (upgrades, "winget", ListUpgradesArgs (null));
+        if (upgrades.Code != 0) throw new InvalidOperationException ($"winget upgrade exited with code {upgrades.Code}.");
+
+        return (ParseTable (upgrades.Output, hasAvailable: true), await ListPinsAsync (ct));
+    }
+
     /// <summary>
     /// The configured source names from `winget source list`, e.g. ["winget", "msstore"].
     /// Falls back to the two predefined sources if the command fails or parses empty.
@@ -117,9 +128,9 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     // progress is unused: winget.exe only emits an ANSI progress bar to stdout, which we
     // capture as a whole rather than scrape. The COM backend is the one that reports progress.
-    public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
+    public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
     {
-        (int code, string output) = await RunWithCodeAsync (InstallArgs (id, version, settings), ct);
+        (int code, string output) = await RunWithCodeAsync (InstallArgs (id, version, settings, source), ct);
         Operation op = new () { Kind = OperationKind.Install, PackageId = id, Version = version };
 
         return new () { Operation = op, Success = code == 0, Message = output };
@@ -155,14 +166,14 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         return new () { Operation = op, Success = code == 0, Message = output };
     }
 
-    public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
     {
         // Upstream tries id (non-exact) first, then falls back to name (exact). Match that.
-        (int code, string output) = await RunWithCodeAsync (UpgradeByIdArgs (id), ct);
+        (int code, string output) = await RunWithCodeAsync (UpgradeByIdArgs (id, source), ct);
 
         if (code != 0)
         {
-            (code, output) = await RunWithCodeAsync (UpgradeByNameArgs (id), ct);
+            (code, output) = await RunWithCodeAsync (UpgradeByNameArgs (id, source), ct);
         }
 
         Operation op = new () { Kind = OperationKind.Upgrade, PackageId = id };
@@ -233,7 +244,7 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     internal static string [] InstalledByIdArgs (string id) =>
         ["list", "--id", id, "--exact", "--accept-source-agreements", "--disable-interactivity"];
 
-    internal static string [] InstallArgs (string id, string? version, InstallSettings? settings = null)
+    internal static string [] InstallArgs (string id, string? version, InstallSettings? settings = null, string? source = null)
     {
         // Match upstream's argument list: no `--exact`. Some ids need substring match
         // against the catalog (e.g. monikered store packages).
@@ -243,6 +254,12 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
         {
             args.Add ("--version");
             args.Add (version);
+        }
+
+        if (!string.IsNullOrWhiteSpace (source))
+        {
+            args.Add ("--source");
+            args.Add (source);
         }
 
         AppendInstallSettings (args, settings);
@@ -327,11 +344,15 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
     internal static string [] UninstallArgs (string id) =>
         ["uninstall", "--id", id, "--accept-source-agreements"];
 
-    internal static string [] UpgradeByIdArgs (string id) =>
-        ["upgrade", "--id", id, "--accept-source-agreements", "--accept-package-agreements"];
+    internal static string [] UpgradeByIdArgs (string id, string? source = null) =>
+        string.IsNullOrWhiteSpace (source)
+            ? ["upgrade", "--id", id, "--accept-source-agreements", "--accept-package-agreements"]
+            : ["upgrade", "--id", id, "--source", source, "--accept-source-agreements", "--accept-package-agreements"];
 
-    internal static string [] UpgradeByNameArgs (string id) =>
-        ["upgrade", "--name", id, "--exact", "--accept-source-agreements", "--accept-package-agreements"];
+    internal static string [] UpgradeByNameArgs (string id, string? source = null) =>
+        string.IsNullOrWhiteSpace (source)
+            ? ["upgrade", "--name", id, "--exact", "--accept-source-agreements", "--accept-package-agreements"]
+            : ["upgrade", "--name", id, "--exact", "--source", source, "--accept-source-agreements", "--accept-package-agreements"];
 
     internal static string [] PinAddArgs (string id) =>
         ["pin", "add", "--id", id, "--exact", "--blocking", "--disable-interactivity"];
@@ -343,9 +364,16 @@ public sealed partial class CliBackend : IBackend, IInstalledVersionLookup
 
     public async Task<IReadOnlyDictionary<string, PinState>> ListPinsAsync (CancellationToken ct)
     {
-        string output = await RunAsync (["pin", "list"], ct);
+        ProcessRunner.RunResult result = await RunDetailedWithCodeAsync (
+            PinListArgs (), "winget", CommandTimeout (PinListArgs ()), ct);
+        EnsureCompleteForParsing (result, "winget", PinListArgs ());
+        return ParsePinCommandResult (result);
+    }
 
-        return ParsePins (output);
+    internal static IReadOnlyDictionary<string, PinState> ParsePinCommandResult (ProcessRunner.RunResult result)
+    {
+        if (result.Code != 0) throw new InvalidOperationException ($"winget pin list exited with code {result.Code}.");
+        return ParsePins (result.Output);
     }
 
     public async Task<string> DescribeAsync (CancellationToken ct)

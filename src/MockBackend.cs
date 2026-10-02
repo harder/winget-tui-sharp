@@ -186,7 +186,7 @@ public sealed class MockBackend : IBackend
         };
     }
 
-    public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
+    public async Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
     {
         ct.ThrowIfCancellationRequested ();
         await SimulateProgressAsync (progress, downloads: true, ct);
@@ -239,7 +239,7 @@ public sealed class MockBackend : IBackend
         };
     }
 
-    public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
+    public async Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
     {
         ct.ThrowIfCancellationRequested ();
         await SimulateProgressAsync (progress, downloads: true, ct);

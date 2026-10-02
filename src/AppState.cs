@@ -25,6 +25,7 @@ public sealed class AppState
 
     public List<Package> Packages { get; set; } = [];
     public List<Package> Filtered { get; private set; } = [];
+    /// <summary>Selected upgrade rows keyed by source and package ID.</summary>
     public HashSet<string> BatchSelected { get; } = new (StringComparer.OrdinalIgnoreCase);
     public PackageDetail? CurrentDetail { get; set; }
     private readonly BoundedDetailCache _detailCache = new ();
@@ -53,6 +54,7 @@ public sealed class AppState
     public bool DetailLoading => Volatile.Read (ref _detailLoadingOwners) > 0;
     public string StatusMessage { get; set; } = string.Empty;
     public bool StatusIsError { get; set; }
+    public string? ViewError { get; set; }
     internal bool PinDataFresh => _pinSnapshot.IsFresh;
     internal bool HasPinSnapshot => _pinSnapshot.HasSnapshot;
     internal int PinSnapshotCount => _pinSnapshot.Count;

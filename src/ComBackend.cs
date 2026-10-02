@@ -653,8 +653,8 @@ public sealed class ComBackend : IBackend, IInstalledVersionLookup
     // COM server can access-violate in the WinRT progress setter at that point. Releasing the
     // completed operation releases its callback; KeepAlive holds the projection until completion.
 
-    public Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithMutationPackageManagerAsync (ct, (pm, token) => InstallCoreAsync (pm, id, version, settings, progress, token));
+    public Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => InstallCoreAsync (pm, id, version, settings, progress, token, source));
 
     private static async Task<OpResult> InstallCoreAsync (
         PackageManager pm,
@@ -662,10 +662,12 @@ public sealed class ComBackend : IBackend, IInstalledVersionLookup
         string? version,
         InstallSettings? settings,
         IProgress<OpProgress>? progress,
-        CancellationToken ct)
+        CancellationToken ct,
+        string? source)
     {
         Operation op = new () { Kind = OperationKind.Install, PackageId = id, Version = version };
-        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: false, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id,
+            string.IsNullOrWhiteSpace (source) ? null : source, installedContext: false, ct);
 
         if (pkg is null)
         {
@@ -707,20 +709,22 @@ public sealed class ComBackend : IBackend, IInstalledVersionLookup
                    : Fail (op, DescribeInstall ("Install", result));
     }
 
-    public Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct)
-        => WithMutationPackageManagerAsync (ct, (pm, token) => UpgradeCoreAsync (pm, id, progress, token));
+    public Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null)
+        => WithMutationPackageManagerAsync (ct, (pm, token) => UpgradeCoreAsync (pm, id, progress, source, token));
 
     private static async Task<OpResult> UpgradeCoreAsync (
         PackageManager pm,
         string id,
         IProgress<OpProgress>? progress,
+        string? source,
         CancellationToken ct)
     {
         Operation op = new () { Kind = OperationKind.Upgrade, PackageId = id };
 
         // Installed context so the package carries both its installed version and the
         // correlated remote available versions that the upgrade resolves against.
-        CatalogPackage? pkg = await FindByIdAsync (pm, id, null, installedContext: true, ct);
+        CatalogPackage? pkg = await FindByIdAsync (pm, id,
+            string.IsNullOrWhiteSpace (source) ? null : source, installedContext: true, ct);
 
         if (pkg is null)
         {

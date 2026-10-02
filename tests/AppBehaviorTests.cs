@@ -639,12 +639,12 @@ public class AppBehaviorTests
     }
 
     [Theory]
-    [InlineData (AppMode.Upgrades, PinFilter.All, "", "All packages are up to date!")]
+    [InlineData (AppMode.Upgrades, PinFilter.All, "", "No upgrades available. Press r to check again.")]
     [InlineData (AppMode.Upgrades, PinFilter.PinnedOnly, "", "No pinned packages with upgrades found.")]
     [InlineData (AppMode.Upgrades, PinFilter.UnpinnedOnly, "", "No unpinned packages with upgrades found.")]
     [InlineData (AppMode.Installed, PinFilter.PinnedOnly, "", "No pinned packages found.")]
     [InlineData (AppMode.Installed, PinFilter.UnpinnedOnly, "", "No unpinned packages found.")]
-    [InlineData (AppMode.Installed, PinFilter.All, "", "No packages found.")]
+    [InlineData (AppMode.Installed, PinFilter.All, "", "No installed packages found. Press r to refresh.")]
     public void EmptyStateMessage_ReflectsModeAndPinFilter (AppMode mode, PinFilter pin, string filter, string expected)
     {
         AppState state = new (new MockBackend ())
