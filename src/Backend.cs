@@ -30,9 +30,9 @@ public interface IBackend
     // The install/upgrade/uninstall operations optionally report structured progress through
     // `progress`. Backends that can't (CLI) ignore it; the COM backend maps the WinGet COM
     // progress events onto OpProgress; the mock backend synthesizes a download→install ramp.
-    Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct);
+    Task<OpResult> InstallAsync (string id, string? version, InstallSettings? settings, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null);
     Task<OpResult> UninstallAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct);
-    Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct);
+    Task<OpResult> UpgradeAsync (string id, IProgress<OpProgress>? progress, CancellationToken ct, string? source = null);
 
     // Fetch a package's installer to disk without installing it (winget "download"), reusing the
     // same progress reporting as install. Returns the download location in the OpResult message.

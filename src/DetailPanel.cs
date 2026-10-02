@@ -229,6 +229,9 @@ public sealed class DetailPanel : FrameView
                     AddAction ("I", "Install specific version");
                 }
 
+                AddAction ("Spc", "Select for batch");
+                AddAction ("B", "Review selected");
+
                 break;
             case AppMode.Installed:
                 if (!string.IsNullOrEmpty (detail.AvailableVersion))

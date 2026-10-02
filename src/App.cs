@@ -7,7 +7,7 @@ namespace WingetTuiSharp;
 /// Top-level window. Hosts the compact header, search/filter input,
 /// 60/40 split between package list and detail panel, and the status bar at the bottom.
 /// </summary>
-public sealed class App : Window
+public sealed partial class App : Window
 {
     /// <summary>One navigation row and one contextual row before the main content.</summary>
     private const int HeaderHeight = 2;
@@ -62,6 +62,7 @@ public sealed class App : Window
     public App (IBackend backend, TimeSpan? smokeDelay = null)
     {
         _state = new (backend);
+        _lastCheck = _workflowStore.LatestCheck ();
         _smokeDelay = smokeDelay;
         _viewCts = CreateLifetimeLinkedSource ();
         _detailCts = CreateLifetimeLinkedSource ();
@@ -653,6 +654,7 @@ public sealed class App : Window
     // otherwise mask the brief result). Null on a normal refresh, which shows the usual messages.
     private void TriggerRefresh (string? keepMessage = null, bool prominent = false)
     {
+        _state.ViewError = null;
         CancellationTokenSource request = ReplaceLifetimeLinkedSource (ref _viewCts);
         CancellationToken ct = request.Token;
         int gen = _state.BumpViewGeneration ();
@@ -721,6 +723,7 @@ public sealed class App : Window
                                                      await DispatchAsync (() =>
                                                                           {
                                                                               _state.Packages = packages.ToList ();
+                                                                              _state.ViewError = null;
 
                                                                               bool pinsComplete = pins is not null
                                                                                                   && _state.RecordPinSnapshot (pins);
@@ -783,19 +786,20 @@ public sealed class App : Window
                                                  {
                                                      // Superseded view or application shutdown.
                                                  }
-                                                 catch (Exception ex)
-                                                 {
-                                                     string msg = $"Error: {ex.Message}";
-                                                     await DispatchAsync (() =>
-                                                                          {
-                                                                              loading.Dispose ();
-                                                                              SetStatus (msg, isError: true);
-                                                                              if (mainLoading)
-                                                                              {
-                                                                                  ShowMainLoadError (mode);
-                                                                              }
-                                                                              RefreshStatusBar ();
-                                                                          }, ct, () => gen == _state.ViewGeneration);
+                                                  catch (Exception ex)
+                                                  {
+                                                      string msg = $"Error: {ex.Message}";
+                                                      await DispatchAsync (() =>
+                                                                           {
+                                                                               loading.Dispose ();
+                                                                               _state.ViewError = $"Could not load {_state.Mode}: {ex.Message}. Press r to retry.";
+                                                                               _state.Packages = [];
+                                                                               _state.ApplyFilter ();
+                                                                               SetStatus (msg, isError: true);
+                                                                               HideMainLoading ();
+                                                                               RefreshTable ();
+                                                                               RefreshStatusBar ();
+                                                                           }, ct, () => gen == _state.ViewGeneration);
                                                  }
                                                  finally
                                                  {
@@ -899,6 +903,17 @@ public sealed class App : Window
                 ["Source"] = p => p.Source
             };
         }
+        else if (_state.Mode == AppMode.Search)
+        {
+            cols = new ()
+            {
+                [HeaderWithSort ("Name", SortField.Name)] = p =>
+                    (_searchSelected.ContainsKey (BatchPlanning.Key (p)) ? "[x] " : "    ") + p.Name,
+                [HeaderWithSort ("Id", SortField.Id)] = p => FormatIdForDisplay (p.Id),
+                [HeaderWithSort ("Version", SortField.Version)] = p => p.Version,
+                ["Source"] = p => p.Source
+            };
+        }
         else
         {
             cols = new ()
@@ -927,7 +942,7 @@ public sealed class App : Window
     {
         string title = _state.Mode switch
         {
-            AppMode.Search => $" Search ({_state.Filtered.Count}) ",
+            AppMode.Search => $" Search ({_state.Filtered.Count} • {_searchSelected.Count} selected) ",
             AppMode.Upgrades => $" Upgrades ({_state.Filtered.Count} • {_state.BatchSelected.Count} selected) ",
             _ => $" Installed ({_state.Filtered.Count}) "
         };
@@ -1083,22 +1098,23 @@ public sealed class App : Window
     /// </summary>
     internal static string EmptyStateMessage (AppState state)
     {
+        if (!string.IsNullOrEmpty (state.ViewError)) return state.ViewError;
         if (!string.IsNullOrEmpty (state.LocalFilter))
         {
-            return $"No packages match “{state.LocalFilter}”.";
+            return $"No packages match “{state.LocalFilter}”. Clear the filter to see all results.";
         }
 
         return state.Mode switch
         {
             AppMode.Search => string.IsNullOrEmpty (state.SearchQuery)
                                   ? "Type to search for packages."
-                                  : "No packages found.",
+                                  : "No packages found. Try a broader name or package ID.",
             AppMode.Upgrades when state.PinFilter == PinFilter.PinnedOnly => "No pinned packages with upgrades found.",
             AppMode.Upgrades when state.PinFilter == PinFilter.UnpinnedOnly => "No unpinned packages with upgrades found.",
-            AppMode.Upgrades => "All packages are up to date!",
+            AppMode.Upgrades => "No upgrades available. Press r to check again.",
             AppMode.Installed when state.PinFilter == PinFilter.PinnedOnly => "No pinned packages found.",
             AppMode.Installed when state.PinFilter == PinFilter.UnpinnedOnly => "No unpinned packages found.",
-            _ => "No packages found."
+            _ => "No installed packages found. Press r to refresh."
         };
     }
 
@@ -1170,7 +1186,7 @@ public sealed class App : Window
         _contextLabel.Text = _state.Mode switch
         {
             AppMode.Search => "Search packages",
-            AppMode.Upgrades => "Available upgrades",
+            AppMode.Upgrades => CheckContextLabel (),
             _ => "Installed packages"
         };
     }
@@ -1218,6 +1234,8 @@ public sealed class App : Window
         _statusBar.Message = _state.StatusMessage;
         _statusBar.IsError = _state.StatusIsError;
         _statusBar.IsLoading = _state.Loading || _state.DetailLoading;
+        _statusBar.InstallSelectionCount = _searchSelected.Count;
+        _statusBar.UpgradeSelectionCount = _state.BatchSelected.Count;
         _statusBar.Op = _state.OpProgress;
         _statusBar.SetNeedsDraw ();
         _detailPanel.Mode = _state.Mode;
@@ -1771,12 +1789,18 @@ public sealed class App : Window
                         ToggleBatchSelect (CurrentPackage ());
                         key.Handled = true;
                     }
+                    else if (_state.Mode == AppMode.Search)
+                    {
+                        ToggleSearchSelection (CurrentPackage ());
+                        key.Handled = true;
+                    }
 
                     return;
                 case 'a':
-                    if (_state.Mode == AppMode.Upgrades)
+                    if (_state.Mode is AppMode.Upgrades or AppMode.Search)
                     {
-                        ToggleSelectAll ();
+                        if (_state.Mode == AppMode.Search) ToggleSearchSelectVisible ();
+                        else ToggleSelectAll ();
                         key.Handled = true;
                     }
 
@@ -1788,6 +1812,31 @@ public sealed class App : Window
                         key.Handled = true;
                     }
 
+                    return;
+                case 'B':
+                    if (_state.Mode == AppMode.Search)
+                    {
+                        AskBatchInstall ();
+                        key.Handled = true;
+                    }
+                    return;
+                case 'g':
+                    if (_state.Mode == AppMode.Search)
+                    {
+                        ManagePackageSets ();
+                        key.Handled = true;
+                    }
+                    return;
+                case 'C':
+                    if (_state.Mode == AppMode.Upgrades)
+                    {
+                        ManageScheduledChecks ();
+                        key.Handled = true;
+                    }
+                    return;
+                case 'L':
+                    ShowRunHistory ();
+                    key.Handled = true;
                     return;
             }
         }
@@ -1967,7 +2016,7 @@ public sealed class App : Window
                         RunOperation (
                             reservation,
                             activity,
-                            (prog, ct) => _state.Backend.InstallAsync (p.Id, version, settings, prog, ct));
+                            (prog, ct) => _state.Backend.InstallAsync (p.Id, version, settings, prog, ct, p.Source));
 
                         return true;
                     });
@@ -2436,7 +2485,7 @@ public sealed class App : Window
                 RunOperation (
                     reservation,
                     $"Upgrading {p.Name}",
-                    (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct));
+                    (prog, ct) => _state.Backend.UpgradeAsync (query, prog, ct, p.Source));
 
                 return true;
             });
@@ -2528,6 +2577,7 @@ public sealed class App : Window
 
         UpdateListTitle ();
         _packageTable.SetNeedsDraw ();
+        RefreshStatusBar ();
     }
 
     private void ToggleSelectAll ()
@@ -2546,6 +2596,7 @@ public sealed class App : Window
 
         UpdateListTitle ();
         _packageTable.SetNeedsDraw ();
+        RefreshStatusBar ();
     }
 
     private void AskBatchUpgrade ()
@@ -2562,7 +2613,11 @@ public sealed class App : Window
 
         using (OperationReservation activeReservation = reservation!)
         {
-            if (!Confirm ("Batch Upgrade", $"Upgrade {_state.BatchSelected.Count} selected packages?"))
+            BatchPlan plan = BatchPlanning.ForUpgrades (
+                _state.Packages.Where (p => _state.BatchSelected.Contains (p.Id)), _state.PinDataFresh);
+            using BatchPlanDialog review = new (plan);
+            App.Run (review);
+            if (review.Result != true)
             {
                 return;
             }
@@ -2572,136 +2627,7 @@ public sealed class App : Window
                 return;
             }
 
-            StartBatchUpgrade (admission);
-        }
-    }
-
-    private void StartBatchUpgrade (ForegroundAdmission admission)
-    {
-        if (!_statusOwnership.BeginOperation (admission.Id))
-        {
-            _foreground.Release (admission);
-
-            return;
-        }
-
-        CancellationTokenSource request = CreateLifetimeLinkedSource ();
-
-        if (!TryOwnOperationRequest (request))
-        {
-            request.Dispose ();
-            _statusOwnership.AbortOperation (admission.Id);
-            _foreground.Release (admission);
-
-            return;
-        }
-
-        CancellationToken ct = request.Token;
-        string [] ids = [.. _state.BatchSelected];
-        IDisposable loading = _state.AcquireLoading ();
-        RefreshStatusBar ();
-
-        bool admitted = _background.TryRun (async lifetimeToken =>
-                                             {
-                                                 try
-                                                 {
-                                                     bool cancelled = false;
-
-                                                 foreach (string id in ids)
-                                                 {
-                                                     if (ct.IsCancellationRequested)
-                                                     {
-                                                         cancelled = true;
-
-                                                         break;
-                                                     }
-
-                                                     await DispatchAsync (() =>
-                                                                          {
-                                                                              SetStatus (
-                                                                                  $"Upgrading {id}… · Esc to cancel",
-                                                                                  owner: StatusOwner.Operation);
-                                                                              RefreshStatusBar ();
-                                                                          }, ct, () => OperationRequestIsCurrent (request));
-
-                                                     OpResult result;
-
-                                                     try
-                                                     {
-                                                         // Per-item progress would fight the batch loop's own status line; the
-                                                         // loop reports "Upgrading {id}…" per package instead.
-                                                         result = await _state.Backend.UpgradeAsync (id, null, ct);
-                                                     }
-                                                     catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                                                     {
-                                                         cancelled = true;
-
-                                                         break;
-                                                     }
-                                                     catch (Exception ex)
-                                                     {
-                                                         result = new ()
-                                                         {
-                                                             Operation = new () { Kind = OperationKind.Upgrade, PackageId = id },
-                                                             Success = false,
-                                                             Message = ex.Message
-                                                         };
-                                                     }
-
-                                                     await DispatchAsync (() =>
-                                                                          {
-                                                                              if (result.Success)
-                                                                              {
-                                                                                  _state.InvalidateCachedDetail (id);
-                                                                              }
-
-                                                                              SetStatus (
-                                                                                  result.Success ? $"Upgraded {id}" : $"Failed: {id}",
-                                                                                  !result.Success,
-                                                                                  StatusOwner.Operation);
-                                                                              RefreshStatusBar ();
-                                                                          }, ct, () => OperationRequestIsCurrent (request));
-                                                 }
-
-                                                     await DispatchAsync (() =>
-                                                                      {
-                                                                          loading.Dispose ();
-                                                                          _state.BatchSelected.Clear ();
-                                                                          string outcome = cancelled ? "Cancelled" : _state.StatusMessage;
-                                                                          bool outcomeIsError = !cancelled && _state.StatusIsError;
-                                                                          CompleteOperationStatus (admission, outcome, outcomeIsError);
-                                                                          _foreground.Release (admission);
-                                                                          ReleaseOperationRequest (request);
-
-                                                                          TriggerRefresh (_state.StatusMessage);
-                                                                          }, lifetimeToken, () => OperationRequestIsCurrent (request));
-                                                 }
-                                                 finally
-                                                 {
-                                                     loading.Dispose ();
-
-                                                     ReleaseOperationRequest (request);
-
-                                                     _statusOwnership.AbortOperation (admission.Id);
-                                                     _foreground.Release (admission);
-
-                                                     CancelSource (request);
-                                                     request.Dispose ();
-                                                 }
-                                             });
-
-        if (!admitted)
-        {
-            loading.Dispose ();
-            ReleaseOperationRequest (request);
-            CompleteOperationStatus (
-                admission,
-                "Too many background requests are still pending; wait and try again",
-                isError: true);
-            _foreground.Release (admission);
-            CancelSource (request);
-            request.Dispose ();
-            RefreshStatusBar ();
+            StartBatchPlan (admission, plan);
         }
     }
 
@@ -2734,6 +2660,7 @@ public sealed class App : Window
         }
 
         CancellationToken ct = request.Token;
+        DateTimeOffset startedAt = DateTimeOffset.UtcNow;
 
         SetStatus ($"{activity} · Esc to cancel", owner: StatusOwner.Operation);
         IDisposable loading = _state.AcquireLoading ();
@@ -2794,6 +2721,21 @@ public sealed class App : Window
                                                                               {
                                                                                   _state.InvalidateCachedDetail (id);
                                                                               }
+                                                                          }
+
+                                                                          try
+                                                                          {
+                                                                              string packageId = result?.Operation.PackageId ?? string.Empty;
+                                                                              RunItem item = new (packageId, activity, string.Empty,
+                                                                                  cancelled ? "Skipped" : result!.Success ? "Succeeded" : "Failed",
+                                                                                  cancelled ? "Cancelled." : LimitReason (result!.Message));
+                                                                              _workflowStore.SaveRun (new (startedAt, DateTimeOffset.UtcNow,
+                                                                                  result?.Operation.Kind.ToString () ?? activity, [item]));
+                                                                          }
+                                                                          catch (Exception ex)
+                                                                          {
+                                                                              outcome = $"{outcome} · history save failed: {ex.Message}";
+                                                                              outcomeIsError = true;
                                                                           }
 
                                                                           CompleteOperationStatus (admission, outcome, outcomeIsError);

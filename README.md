@@ -70,6 +70,9 @@ This port is also MIT-licensed; see [LICENSE](LICENSE).
 | Live determinate progress bar + cooperative `Esc` cancel                    | ✅ (COM `IProgress` marshaling; CLI watches winget output)                            |
 | Pin states distinguished: Pinned / Blocking / Gating(version)             | ✅                                                                                    |
 | Batch-select (Space / `a`) and batch upgrade (`U`)                        | ✅                                                                                    |
+| Search selection (`Space` / `a`), source-aware install review (`B`)        | ✅ (skips installed or unresolved entries before any changes)                         |
+| Saved package sets (`g`) and recent run results (`L`)                      | ✅ (local files; each run shows success, skip, and failure counts)                    |
+| Optional daily update checks (`C` in Upgrades)                             | ✅ (current-user Task Scheduler task; notifications on changes or failure)            |
 | Confirm dialog, version-picker / version-input dialog, help overlay        | ✅                                                                                    |
 | CSV export (`e`)                                                          | ✅                                                                                    |
 | Open homepage (`o`) / changelog (`c`)                                     | ✅                                                                                    |
@@ -84,6 +87,18 @@ This port is also MIT-licensed; see [LICENSE](LICENSE).
 | Switchable theme: Sage (default), Amber (exact upstream `theme.rs` match), Moss & Olive, Dusty Rose | ✅ (`t` in-app picker or `--theme=`)                          |
 | Mock backend for non-Windows hosts                                        | ✅                                                                                    |
 | Native AOT standalone exe, no .NET runtime needed                         | ✅                                                                                    |
+
+### Install plans, saved sets, and results
+
+In Search, press `Space` to select one result or `a` to select the visible results. The selection count stays visible as you search. Press `B` to review an install plan: it checks the installed inventory and configured sources, then marks packages that cannot be installed. Only ready packages run after you confirm. Press `g` to save, load, or delete a named package set. Loading a set restores the selection; review it with `B` before installing. In Upgrades, the existing `Space` / `a` selection now gets a review plan before `U` upgrades the ready packages.
+
+Press `L` to see the 20 most recent operation runs. A run lists each package as succeeded, skipped, or failed, with a short reason. Package sets and run history are stored under `%LOCALAPPDATA%\WinGetTuiSharp`.
+
+### Scheduled update checks
+
+From Upgrades, press `C` to open the check settings. Choose **Check now** for a manual inventory check, or set a daily local time and enable checks. Enabling registers a current-user Windows Task Scheduler task that runs the published executable with `--check-updates`. Keep that executable and its companion files at the same path. Checks only inspect upgrades and pins; they never install or upgrade packages. The first successful check establishes a baseline. Later checks can notify when an unpinned upgrade appears or its available version changes, or when a check fails. Notifications are optional and may depend on Windows notification settings.
+
+The Upgrades header shows the last check time or failure. The latest result, last successful baseline, and schedule settings are stored under `%LOCALAPPDATA%\WinGetTuiSharp`. Disabling checks removes the scheduled task. Run the app from a published executable to enable a schedule; `dotnet run` supports **Check now** but cannot provide a stable executable path for Task Scheduler.
 
 ## Building
 
