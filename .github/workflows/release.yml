@@ -210,7 +210,7 @@ jobs:
           cat > release-notes.md <<EOF
           # Scout for WinGet
 
-          > ⚠️ **Proof of concept** Install / uninstall / upgrade / repair actions operate on your real package state. See [README](https://github.com/${{ github.repository }}#readme) before running on real systems.
+          Scout for WinGet manages real Windows packages. Install, upgrade, uninstall, and repair actions change your package state. See the [README](https://github.com/${{ github.repository }}#readme) for setup and usage.
 
           ## Downloads
 
@@ -235,7 +235,7 @@ jobs:
           # Compare against SHA256SUMS-win-x64.txt
           \`\`\`
 
-          The portable downloads aren't code-signed (POC) — on first run click SmartScreen's "More info" → "Run anyway", or \`Unblock-File\` the exe.
+          The portable downloads may be unsigned. Verify the release and its SHA-256 checksum before approving a SmartScreen prompt or unblocking a downloaded file.
           EOF
 
       - name: Publish release
