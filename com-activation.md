@@ -1,6 +1,6 @@
 # COM activation under Native AOT
 
-How `winget-tui-sharp` reaches the WinGet COM API, why it's harder than it looks, and the options
+How `wingetscout` reaches the WinGet COM API, why it's harder than it looks, and the options
 for distributing it. This is the architectural companion to [code-signing.md](code-signing.md)
 (which covers the signing/packaging mechanics referenced below).
 

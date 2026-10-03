@@ -1,14 +1,14 @@
 $ErrorActionPreference = 'Stop'
 
-$appId = 'harder.winget-tui-sharp'
-$exe = $env:WTS_NOTIFICATION_EXE
+$appId = 'harder.wingetscout'
+$exe = $env:WGS_NOTIFICATION_EXE
 if (-not $exe -or -not [IO.File]::Exists($exe)) {
     throw 'The notification executable is missing.'
 }
 
-$shortcutPath = $env:WTS_NOTIFICATION_SHORTCUT
+$shortcutPath = $env:WGS_NOTIFICATION_SHORTCUT
 if (-not $shortcutPath) {
-    $shortcutPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Windows\Start Menu\Programs\WinGet TUI.lnk'
+    $shortcutPath = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Windows\Start Menu\Programs\WinGet Scout.lnk'
 }
 
 Add-Type -TypeDefinition @'
@@ -92,13 +92,13 @@ $shortcut.WorkingDirectory = Split-Path -Parent $exe
 $shortcut.Save()
 [NotificationShortcutProperty]::SetAppId($shortcutPath, $appId)
 
-$message = $env:WTS_NOTIFICATION_MESSAGE
+$message = $env:WGS_NOTIFICATION_MESSAGE
 if (-not $message) { return }
 
 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom, ContentType = WindowsRuntime] | Out-Null
 $message = [Security.SecurityElement]::Escape($message)
 $xml = [Windows.Data.Xml.Dom.XmlDocument]::new()
-$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>WinGet TUI</text><text>$message</text></binding></visual></toast>")
+$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>WinGet Scout</text><text>$message</text></binding></visual></toast>")
 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast)

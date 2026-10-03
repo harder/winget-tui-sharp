@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// Thread-safe LRU for manifest details. Entries are copied on ingress and egress so callers

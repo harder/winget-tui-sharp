@@ -1,11 +1,11 @@
-# Terminal.Gui Feature Gaps vs. shanselman/winget-tui (Rust + Ratatui)
+# Terminal.Gui Feature Gaps in WinGet Scout
 
 This document tracks the API and behavior gaps in **Terminal.Gui v2** that came up while
-building this winget-tui port. Each entry is the kind of thing that should drive a
+building WinGet Scout. Each entry is the kind of thing that should drive a
 Terminal.Gui issue, PR, or wishlist discussion — not a complaint about Terminal.Gui being
 incomplete. Where this port works around a gap, the workaround is noted.
 
-The list is reviewed against **Terminal.Gui 2.5.1-develop.44** (the version in `WingetTuiSharp.csproj`).
+The list is reviewed against **Terminal.Gui 2.5.1-develop.44** (the version in `WinGetScout.csproj`).
 If Terminal.Gui upgrades close any of these, please send a PR removing the entry — and
 ideally adding a test in `tests/ParserTests.cs § Terminal.Gui compatibility` that would
 have caught a regression.
@@ -13,7 +13,7 @@ have caught a regression.
 ## A. TableView gaps
 
 ### A1. Per-cell foreground color in standard table source
-Ratatui's `Cell::new(...).style(...)` lets the upstream app color the selection marker, pin
+Ratatui's `Cell::new(...).style(...)` lets the design color the selection marker, pin
 emoji, source ("winget" in blue vs "msstore" in amber), and version cells independently.
 Terminal.Gui's `TableView` exposes `CellColorGetter`/`RowColorGetter` only via
 `ColumnStyle`, and they return a whole `Scheme`, not a per-grapheme attribute. Inline
@@ -29,7 +29,7 @@ inline styling within the Name column isn't done.
 > hosts can paint partial-cell styles without subclassing TableView.
 
 ### A2. No built-in column sort indicator
-Upstream renders `↑` / `↓` next to the sorted column header by reconstructing the header
+The design renders `↑` / `↓` next to the sorted column header by reconstructing the header
 string. Terminal.Gui has no first-class "sort by column" concept on `TableView`. A
 `ColumnStyle.SortIndicator` with click-to-sort is the natural fix.
 
@@ -44,7 +44,7 @@ Ratatui dispatches header-region clicks to cycle the sort column. Terminal.Gui's
 **Status:** click-to-sort is not implemented in this port. Sort is keyboard-only (`S`).
 
 ### A4. Multi-select markers (checkbox column)
-Upstream renders `[x]` / `[ ]` prefixes in the Name column for batch selection. Terminal.Gui
+The design renders `[x]` / `[ ]` prefixes in the Name column for batch selection. Terminal.Gui
 has `CheckBoxTableSourceWrapper`, but it commandeers an entire leading column and re-flows
 selection semantics. A "multi-select set" overlaid on existing rows (without taking
 column 0) would be more useful.
@@ -60,7 +60,7 @@ which can desync from manually computed widths if you split cells yourself.
 
 ### A6. `ColumnStyle.RepresentationGetter` lacks row context
 The lambda receives only the cell value (`Func<object, string>`). To prefix the cursor row
-with a `●` marker (like upstream does for accessibility / color-blind users), we had to
+with a `●` marker (for accessibility and color-blind users), we had to
 write `MarkedTableSource` (nested in `App.cs`) that injects a column-0 marker and tracks
 the cursor row externally via `ValueChanged`. A `Func<CellRepresentationArgs, string>`
 overload exposing `RowIndex`, `ColumnIndex`, and `IsCursorRow` would have made this a
@@ -86,7 +86,7 @@ layout — the right tradeoff for this app.
 `Terminal.Gui.Views.Tabs` is **focus-driven** — the focused subview is the active tab.
 That clashes with Ratatui-style tabs where the active tab is a logical state independent
 of focus (you want focus to stay on the package list while the active tab is "Installed").
-We had to hand-roll a `TabBar` widget (in `Ui.cs`) for winget-tui-style behavior.
+We had to hand-roll a `TabBar` widget (in `Ui.cs`) for compact tab behavior.
 
 > Suggested: a `TabSelector` (or `Tabs.Mode = Active|Focused`) for headless tabs that
 > drive a *content swap* in another view rather than swapping focus.
@@ -102,7 +102,7 @@ inner content (TableView, DetailPanel) sets its own `SchemeName` separately so t
 swap doesn't repaint the body. Works but is more code than it should be.
 
 ### B3. No semantic "FrameView with title-aligned right text"
-Upstream's panel title is `" Installed (42) • 📌 only "` with the count right-aligned.
+The panel title is `" Installed (42) • 📌 only "` with the count right-aligned.
 The `FrameView.Title` API is a single string with `TitleAlignment` — no inline split for
 left-and-right segments.
 
@@ -218,7 +218,7 @@ Counterweight to all the above — these came as pleasant surprises:
 - **`HasFocusChanged` event.** Used for the focus-driven border weight swap. Clean
   callback model, no polling.
 
-## G. Items resolved by recent Terminal.Gui versions or upstream parity work
+## G. Items resolved by recent Terminal.Gui versions or app improvements
 
 These gaps were on this list at some point during development but are now closed —
 preserved here as a changelog so anyone bumping Terminal.Gui versions can sanity-check

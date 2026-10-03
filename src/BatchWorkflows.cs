@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public sealed record BatchPlanItem (Package Package, bool CanRun, string Reason);
 

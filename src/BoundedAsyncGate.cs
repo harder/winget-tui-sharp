@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// A single-owner asynchronous gate with a hard limit on queued callers. The queue reservation

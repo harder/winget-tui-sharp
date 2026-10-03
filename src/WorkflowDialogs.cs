@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public sealed class BatchPlanDialog : Runnable<bool>
 {

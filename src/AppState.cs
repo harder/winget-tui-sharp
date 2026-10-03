@@ -1,7 +1,7 @@
 
 using System.Text;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
 /// In-memory state for the running app.

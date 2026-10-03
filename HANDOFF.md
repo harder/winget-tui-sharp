@@ -27,7 +27,7 @@ activation shim (`winrtact.dll` / `WinGetServerManualActivation_CreateInstance`)
 [#4839](https://github.com/microsoft/winget-cli/issues/4839)); AOT has no CsWinRT runtime fallback to
 reach a registered OOP server (JIT does, which is why a JIT build activates fine but AOT doesn't without
 the fix). The fix — bundling `Microsoft.WindowsPackageManager.InProcCom` + a reg-free `app.manifest`
-routing activation to it — is already in `WingetTuiSharp.csproj`; see `WINDOWS-TESTING.md`'s P0 section
+routing activation to it — is already in `WinGetScout.csproj`; see `WINDOWS-TESTING.md`'s P0 section
 for the full mechanism if this ever needs revisiting.
 
 **Approaches that did NOT work for the AOT-activation problem (don't retry):** the CsWinRT AOT optimizer

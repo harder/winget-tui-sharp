@@ -3,11 +3,11 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 
-namespace WingetTuiSharp.Tests;
+namespace WinGetScout.Tests;
 
 public sealed class ProcessRunnerTests : IDisposable
 {
-    private readonly string _tempDirectory = Path.Combine (Path.GetTempPath (), $"winget-tui-process-tests-{Guid.NewGuid ():N}");
+    private readonly string _tempDirectory = Path.Combine (Path.GetTempPath (), $"wingetscout-process-tests-{Guid.NewGuid ():N}");
     private readonly Dictionary<int, TrackedProcess> _childProcesses = [];
 
     public ProcessRunnerTests () => Directory.CreateDirectory (_tempDirectory);

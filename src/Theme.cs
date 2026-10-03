@@ -1,9 +1,8 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>
-/// Switchable color palettes and the registered <see cref="Scheme"/>s for the app. The default (Sage) and
-/// the "Amber" alternative mirror the constants and shapes in shanselman/winget-tui's
-/// src/theme.rs; Amber is the exact upstream-matching palette.
+/// Switchable color palettes and registered <see cref="Scheme"/>s for the app.
+/// Sage is the default; Amber, Moss, Olive, and Dusty Rose are alternatives.
 /// </summary>
 public static class Theme
 {
@@ -111,18 +110,18 @@ public static class Theme
         return false;
     }
 
-    public const string AppSchemeName = "WingetTuiSharp.App";
-    public const string SurfaceSchemeName = "WingetTuiSharp.Surface";
-    public const string FrameFocusedSchemeName = "WingetTuiSharp.FrameFocused";
-    public const string FrameUnfocusedSchemeName = "WingetTuiSharp.FrameUnfocused";
-    public const string NavbarActiveSchemeName = "WingetTuiSharp.NavbarActive";
-    public const string NavbarInactiveSchemeName = "WingetTuiSharp.NavbarInactive";
-    public const string StatusSchemeName = "WingetTuiSharp.Status";
-    public const string AccentSchemeName = "WingetTuiSharp.Accent";
-    public const string AccentDimSchemeName = "WingetTuiSharp.AccentDim";
-    public const string InfoSchemeName = "WingetTuiSharp.Info";
-    public const string DangerSchemeName = "WingetTuiSharp.Danger";
-    public const string SuccessSchemeName = "WingetTuiSharp.Success";
+    public const string AppSchemeName = "WinGetScout.App";
+    public const string SurfaceSchemeName = "WinGetScout.Surface";
+    public const string FrameFocusedSchemeName = "WinGetScout.FrameFocused";
+    public const string FrameUnfocusedSchemeName = "WinGetScout.FrameUnfocused";
+    public const string NavbarActiveSchemeName = "WinGetScout.NavbarActive";
+    public const string NavbarInactiveSchemeName = "WinGetScout.NavbarInactive";
+    public const string StatusSchemeName = "WinGetScout.Status";
+    public const string AccentSchemeName = "WinGetScout.Accent";
+    public const string AccentDimSchemeName = "WinGetScout.AccentDim";
+    public const string InfoSchemeName = "WinGetScout.Info";
+    public const string DangerSchemeName = "WinGetScout.Danger";
+    public const string SuccessSchemeName = "WinGetScout.Success";
 
     public static void Register ()
     {

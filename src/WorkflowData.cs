@@ -2,7 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public sealed record PackageChoice (string Id, string Name, string Source);
 public sealed record PackageSet (string Name, List<PackageChoice> Packages);
@@ -82,10 +82,15 @@ public sealed record UpdateCheckSnapshot (
 internal partial class WorkflowJsonContext : JsonSerializerContext;
 
 /// <summary>Small local state files; writes replace complete JSON documents atomically.</summary>
-public sealed class WorkflowStore (string? root = null)
+public sealed class WorkflowStore
 {
-    public string Root { get; } = root ?? Path.Combine (
-        Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetTuiSharp");
+    public string Root { get; }
+
+    public WorkflowStore (string? root = null)
+    {
+        Root = root ?? Path.Combine (
+            Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetScout");
+    }
 
     private string PathFor (string file) => Path.Combine (Root, file);
 

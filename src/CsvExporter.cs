@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 internal static class CsvExporter
 {

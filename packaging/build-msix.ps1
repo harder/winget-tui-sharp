@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Build (and optionally sign / test) the download-B MSIX: a Native-AOT, package-identity build of
-  winget-tui-sharp that reaches the in-box out-of-process WinGet COM server. See ../com-activation.md.
+  wingetscout that reaches the in-box out-of-process WinGet COM server. See ../com-activation.md.
 
 .DESCRIPTION
   Steps: publish the WingetComMode=Identity AOT build -> stage the package layout (exe + 61 KB winmd
@@ -22,7 +22,7 @@
 param(
   [ValidateSet('x64', 'arm64')] [string]$Arch = 'arm64',
   [string]$Version = '0.1.3.0',
-  [string]$Publisher = 'CN=winget-tui-sharp (Dev)',
+  [string]$Publisher = 'CN=wingetscout (Dev)',
   [string]$CertPath,
   [string]$CertPassword = 'spike',
   [switch]$SelfSigned,
@@ -44,13 +44,13 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 # --- 1. Publish the Identity AOT build -------------------------------------------------------------
 if (-not $SkipPublish) {
   Write-Host "==> Publishing WingetComMode=Identity AOT ($Arch)..."
-  dotnet publish (Join-Path $repo 'WingetTuiSharp.csproj') `
+  dotnet publish (Join-Path $repo 'WinGetScout.csproj') `
     -c Release -f net10.0-windows10.0.26100.0 -r "win-$Arch" `
     -p:WingetComMode=Identity -p:Version=$Version -o $stage
   if ($LASTEXITCODE -ne 0) { throw 'dotnet publish failed (AOT publish on ARM64 needs a VS Dev Shell).' }
 }
 Remove-Item (Join-Path $stage '*.pdb') -Force -ErrorAction SilentlyContinue
-if (-not (Test-Path (Join-Path $stage 'winget-tui-sharp.exe'))) { throw "exe missing from stage; pass without -SkipPublish." }
+if (-not (Test-Path (Join-Path $stage 'wingetscout.exe'))) { throw "exe missing from stage; pass without -SkipPublish." }
 if (-not (Test-Path (Join-Path $stage 'Microsoft.Management.Deployment.winmd'))) {
   throw "winmd missing from stage — the Identity build must copy it (needed for AOT activation)."
 }
@@ -98,7 +98,7 @@ function Find-SdkTool([string]$name) {
   }
   throw "$name not found — install the Windows 10/11 SDK."
 }
-$msix = Join-Path $OutDir "winget-tui-sharp-$Version-$Arch.msix"
+$msix = Join-Path $OutDir "wingetscout-$Version-$Arch.msix"
 $makeappx = Find-SdkTool 'makeappx.exe'
 Write-Host "==> Packing $msix"
 & $makeappx pack /o /d $stage /p $msix
@@ -108,7 +108,7 @@ if ($LASTEXITCODE -ne 0) { throw 'makeappx pack failed.' }
 if ($SelfSigned -and -not $CertPath) {
   Write-Host "==> Creating a self-signed cert ($Publisher)..."
   $cert = New-SelfSignedCertificate -Type Custom -Subject $Publisher -KeyUsage DigitalSignature `
-    -FriendlyName 'winget-tui-sharp dev signing' -CertStoreLocation 'Cert:\CurrentUser\My' `
+    -FriendlyName 'wingetscout dev signing' -CertStoreLocation 'Cert:\CurrentUser\My' `
     -TextExtension @('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}')
   $CertPath = Join-Path $OutDir 'wts-dev.pfx'
   Export-PfxCertificate -Cert $cert -FilePath $CertPath `
@@ -128,12 +128,12 @@ Write-Host "DONE: $msix"
 if ($TestRegister) {
   Write-Host "==> Test: loose-registering the layout and running --comdiag with identity..."
   Add-AppxPackage -Register (Join-Path $stage 'AppxManifest.xml')
-  $pkg = Get-AppxPackage -Name winget-tui-sharp | Select-Object -First 1
+  $pkg = Get-AppxPackage -Name wingetscout | Select-Object -First 1
   $out = Join-Path $OutDir 'comdiag-identity.txt'
   Remove-Item $out -ErrorAction SilentlyContinue
-  $exe = Join-Path $stage 'winget-tui-sharp.exe'
+  $exe = Join-Path $stage 'wingetscout.exe'
   $inner = "/c `"`"$exe`" --comdiag > `"$out`" 2>&1`""
-  Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId 'wingettuisharp' `
+  Invoke-CommandInDesktopPackage -PackageFamilyName $pkg.PackageFamilyName -AppId 'wingetscout' `
     -Command "$env:ComSpec" -Args $inner -PreventBreakaway
   Start-Sleep -Seconds 5
   if (Test-Path $out) { Write-Host "--- comdiag (with identity) ---"; Get-Content $out }

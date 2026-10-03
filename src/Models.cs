@@ -1,4 +1,4 @@
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 public enum AppMode
 {
@@ -144,7 +144,6 @@ public sealed class PackageDetail
     /// <summary>
     /// Merge in fields known from the originating <see cref="Package"/> list row that
     /// `winget show` doesn't always emit: Source, Version (installed), AvailableVersion.
-    /// Mirrors upstream src/cli_backend.rs's `merge_over` behavior.
     /// </summary>
     public void MergeContext (Package context)
     {
@@ -195,7 +194,6 @@ public sealed class PackageDetail
     /// When the manifest-derived fields are all empty (no Publisher, Description, Homepage,
     /// License), synthesize a one-line note in <see cref="Description"/> explaining that
     /// detail isn't available — so the panel doesn't render a row of empty values.
-    /// Mirrors upstream src/app.rs::ensure_detail_hint.
     /// </summary>
     public void EnsureDetailHint ()
     {

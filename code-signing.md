@@ -1,6 +1,6 @@
 # Code signing the Windows executables
 
-> **Status: recommended next step.** winget-tui-sharp is now used as a daily winget TUI, so
+> **Status: recommended next step.** wingetscout is now used as a daily winget TUI, so
 > the SmartScreen friction below hits real users on every fresh download — this is worth
 > acting on, not just researching. This doc captures the options investigated, what they
 > cost, what they buy you, and the recommended path: apply for **SignPath.io**'s OSS
@@ -10,7 +10,7 @@
 
 ## What the problem actually is
 
-When a Windows user downloads `winget-tui-sharp.exe`:
+When a Windows user downloads `wingetscout.exe`:
 
 1. **Mark-of-the-Web (MOTW)** — the browser tags the file as "from the internet." On first run, Windows blocks it with a SmartScreen prompt: *"Windows protected your PC."* The user has to click *More info → Run anyway*. This is the prompt we want to eliminate.
 
@@ -22,7 +22,7 @@ Code signing addresses (1) immediately for **EV** certs, eventually for **OV** c
 
 ## The five options
 
-### 1. Azure Trusted Signing — *what upstream `shanselman/winget-tui` uses*
+### 1. Azure Trusted Signing
 
 Microsoft's managed cloud signing service. No hardware tokens, no certificate management — you authenticate via Entra ID, the cert lives in Azure, the build agent calls a signing endpoint. **Renamed "Azure Artifact Signing" in 2026** (same service, same pricing).
 
@@ -34,9 +34,8 @@ Microsoft's managed cloud signing service. No hardware tokens, no certificate ma
 | **Setup** | Subscription identity validation, then turnaround is fast |
 | **CI integration** | First-class [`azure/trusted-signing-action`](https://github.com/Azure/trusted-signing-action) GitHub Action |
 | **Eligibility (updated 2026)** | The old 3-year-org-history requirement was **dropped at GA**. Now open to **organizations** (US/Canada/EU/UK) and **individual self-employed developers** (US/Canada). Requires a **paid** Azure subscription — **no free/trial/sponsored subscriptions**. Verification documents must be <12 months old. |
-| **What upstream does** | The Rust `shanselman/winget-tui` uses this; see `.github/workflows/build.yml` in upstream — they sign all release exes |
 
-**Recommendation: best fit if you want to match upstream's signing story exactly and don't mind a small recurring cost.**
+**Recommendation: best fit for signed releases if a small recurring cost is acceptable.**
 
 ### 2. SignPath.io — *free for verified OSS projects*
 
@@ -124,7 +123,7 @@ Key facts:
 PowerShell:
 
 ```powershell
-Unblock-File -Path .\winget-tui-sharp.exe
+Unblock-File -Path .\wingetscout.exe
 ```
 
 Or right-click the exe → *Properties* → *Unblock* checkbox → *OK*. After unblocking, SmartScreen will still warn on the very first run; click *More info → Run anyway* once and it remembers.
@@ -163,4 +162,3 @@ The four `AZURE_*` secrets come from the Entra ID app registration you create du
 - [SignPath.io for Open Source](https://about.signpath.io/products/open-source)
 - Vincent Cui, [AzureSignTool](https://github.com/vcsjones/AzureSignTool) — EV signing via Azure Key Vault
 - [GitHub Attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations) — build provenance, complementary to signing
-- Upstream reference: [`shanselman/winget-tui/.github/workflows/build.yml`](https://github.com/shanselman/winget-tui/blob/main/.github/workflows/build.yml)

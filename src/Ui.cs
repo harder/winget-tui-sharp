@@ -1,6 +1,6 @@
 // Widget views and modal dialogs
 
-namespace WingetTuiSharp;
+namespace WinGetScout;
 
 /// <summary>Clear resize guidance instead of overlapping two-pane content in a small terminal.</summary>
 public sealed class TerminalSizeGuardView : FrameView
