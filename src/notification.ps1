@@ -92,16 +92,6 @@ $shortcut.WorkingDirectory = Split-Path -Parent $exe
 $shortcut.Save()
 [NotificationShortcutProperty]::SetAppId($shortcutPath, $appId)
 
-if (-not $env:WGS_NOTIFICATION_SHORTCUT) {
-    $previousShortcut = Join-Path ([Environment]::GetFolderPath('ApplicationData')) 'Microsoft\Windows\Start Menu\Programs\WinGet TUI.lnk'
-    if ([IO.File]::Exists($previousShortcut)) {
-        $previousTarget = $shell.CreateShortcut($previousShortcut).TargetPath
-        if ([IO.Path]::GetFileName($previousTarget) -match '^winget-tui-sharp(?:-(?:x64|arm64))?\.exe$') {
-            Remove-Item -LiteralPath $previousShortcut -Force
-        }
-    }
-}
-
 $message = $env:WGS_NOTIFICATION_MESSAGE
 if (-not $message) { return }
 

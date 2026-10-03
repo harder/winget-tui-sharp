@@ -188,22 +188,6 @@ if (args.Length > 0 && args [0] is "--comdiag")
 bool smokeMode = args.Any (a => a == "--smoke");
 IBackend backend = SelectBackend (args);
 
-if (!smokeMode && UpdateTaskScheduler.ExecutablePath () is { } publishedPath)
-{
-    try
-    {
-        UpdateCheckSettings schedule = new WorkflowStore ().Schedule ();
-        if (schedule.Enabled)
-        {
-            TaskChangeResult migration = await UpdateTaskScheduler.MigrateAsync (
-                publishedPath, schedule.DailyAt, schedule.NotifyOnChange, CancellationToken.None);
-            if (migration.Error is not null) Console.Error.WriteLine ($"Scheduled check migration failed: {migration.Error}");
-            if (migration.Warning is not null) Console.Error.WriteLine ($"Scheduled check migration warning: {migration.Warning}");
-        }
-    }
-    catch (Exception ex) { Console.Error.WriteLine ($"Scheduled check migration failed: {ex.Message}"); }
-}
-
 // Theme selection: --theme=<amber|sage|moss|rose>. Defaults to Sage. An unrecognized id
 // degrades gracefully (stderr note, keep the default) rather than crashing. TryApply already
 // registers schemes on success, so Register() below only needs to run for the default case.

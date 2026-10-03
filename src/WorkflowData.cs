@@ -90,27 +90,6 @@ public sealed class WorkflowStore
     {
         Root = root ?? Path.Combine (
             Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetScout");
-        if (root is null)
-        {
-            string previous = Path.Combine (
-                Environment.GetFolderPath (Environment.SpecialFolder.LocalApplicationData), "WinGetTuiSharp");
-            MigrateLocalData (previous, Root);
-        }
-    }
-
-    internal static void MigrateLocalData (string previous, string destination)
-    {
-        if (!Directory.Exists (previous)) return;
-        try { Directory.CreateDirectory (destination); }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return; }
-        foreach (string file in new[] { "schedule.json", "latest-check.json", "last-successful-check.json", "sets.json", "runs.json" })
-        {
-            string source = Path.Combine (previous, file);
-            string target = Path.Combine (destination, file);
-            if (File.Exists (target) || !File.Exists (source)) continue;
-            try { File.Copy (source, target); }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
-        }
     }
 
     private string PathFor (string file) => Path.Combine (Root, file);
